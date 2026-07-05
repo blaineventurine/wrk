@@ -1,0 +1,10 @@
+resources:
+  - name: bundler
+    path: vendor/bundle
+
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            BUNDLE_PATH: "{shared}"

@@ -1,0 +1,10 @@
+resources:
+  - name: env
+    path: .env
+
+  - name: node
+    path: node_modules
+
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/package-lock.json"

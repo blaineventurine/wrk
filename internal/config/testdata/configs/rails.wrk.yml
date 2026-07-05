@@ -1,0 +1,18 @@
+resources:
+  - name: env
+    path: .env
+
+  - name: bundler
+    path: vendor/bundle
+
+    fingerprint:
+      - "{root}/Gemfile"
+      - "{root}/Gemfile.lock"
+      - "{root}/.ruby-version"
+
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            BUNDLE_PATH: "{shared}"

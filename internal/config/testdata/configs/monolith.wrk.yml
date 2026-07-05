@@ -1,0 +1,30 @@
+resources:
+  - name: environment
+    path: ".env*"
+
+  - name: bundler
+    path: vendor/bundle
+
+    fingerprint:
+      - "{root}/Gemfile"
+      - "{root}/Gemfile.lock"
+      - "{root}/.ruby-version"
+
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            BUNDLE_PATH: "{shared}"
+
+  - name: yarn
+    path: node_modules
+
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/yarn.lock"
+
+    hooks:
+      initialize:
+        - run: yarn install --immutable
+          cwd: "{root}"

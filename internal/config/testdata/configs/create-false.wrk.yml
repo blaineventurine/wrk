@@ -1,0 +1,4 @@
+resources:
+  - name: env
+    path: .env
+    create: false
