@@ -1,0 +1,419 @@
+# wrk
+
+Provision shared resources across Jujutsu workspaces and Git worktrees.
+
+`wrk` manages ignored resources such as `.env`, `node_modules`, and
+`vendor/bundle`, allowing multiple workspaces to share them without
+duplicating installations.
+
+It never modifies tracked project files or repository history.
+
+---
+
+## Motivation
+
+Modern projects often rely on large ignored resources:
+
+- `.env`
+- `node_modules`
+- `vendor/bundle`
+- `.venv`
+- build caches
+
+Every new workspace normally requires recreating those resources.
+
+`wrk` stores them once and links them into every workspace.
+
+For dependency installations, `wrk` fingerprints the dependency manifests
+so multiple versions can safely coexist.
+
+---
+
+## How it works
+
+```
+                 Workspace A
+              ┌──────────────┐
+              │ node_modules │
+              └──────┬───────┘
+                     │
+                     │ symlink
+                     ▼
+   ~/Library/Application Support/wrk/
+       repositories/
+           github.com/
+               my-org/
+                   project/
+                       node_modules/
+                           5fd1d0d610ba6c17/
+                     ▲
+                     │
+                     │ symlink
+              ┌──────┴───────┐
+              │ node_modules │
+              └──────────────┘
+                 Workspace B
+```
+
+The first workspace initializes the shared resource.
+
+Every subsequent workspace simply links to it.
+
+---
+
+## Features
+
+- Share files and directories across workspaces.
+- Fingerprint resources using one or more files.
+- Automatic workspace provisioning.
+- Automatic repository preparation.
+- Works with Jujutsu workspaces and Git worktrees.
+- Dry-run mode.
+- Fully reversible (`wrk detach`).
+
+---
+
+## Installation
+
+```bash
+go install github.com/<you>/wrk/cmd/wrk@latest
+```
+
+or build from source:
+
+```bash
+just build
+```
+
+---
+
+## Configuration
+
+Create a `.wrk.yml` in the repository root.
+
+```yaml
+resources:
+  - name: env
+    path: .env
+
+  - name: bundler
+    path: vendor/bundle
+
+    fingerprint:
+      - "{root}/Gemfile"
+      - "{root}/Gemfile.lock"
+
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            BUNDLE_PATH: "{shared}"
+```
+
+Additional examples are available in the `examples/` directory.
+
+---
+
+## Resource lifecycle
+
+For every configured resource:
+
+```
+Shared resource exists?
+
+    Yes
+        │
+        ▼
+    Link into workspace.
+
+    No
+        │
+        ▼
+    Run initialize hook (if configured).
+        │
+        ▼
+    Link into workspace.
+```
+
+Resources without an `initialize` hook are expected to already exist.
+
+For example:
+
+```yaml
+resources:
+  - name: env
+    path: .env
+```
+
+`wrk` will never create `.env`.
+
+On the other hand:
+
+```yaml
+resources:
+  - name: bundler
+    path: vendor/bundle
+
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            BUNDLE_PATH: "{shared}"
+```
+
+If the shared bundle does not exist, `wrk` runs the initialize hook once.
+
+Subsequent workspaces simply reuse the shared copy.
+
+---
+
+## Commands
+
+Initialize or repair the current workspace:
+
+```bash
+wrk link
+```
+
+Preview the planned actions:
+
+```bash
+wrk link --dry-run
+```
+
+Create and provision a new workspace:
+
+```bash
+wrk new ../feature-auth
+```
+
+Detach the current workspace from shared resources:
+
+```bash
+wrk detach
+```
+
+Override automatic repository detection:
+
+```bash
+wrk --vcs git new ../feature
+```
+
+or
+
+```bash
+wrk --vcs jj new ../feature
+```
+
+Use a different storage location:
+
+```bash
+wrk link --storage /path/to/storage
+```
+
+---
+
+## Placeholders
+
+| Placeholder | Description |
+|--------------|-------------|
+| `{root}` | Repository root |
+| `{parent}` | Parent directory of the matched resource |
+| `{match}` | Matched workspace path |
+| `{shared}` | Shared storage path |
+
+---
+
+## Fingerprinting
+
+Some resources depend on the state of the repository.
+
+For example, `node_modules` depends on:
+
+```yaml
+fingerprint:
+  - "{root}/package.json"
+  - "{root}/yarn.lock"
+```
+
+Whenever any fingerprint input changes, `wrk` computes a new fingerprint and
+uses a different shared storage location.
+
+For example:
+
+```
+package.json
+yarn.lock
+
+        │
+        ▼
+
+5fd1d0d610ba6c17
+
+        │
+        ▼
+
+<data directory>/wrk/
+
+    repositories/
+
+        github.com/
+
+            my-org/
+
+                monolith/
+
+                    node_modules/
+
+                        5fd1d0d610ba6c17/
+```
+
+If the dependency manifests later change:
+
+```
+package.json
+yarn.lock
+
+        │
+        ▼
+
+8a71d8b219fd0031
+
+        │
+        ▼
+
+<data directory>/wrk/
+
+    repositories/
+
+        github.com/
+
+            my-org/
+
+                monolith/
+
+                    node_modules/
+
+                        5fd1d0d610ba6c17/
+
+                        8a71d8b219fd0031/
+```
+
+Both versions can exist simultaneously.
+
+Creating a workspace on an older branch will automatically link to the
+matching dependency installation if it already exists.
+
+Resources without a `fingerprint` section always use a single shared copy.
+
+For example:
+
+```yaml
+resources:
+  - name: env
+    path: .env
+```
+
+is always stored as:
+
+```
+<data directory>/wrk/
+
+    repositories/
+
+        github.com/
+
+            my-org/
+
+                monolith/
+
+                    .env
+```
+
+### How fingerprints are computed
+
+A fingerprint is based on:
+
+- The repository-relative path of each fingerprint input.
+- The contents of each fingerprint input.
+- Whether each fingerprint input exists.
+
+Absolute filesystem paths are intentionally ignored.
+
+This means that different Jujutsu workspaces (or Git worktrees) for the same
+repository always compute the same fingerprint when their dependency manifests
+are identical.
+
+### Choosing fingerprint inputs
+
+Fingerprint only the files that determine the resource's contents.
+
+Typical examples:
+
+| Resource | Fingerprint |
+|----------|-------------|
+| `node_modules` | `package.json`, `yarn.lock`, `package-lock.json`, `pnpm-lock.yaml` |
+| `vendor/bundle` | `Gemfile`, `Gemfile.lock`, `.ruby-version` |
+| `.venv` | `pyproject.toml`, `poetry.lock`, `uv.lock`, `requirements.txt` |
+
+Avoid fingerprinting files that change frequently but do not affect the
+resource itself.
+
+## Typical workflow
+
+Initialize the primary workspace once:
+
+```bash
+wrk link
+```
+
+Create a new feature workspace:
+
+```bash
+wrk new ../feature-auth
+
+cd ../feature-auth
+```
+
+The new workspace is immediately ready to use.
+
+Need to experiment independently?
+
+```bash
+wrk detach
+```
+
+The workspace now has its own local copies of every managed resource.
+
+Reconnect later:
+
+```bash
+wrk link
+```
+
+---
+
+## Philosophy
+
+`wrk` intentionally has a small scope.
+
+It does not:
+
+- manage dependencies
+- replace package managers
+- version shared resources
+- modify tracked project files
+- modify repository history
+
+Instead, it ensures every workspace contains the configured shared resources
+and lets package managers do what they already do well.
+
+---
+
+## Status
+
+`wrk` is experimental but intended for daily use.
+
+Feedback and real-world workflows are welcome.
