@@ -10,5 +10,6 @@ func DefaultStorage() string {
 	return filepath.Join(
 		xdg.DataHome,
 		"wrk",
+		"repositories",
 	)
 }

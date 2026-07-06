@@ -20,8 +20,14 @@ func Inspect(
 		case info.Mode()&os.ModeSymlink != 0:
 			state.WorkspaceSymlink = true
 
-			target, err := filepath.EvalSymlinks(workspacePath)
-			if err == nil {
+			// The literal target, exactly as written. Used for the
+			// "already linked" comparison.
+			if link, err := os.Readlink(workspacePath); err == nil {
+				state.WorkspaceLinkText = link
+			}
+
+			// The fully resolved target, when it exists.
+			if target, err := filepath.EvalSymlinks(workspacePath); err == nil {
 				state.WorkspaceTarget = target
 			}
 

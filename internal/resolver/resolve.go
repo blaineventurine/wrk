@@ -69,11 +69,16 @@ func newInstance(
 		return ResourceInstance{}, err
 	}
 
-	ctx := placeholders.Context{
-		Root:   root,
-		Parent: filepath.Dir(workspacePath),
-		Match:  workspacePath,
+	instance := ResourceInstance{
+		Resource:      resource,
+		Root:          root,
+		WorkspacePath: workspacePath,
+		RelativePath:  filepath.ToSlash(relative),
 	}
+
+	// Fingerprint inputs are expanded with an empty shared path: a
+	// fingerprint must never depend on the shared storage location.
+	ctx := instance.Context("")
 
 	fingerprintInputs := make(
 		[]string,
@@ -84,24 +89,13 @@ func newInstance(
 	for _, input := range resource.Fingerprint {
 		fingerprintInputs = append(
 			fingerprintInputs,
-			placeholders.Expand(
-				input,
-				ctx,
-			),
+			placeholders.Expand(input, ctx),
 		)
 	}
 
-	return ResourceInstance{
-		Resource: resource,
+	instance.FingerprintInputs = fingerprintInputs
 
-		Root: root,
-
-		WorkspacePath: workspacePath,
-
-		RelativePath: filepath.ToSlash(relative),
-
-		FingerprintInputs: fingerprintInputs,
-	}, nil
+	return instance, nil
 }
 
 func isGlob(path string) bool {

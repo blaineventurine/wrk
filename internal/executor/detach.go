@@ -4,14 +4,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-
-	dircopy "github.com/otiai10/copy"
 )
 
-func detach(
-	link string,
-	target string,
-) error {
+func detach(link, target string) error {
 	tmp := link + ".wrk-tmp"
 	backup := link + ".wrk-backup"
 
@@ -19,49 +14,22 @@ func detach(
 	_ = os.RemoveAll(tmp)
 	_ = os.RemoveAll(backup)
 
-	info, err := os.Stat(target)
-	if err != nil {
+	if err := copyPath(target, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
 		return err
 	}
 
-	if info.IsDir() {
-		if err := dircopy.Copy(
-			target,
-			tmp,
-		); err != nil {
-			return err
-		}
-	} else {
-		if err := copyFile(
-			target,
-			tmp,
-		); err != nil {
-			return err
-		}
-	}
-
 	// Move the symlink out of the way.
-	if err := os.Rename(
-		link,
-		backup,
-	); err != nil {
+	if err := os.Rename(link, backup); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
 
 	// Move the copied resource into place.
-	if err := os.Rename(
-		tmp,
-		link,
-	); err != nil {
+	if err := os.Rename(tmp, link); err != nil {
 		// Best-effort rollback.
-		_ = os.Rename(
-			backup,
-			link,
-		)
-
+		_ = os.Rename(backup, link)
 		_ = os.RemoveAll(tmp)
-
 		return err
 	}
 

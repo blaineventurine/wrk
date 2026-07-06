@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"wrk/internal/app"
 )
 
 var (
@@ -33,5 +35,12 @@ func init() {
 		"vcs",
 		"auto",
 		"Repository type (auto, git, jj)",
+	)
+
+	rootCmd.PersistentFlags().StringVar(
+		&storageRoot,
+		"storage",
+		app.DefaultStorage(),
+		"Shared storage location",
 	)
 }

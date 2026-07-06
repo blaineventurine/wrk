@@ -6,6 +6,69 @@ import (
 	"testing"
 )
 
+func TestInspectSymlinkCapturesLinkText(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real shared target so EvalSymlinks resolves.
+	shared := filepath.Join(dir, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := Inspect(link, shared)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+
+	if !state.WorkspaceSymlink {
+		t.Fatalf("expected WorkspaceSymlink true")
+	}
+
+	// Link text is exactly what we wrote.
+	if state.WorkspaceLinkText != shared {
+		t.Errorf("WorkspaceLinkText = %q, want %q", state.WorkspaceLinkText, shared)
+	}
+
+	if !state.SharedExists {
+		t.Errorf("expected SharedExists true")
+	}
+}
+
+func TestInspectDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := filepath.Join(dir, "does-not-exist")
+	link := filepath.Join(dir, "link")
+
+	if err := os.Symlink(missing, link); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := Inspect(link, missing)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+
+	if !state.WorkspaceSymlink {
+		t.Fatalf("expected WorkspaceSymlink true")
+	}
+
+	// Link text is still captured even though the target is missing...
+	if state.WorkspaceLinkText != missing {
+		t.Errorf("WorkspaceLinkText = %q, want %q", state.WorkspaceLinkText, missing)
+	}
+
+	// ...but the resolved target is empty because EvalSymlinks fails.
+	if state.WorkspaceTarget != "" {
+		t.Errorf("WorkspaceTarget = %q, want empty", state.WorkspaceTarget)
+	}
+}
+
 func TestInspectMissingWorkspace(t *testing.T) {
 	root := t.TempDir()
 

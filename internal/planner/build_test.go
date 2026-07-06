@@ -26,13 +26,16 @@ func sharedLocation() location.SharedLocation {
 }
 
 func TestAlreadyLinked(t *testing.T) {
+	loc := sharedLocation()
+
 	plan := BuildLink(
 		instance(),
-		sharedLocation(),
+		loc,
 		workspace.State{
-			WorkspaceSymlink: true,
-			WorkspaceTarget:  "/shared/node_modules/abc123",
-			SharedExists:     true,
+			WorkspaceSymlink:  true,
+			WorkspaceLinkText: loc.Path,
+			WorkspaceTarget:   loc.Path,
+			SharedExists:      true,
 		},
 	)
 

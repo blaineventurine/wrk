@@ -29,12 +29,10 @@ func repositoryID(
 }
 
 func originURL(root string) string {
-	out, err := exec.Command(
-		"git",
-		"remote",
-		"get-url",
-		"origin",
-	).Output()
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = root
+
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -43,21 +41,17 @@ func originURL(root string) string {
 }
 
 func gitCommonDir(root string) (string, error) {
-	out, err := exec.Command(
-		"jj",
-		"git",
-		"root",
-	).Output()
+	jj := exec.Command("jj", "git", "root")
+	jj.Dir = root
 
-	if err == nil {
+	if out, err := jj.Output(); err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
 
-	out, err = exec.Command(
-		"git",
-		"rev-parse",
-		"--git-common-dir",
-	).Output()
+	git := exec.Command("git", "rev-parse", "--git-common-dir")
+	git.Dir = root
+
+	out, err := git.Output()
 	if err != nil {
 		return "", err
 	}

@@ -19,7 +19,7 @@ func BuildLink(
 	workspace := instance.WorkspacePath
 
 	if state.WorkspaceSymlink {
-		if state.WorkspaceTarget == loc.Path {
+		if state.WorkspaceLinkText == loc.Path {
 			return plan
 		}
 
@@ -88,6 +88,7 @@ func BuildLink(
 			instance,
 			InitializeResource{
 				Description: "Initialize " + instance.Resource.Name,
+				Context:     instance.Context(loc.Path),
 				Commands:    initialize,
 			},
 		)

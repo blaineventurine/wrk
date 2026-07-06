@@ -7,7 +7,6 @@ import (
 	"wrk/internal/resolver"
 )
 
-// For returns the shared storage location for a resource instance.
 func For(
 	storageRoot string,
 	repositoryID string,
@@ -21,23 +20,24 @@ func For(
 		),
 	}
 
-	if len(instance.FingerprintInputs) == 0 {
-		return location, nil
+	if len(instance.FingerprintInputs) > 0 {
+		fp, err := fingerprint.Fingerprint(
+			instance.Root,
+			instance.FingerprintInputs...,
+		)
+		if err != nil {
+			return SharedLocation{}, err
+		}
+
+		location.Fingerprint = fp
+		location.Path = filepath.Join(location.Path, fp)
 	}
 
-	fp, err := fingerprint.Fingerprint(
-		instance.Root,
-		instance.FingerprintInputs...,
-	)
+	abs, err := filepath.Abs(location.Path)
 	if err != nil {
 		return SharedLocation{}, err
 	}
-
-	location.Fingerprint = fp
-	location.Path = filepath.Join(
-		location.Path,
-		fp,
-	)
+	location.Path = abs
 
 	return location, nil
 }

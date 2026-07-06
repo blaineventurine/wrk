@@ -42,7 +42,7 @@ func Execute(plan planner.Plan) error {
 				return err
 			}
 
-			if err := os.Rename(
+			if err := move(
 				action.Source,
 				action.Destination,
 			); err != nil {
