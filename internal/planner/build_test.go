@@ -97,6 +97,23 @@ func TestExistingWorkspaceMovesToShared(t *testing.T) {
 	}
 }
 
+func TestHasConflicts(t *testing.T) {
+	var plan Plan
+
+	if plan.HasConflicts() {
+		t.Fatal("expected false")
+	}
+
+	plan.Conflicts = append(
+		plan.Conflicts,
+		Conflict{},
+	)
+
+	if !plan.HasConflicts() {
+		t.Fatal("expected true")
+	}
+}
+
 func TestConflictWhenWorkspaceAndSharedExist(t *testing.T) {
 	plan := BuildLink(
 		instance(),
