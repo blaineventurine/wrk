@@ -62,7 +62,7 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 			line += "\t" + humanSize(r.Size)
 		}
 
-		fmt.Fprintln(tw, line)
+		_, _ = fmt.Fprintln(tw, line)
 	}
 
 	return nil

@@ -50,7 +50,7 @@ func printWorkspaces(w *os.File, summaries []engine.WorkspaceSummary) error {
 			marker = "*"
 		}
 
-		fmt.Fprintf(
+		_, _ = fmt.Fprintf(
 			tw, "%s %s\t%s\t%s\n",
 			marker,
 			s.Root,
