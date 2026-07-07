@@ -113,6 +113,56 @@ resources:
 
 Additional examples are available in the `examples/` directory.
 
+### Command execution
+
+Hook `run` strings are **tokenized**, not interpreted by a shell.
+
+`wrk` splits `run` into arguments using shell-like word splitting (quotes and
+escapes are respected) and executes the command directly. It does **not**
+invoke `sh -c`, so shell-only features are unavailable:
+
+| Not supported in `run`            | Use instead                                  |
+|-----------------------------------|----------------------------------------------|
+| `FOO=bar cmd`                     | the `env:` map                               |
+| `cmd-a && cmd-b`                  | separate `run:` entries, or an explicit shell|
+| `cmd | other`,`cmd > file`       | an explicit shell                            |
+| `$VAR` expansion                  | placeholders (`{root}`, `{shared}`, …) or `env:` |
+
+Set environment variables with `env:`:
+
+```yaml
+hooks:
+  initialize:
+    - run: bundle install
+      cwd: "{root}"
+      env:
+        BUNDLE_PATH: "{shared}"
+```
+
+Run multiple steps as separate entries (each runs in order, and any failure
+aborts the hook):
+
+```yaml
+hooks:
+  initialize:
+    - run: yarn install --frozen-lockfile
+      cwd: "{root}"
+    - run: yarn build
+      cwd: "{root}"
+```
+
+If you genuinely need shell features, invoke a shell explicitly:
+
+```yaml
+hooks:
+  initialize:
+    - run: sh -c "yarn install && yarn build"
+      cwd: "{root}"
+```
+
+Placeholders are expanded in `run`, `cwd`, and every `env` value before
+`run` is tokenized.
+
 ---
 
 ## Resource lifecycle

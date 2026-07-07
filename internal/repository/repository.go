@@ -9,22 +9,29 @@ type Repository struct {
 	RepositoryID string
 
 	// metadataDir is the repository metadata directory (for example, the
-	// common Git directory). It is private because only this package
-	// needs to know where repository-local metadata lives.
+	// common Git directory). Private: only this package needs it.
 	metadataDir string
-	VCS         VCS
+
+	// backend implements VCS-specific operations and is the single source
+	// of truth for which VCS this repository uses.
+	backend backend
 }
 
 func newRepository(
 	root string,
 	repositoryID string,
 	metadataDir string,
-	vcs VCS,
+	backend backend,
 ) *Repository {
 	return &Repository{
 		Root:         root,
 		RepositoryID: repositoryID,
 		metadataDir:  metadataDir,
-		VCS:          vcs,
+		backend:      backend,
 	}
+}
+
+// VCS returns the detected version-control system.
+func (r *Repository) VCS() VCS {
+	return r.backend.kind()
 }

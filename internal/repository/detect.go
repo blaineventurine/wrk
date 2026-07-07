@@ -7,42 +7,33 @@ import (
 )
 
 // Detect discovers the repository containing start.
-func Detect(
-	start string,
-	preferred VCS,
-) (*Repository, error) {
+func Detect(start string, preferred VCS) (*Repository, error) {
 	root, err := findRoot(start)
 	if err != nil {
 		return nil, err
 	}
 
-	vcs, err := detectVCS(
-		root,
-		preferred,
-	)
+	vcs, err := detectVCS(root, preferred)
 	if err != nil {
 		return nil, err
 	}
 
-	metadataDir, err := gitCommonDir(root)
+	b, err := backendFor(vcs)
 	if err != nil {
 		return nil, err
 	}
 
-	repositoryID, err := repositoryID(
-		root,
-		metadataDir,
-	)
+	metadataDir, err := b.commonDir(root)
 	if err != nil {
 		return nil, err
 	}
 
-	return newRepository(
-		root,
-		repositoryID,
-		metadataDir,
-		vcs,
-	), nil
+	id, err := repositoryID(root, metadataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return newRepository(root, id, metadataDir, b), nil
 }
 
 func findRoot(start string) (string, error) {
@@ -66,29 +57,22 @@ func findRoot(start string) (string, error) {
 		current = parent
 	}
 
-	return "", fmt.Errorf(
-		"not inside a Git or Jujutsu repository",
-	)
+	return "", fmt.Errorf("not inside a Git or Jujutsu repository")
 }
 
-func detectVCS(
-	root string,
-	preferred VCS,
-) (VCS, error) {
+func detectVCS(root string, preferred VCS) (VCS, error) {
 	hasGit := exists(filepath.Join(root, ".git"))
 	hasJJ := exists(filepath.Join(root, ".jj"))
 
 	switch preferred {
-
 	case Auto:
 		switch {
 		case hasGit && !hasJJ:
 			return Git, nil
-
 		case hasJJ && !hasGit:
 			return JJ, nil
-
 		case hasGit && hasJJ:
+			// Colocated repository: prefer jj.
 			return JJ, nil
 		}
 
@@ -96,25 +80,16 @@ func detectVCS(
 		if hasGit {
 			return Git, nil
 		}
-
-		return "", fmt.Errorf(
-			"repository is not Git-managed",
-		)
+		return "", fmt.Errorf("repository is not Git-managed")
 
 	case JJ:
 		if hasJJ {
 			return JJ, nil
 		}
-
-		return "", fmt.Errorf(
-			"repository is not Jujutsu-managed",
-		)
+		return "", fmt.Errorf("repository is not Jujutsu-managed")
 	}
 
-	return "", fmt.Errorf(
-		"unsupported VCS %q",
-		preferred,
-	)
+	return "", fmt.Errorf("unsupported VCS %q", preferred)
 }
 
 func exists(path string) bool {

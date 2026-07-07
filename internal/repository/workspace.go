@@ -3,69 +3,33 @@ package repository
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
-func (r *Repository) CreateWorkspace(
-	destination string,
-) (*Repository, error) {
-	workspace := destination
-
-	if !filepath.IsAbs(workspace) {
-		workspace = filepath.Join(
-			r.Root,
-			workspace,
-		)
+// CreateWorkspace creates a new workspace/worktree at destination and
+// returns the repository rooted there.
+func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
+	dest := destination
+	if !filepath.IsAbs(dest) {
+		dest = filepath.Join(r.Root, dest)
 	}
+	dest = filepath.Clean(dest)
 
-	workspace = filepath.Clean(workspace)
-
-	if _, err := os.Stat(workspace); err == nil {
-		return nil, fmt.Errorf(
-			"destination already exists: %s",
-			workspace,
-		)
+	if _, err := os.Stat(dest); err == nil {
+		return nil, fmt.Errorf("destination already exists: %s", dest)
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 
-	var cmd *exec.Cmd
-
-	switch r.VCS {
-	case JJ:
-		cmd = exec.Command(
-			"jj",
-			"workspace",
-			"add",
-			workspace,
-		)
-
-	case Git:
-		cmd = exec.Command(
-			"git",
-			"worktree",
-			"add",
-			workspace,
-		)
-
-	default:
-		return nil, fmt.Errorf(
-			"unsupported VCS %q",
-			r.VCS,
-		)
-	}
-
-	cmd.Dir = r.Root
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := r.backend.createWorkspace(r.Root, dest); err != nil {
 		return nil, err
 	}
 
-	return Detect(
-		workspace,
-		r.VCS,
-	)
+	return Detect(dest, r.VCS())
+}
+
+// Workspaces returns the roots of every live workspace/worktree for this
+// repository, including the primary one.
+func (r *Repository) Workspaces() ([]string, error) {
+	return r.backend.workspaces(r.Root)
 }

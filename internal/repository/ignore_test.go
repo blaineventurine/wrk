@@ -7,19 +7,11 @@ import (
 	"testing"
 )
 
-func readExclude(
-	t *testing.T,
-	root string,
-) string {
+func readExclude(t *testing.T, root string) string {
 	t.Helper()
 
 	data, err := os.ReadFile(
-		filepath.Join(
-			root,
-			".git",
-			"info",
-			"exclude",
-		),
+		filepath.Join(root, ".git", "info", "exclude"),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -35,19 +27,14 @@ func TestPrepareCreatesExcludeFile(t *testing.T) {
 		root,
 		"local/test",
 		filepath.Join(root, ".git"),
-		Git,
+		gitBackend{},
 	)
 
 	if err := repo.Prepare(".env"); err != nil {
 		t.Fatal(err)
 	}
 
-	exclude := filepath.Join(
-		root,
-		".git",
-		"info",
-		"exclude",
-	)
+	exclude := filepath.Join(root, ".git", "info", "exclude")
 
 	if _, err := os.Stat(exclude); err != nil {
 		t.Fatal(err)
@@ -61,13 +48,10 @@ func TestPrepareAddsPatterns(t *testing.T) {
 		root,
 		"local/test",
 		filepath.Join(root, ".git"),
-		Git,
+		gitBackend{},
 	)
 
-	if err := repo.Prepare(
-		".env",
-		"node_modules",
-	); err != nil {
+	if err := repo.Prepare(".env", "node_modules"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,20 +73,14 @@ func TestPrepareIsIdempotent(t *testing.T) {
 		root,
 		"local/test",
 		filepath.Join(root, ".git"),
-		Git,
+		gitBackend{},
 	)
 
-	if err := repo.Prepare(
-		".env",
-		"node_modules",
-	); err != nil {
+	if err := repo.Prepare(".env", "node_modules"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repo.Prepare(
-		".env",
-		"node_modules",
-	); err != nil {
+	if err := repo.Prepare(".env", "node_modules"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -120,17 +98,9 @@ func TestPrepareIsIdempotent(t *testing.T) {
 func TestPrepareFailsForDirectoryOnlyPattern(t *testing.T) {
 	root := t.TempDir()
 
-	exclude := filepath.Join(
-		root,
-		".git",
-		"info",
-		"exclude",
-	)
+	exclude := filepath.Join(root, ".git", "info", "exclude")
 
-	if err := os.MkdirAll(
-		filepath.Dir(exclude),
-		0o755,
-	); err != nil {
+	if err := os.MkdirAll(filepath.Dir(exclude), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,7 +116,7 @@ func TestPrepareFailsForDirectoryOnlyPattern(t *testing.T) {
 		root,
 		"local/test",
 		filepath.Join(root, ".git"),
-		Git,
+		gitBackend{},
 	)
 
 	if err := repo.Prepare("node_modules"); err == nil {

@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"path/filepath"
 	"testing"
 
 	"wrk/internal/config"
@@ -149,21 +150,51 @@ func TestMissingEverythingWithoutInitializeConflicts(t *testing.T) {
 		workspace.State{},
 	)
 
-	if len(plan.Actions) != 1 {
+	// A conflict must not queue any actions: nothing should be created
+	// when there is nothing to provision from.
+	if len(plan.Actions) != 0 {
 		t.Fatalf(
-			"expected 1 actions, got %d",
+			"expected 0 actions, got %d: %+v",
 			len(plan.Actions),
+			plan.Actions,
 		)
-	}
-
-	if _, ok := plan.Actions[0].Action.(CreateDirectory); !ok {
-		t.Fatal("expected CreateDirectory")
 	}
 
 	if len(plan.Conflicts) != 1 {
 		t.Fatalf(
 			"expected 1 conflict, got %d",
 			len(plan.Conflicts),
+		)
+	}
+}
+
+func TestMissingEverythingWithCreateFalseSkips(t *testing.T) {
+	create := false
+
+	inst := instance()
+	inst.Resource.Create = &create // create: false → provisioned out-of-band
+
+	plan := BuildLink(
+		inst,
+		sharedLocation(),
+		workspace.State{},
+	)
+
+	// Nothing to adopt, no initialize hook, and creation is disabled:
+	// the instance is skipped without blocking the rest of the plan.
+	if len(plan.Actions) != 0 {
+		t.Fatalf(
+			"expected 0 actions, got %d: %+v",
+			len(plan.Actions),
+			plan.Actions,
+		)
+	}
+
+	if len(plan.Conflicts) != 0 {
+		t.Fatalf(
+			"expected 0 conflicts, got %d: %+v",
+			len(plan.Conflicts),
+			plan.Conflicts,
 		)
 	}
 }
@@ -230,4 +261,89 @@ func TestWrongSymlinkRelinks(t *testing.T) {
 	if _, ok := plan.Actions[1].Action.(Symlink); !ok {
 		t.Fatal("expected Symlink")
 	}
+}
+
+func TestBuildLinkMissingNoHookCreateTrueIsConflict(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+
+	instance := resolver.ResourceInstance{
+		Resource: config.Resource{
+			Name: "env",
+			Path: ".env",
+			// Create defaults to true.
+		},
+		Root:          root,
+		WorkspacePath: filepath.Join(root, ".env"),
+		RelativePath:  ".env",
+	}
+
+	loc := location.SharedLocation{Path: filepath.FromSlash("/storage/repo/.env")}
+
+	plan := BuildLink(instance, loc, workspace.State{})
+
+	if len(plan.Conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %d: %+v", len(plan.Conflicts), plan.Conflicts)
+	}
+	if len(plan.Actions) != 0 {
+		t.Fatalf("expected no actions on conflict, got %+v", plan.Actions)
+	}
+}
+
+func TestBuildLinkMissingNoHookCreateFalseSkips(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+	create := false
+
+	instance := resolver.ResourceInstance{
+		Resource: config.Resource{
+			Name:   "env",
+			Path:   ".env",
+			Create: &create, // create: false
+		},
+		Root:          root,
+		WorkspacePath: filepath.Join(root, ".env"),
+		RelativePath:  ".env",
+	}
+
+	loc := location.SharedLocation{Path: filepath.FromSlash("/storage/repo/.env")}
+
+	plan := BuildLink(instance, loc, workspace.State{})
+
+	if len(plan.Conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %+v", plan.Conflicts)
+	}
+	if len(plan.Actions) != 0 {
+		t.Fatalf("expected no actions (skip), got %+v", plan.Actions)
+	}
+}
+
+func TestBuildLinkCreateFalseStillAdoptsExistingCopy(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+	create := false
+	sharedPath := filepath.FromSlash("/storage/repo/.env")
+
+	instance := resolver.ResourceInstance{
+		Resource: config.Resource{
+			Name:   "env",
+			Path:   ".env",
+			Create: &create,
+		},
+		Root:          root,
+		WorkspacePath: filepath.Join(root, ".env"),
+		RelativePath:  ".env",
+	}
+
+	loc := location.SharedLocation{Path: sharedPath}
+
+	// A real workspace copy exists; create:false must NOT prevent adopting it.
+	state := workspace.State{WorkspaceExists: true}
+
+	plan := BuildLink(instance, loc, state)
+
+	if len(plan.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", plan.Conflicts)
+	}
+
+	// Expect CreateDirectory + Move + Symlink.
+	_ = findAction[Move](t, plan)
+	_ = findAction[Symlink](t, plan)
 }
