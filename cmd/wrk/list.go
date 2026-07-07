@@ -39,13 +39,15 @@ var listCmd = &cobra.Command{
 
 func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	defer tw.Flush()
+	defer func() {
+		_ = tw.Flush()
+	}()
 
 	header := "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tSHARED PATH"
 	if withSize {
 		header += "\tSIZE"
 	}
-	fmt.Fprintln(tw, header)
+	_, _ = fmt.Fprintln(tw, header)
 
 	for _, r := range rows {
 		fp := "no"

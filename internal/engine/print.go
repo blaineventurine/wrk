@@ -9,7 +9,29 @@ import (
 	"github.com/blaineventurine/wrk/internal/planner"
 )
 
+// writer wraps an io.Writer to accumulate the first write error.
+type writer struct {
+	w   io.Writer
+	err error
+}
+
+func (x *writer) printf(format string, args ...any) {
+	if x.err != nil {
+		return
+	}
+	_, x.err = fmt.Fprintf(x.w, format, args...)
+}
+
+func (x *writer) println(args ...any) {
+	if x.err != nil {
+		return
+	}
+	_, x.err = fmt.Fprintln(x.w, args...)
+}
+
 func printPlan(w io.Writer, plan planner.Plan) error {
+	out := &writer{w: w}
+
 	// Group actions by resource name, preserving first-seen order.
 	order := []string{}
 	byResource := map[string][]planner.PlannedAction{}
@@ -25,35 +47,35 @@ func printPlan(w io.Writer, plan planner.Plan) error {
 	destructive := false
 
 	for _, name := range order {
-		fmt.Fprintf(w, "\n[%s]\n", name)
+		out.printf("\n[%s]\n", name)
 		for _, pa := range byResource[name] {
 			desc, warn := describeAction(pa.Action)
 			if warn {
 				destructive = true
-				fmt.Fprintf(w, "  ⚠ %s\n", desc)
+				out.printf("  ⚠ %s\n", desc)
 			} else {
-				fmt.Fprintf(w, "  • %s\n", desc)
+				out.printf("  • %s\n", desc)
 			}
 		}
 	}
 
 	if len(plan.Conflicts) > 0 {
-		fmt.Fprintln(w, "\nConflicts:")
+		out.println("\nConflicts:")
 		// stable ordering for readable output
 		sort.SliceStable(plan.Conflicts, func(i, j int) bool {
 			return plan.Conflicts[i].Instance.Resource.Name <
 				plan.Conflicts[j].Instance.Resource.Name
 		})
 		for _, c := range plan.Conflicts {
-			fmt.Fprintf(w, "  • [%s] %s\n", c.Instance.Resource.Name, c.Message)
+			out.printf("  • [%s] %s\n", c.Instance.Resource.Name, c.Message)
 		}
 	}
 
 	if destructive {
-		fmt.Fprintln(w, "\n⚠ This plan will permanently discard independent local copies.")
+		out.println("\n⚠ This plan will permanently discard independent local copies.")
 	}
 
-	return nil
+	return out.err
 }
 
 // describeAction returns a human-readable description and whether the action

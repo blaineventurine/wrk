@@ -14,7 +14,18 @@ func Link(repo *repository.Repository, options Options) error {
 	if err != nil {
 		return err
 	}
-	return runPlan(plan, options)
+
+	if err := runPlan(plan, options); err != nil {
+		return err
+	}
+
+	if options.DryRun {
+		return nil
+	}
+
+	// A successful link reconnects the workspace to shared storage, so
+	// clear any prior detach record.
+	return clearDetached(repo)
 }
 
 // Relink reconnects the current workspace to shared storage, discarding any
@@ -24,7 +35,16 @@ func Relink(repo *repository.Repository, options Options) error {
 	if err != nil {
 		return err
 	}
-	return runPlan(plan, options)
+
+	if err := runPlan(plan, options); err != nil {
+		return err
+	}
+
+	if options.DryRun {
+		return nil
+	}
+
+	return clearDetached(repo)
 }
 
 // runPlan prints, validates, and (unless dry-run) executes a plan.

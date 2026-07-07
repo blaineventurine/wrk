@@ -38,9 +38,11 @@ var workspacesCmd = &cobra.Command{
 
 func printWorkspaces(w *os.File, summaries []engine.WorkspaceSummary) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	defer tw.Flush()
+	defer func() {
+		_ = tw.Flush()
+	}()
 
-	fmt.Fprintln(tw, "  WORKSPACE\tSTATE\tRESOURCES")
+	_, _ = fmt.Fprintln(tw, "  WORKSPACE\tSTATE\tRESOURCES")
 
 	for _, s := range summaries {
 		marker := " "

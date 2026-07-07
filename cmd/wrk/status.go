@@ -53,10 +53,12 @@ var statusCmd = &cobra.Command{
 
 func printStatus(w *os.File, rows []engine.ResourceStatus, all bool) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	defer tw.Flush()
+	defer func() {
+		_ = tw.Flush()
+	}()
 
 	if all {
-		fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
+		_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
 		for _, r := range rows {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 				r.WorkspaceRoot, r.Resource, r.Path, r.State, short(r.Fingerprint))
@@ -64,7 +66,7 @@ func printStatus(w *os.File, rows []engine.ResourceStatus, all bool) error {
 		return nil
 	}
 
-	fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
+	_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 			r.Resource, r.Path, r.State, short(r.Fingerprint))
