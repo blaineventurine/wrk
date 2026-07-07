@@ -15,12 +15,6 @@ var (
 	vcs         string
 )
 
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
-)
-
 var rootCmd = &cobra.Command{
 	Use:           "wrk",
 	Short:         "Provision shared resources across workspaces",
@@ -36,7 +30,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Version = fmt.Sprintf("%s (commit %s, built %s)", version, commit, date)
+	rootCmd.Version = versionString()
 	rootCmd.SetVersionTemplate("{{ .Version }}\n")
 	rootCmd.PersistentFlags().StringVar(
 		&vcs,

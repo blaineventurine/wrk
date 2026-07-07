@@ -12,8 +12,6 @@ Two options — pick whichever is easier:
 
 ## Prerequisites
 
-- Access to `github.com/blaineventurine/wrk` (ask Blaine if you can't
-  see the repo)
 - For Option A: [`gh` CLI](https://cli.github.com/) authenticated with
   your GitHub account (`gh auth status` should show you as logged in)
 - For Option B: Go 1.24+ (`go version`)
@@ -246,8 +244,7 @@ rm -rf "${XDG_DATA_HOME:-$HOME/Library/Application Support}/wrk"
 ## Reporting issues
 
 During the beta, please share feedback and bug reports with Blaine
-directly, or open an issue in the private repository if you have
-access.
+directly, or open an issue in the repository.
 
 Please include:
 
