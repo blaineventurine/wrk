@@ -76,15 +76,8 @@ Every subsequent workspace simply links to it.
 
 ## Installation
 
-```bash
-go install github.com/blaineventurine/wrk/cmd/wrk@latest
-```
-
-or build from source:
-
-```bash
-just build
-```
+The tool is currently in private beta. If you have access to the
+repository, follow [`docs/INSTALL.md`](./docs/INSTALL.md).
 
 ---
 
