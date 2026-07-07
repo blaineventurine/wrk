@@ -20,6 +20,11 @@ type ResourceStatus struct {
 	Origin        config.Origin
 }
 
+type StatusReport struct {
+	Sources []string // config filenames used, e.g. [".wrk.yml", ".wrk.local.yml"]
+	Rows    []ResourceStatus
+}
+
 // State is the derived condition of a resource instance.
 type State string
 
@@ -37,7 +42,10 @@ const (
 
 // Status reports the state of every configured resource for the given
 // repository. It never mutates anything.
-func Status(repo *repository.Repository, options Options) ([]ResourceStatus, error) {
+func Status(
+	repo *repository.Repository,
+	options Options,
+) (*StatusReport, error) {
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
 		return nil, err
@@ -48,7 +56,8 @@ func Status(repo *repository.Repository, options Options) ([]ResourceStatus, err
 		return nil, err
 	}
 
-	var results []ResourceStatus
+	report := &StatusReport{Sources: cfg.Sources}
+
 	for _, resource := range cfg.Resources {
 		instances, err := resolver.Resolve(repo.Root, resource)
 		if err != nil {
@@ -65,14 +74,11 @@ func Status(repo *repository.Repository, options Options) ([]ResourceStatus, err
 			}
 
 			derived := deriveState(instance, loc, state)
-			// A conflict that we recorded as a deliberate detach is not a
-			// problem — surface it distinctly.
-			if derived == StateConflict &&
-				isDetached(reg, repo.Root, instance.RelativePath) {
+			if derived == StateConflict && isDetached(reg, repo.Root, instance.RelativePath) {
 				derived = StateDetached
 			}
 
-			results = append(results, ResourceStatus{
+			report.Rows = append(report.Rows, ResourceStatus{
 				WorkspaceRoot: repo.Root,
 				Resource:      instance.Resource.Name,
 				Path:          instance.RelativePath,
@@ -83,7 +89,45 @@ func Status(repo *repository.Repository, options Options) ([]ResourceStatus, err
 			})
 		}
 	}
-	return results, nil
+
+	return report, nil
+}
+
+// StatusAll aggregates Status across every live workspace of the
+// repository.
+func StatusAll(
+	repo *repository.Repository,
+	options Options,
+) (*StatusReport, error) {
+	roots, err := repo.Workspaces()
+	if err != nil {
+		return nil, err
+	}
+
+	report := &StatusReport{}
+	sourcesSet := map[string]bool{}
+
+	for _, root := range roots {
+		wsRepo, err := repository.Detect(root, repo.VCS())
+		if err != nil {
+			return nil, err
+		}
+
+		sub, err := Status(wsRepo, options)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, s := range sub.Sources {
+			if !sourcesSet[s] {
+				sourcesSet[s] = true
+				report.Sources = append(report.Sources, s)
+			}
+		}
+		report.Rows = append(report.Rows, sub.Rows...)
+	}
+
+	return report, nil
 }
 
 func deriveState(
@@ -116,34 +160,4 @@ func deriveState(
 		return StateExpected // provisioned out-of-band; expected
 	}
 	return StateAbsent
-}
-
-// StatusAll reports resource state across every live workspace of the
-// repository.
-func StatusAll(
-	repo *repository.Repository,
-	options Options,
-) ([]ResourceStatus, error) {
-	roots, err := repo.Workspaces()
-	if err != nil {
-		return nil, err
-	}
-
-	var results []ResourceStatus
-
-	for _, root := range roots {
-		wsRepo, err := repository.Detect(root, repo.VCS())
-		if err != nil {
-			return nil, err
-		}
-
-		rows, err := Status(wsRepo, options)
-		if err != nil {
-			return nil, err
-		}
-
-		results = append(results, rows...)
-	}
-
-	return results, nil
 }

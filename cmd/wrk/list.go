@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
@@ -38,16 +40,21 @@ var listCmd = &cobra.Command{
 }
 
 func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
+	showOrigin := hasNonSharedListOrigin(rows)
+
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	defer func() {
 		_ = tw.Flush()
 	}()
 
-	header := "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tORIGIN\tSHARED PATH"
+	header := "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tSHARED PATH"
+	if showOrigin {
+		header = "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tORIGIN\tSHARED PATH"
+	}
 	if withSize {
 		header += "\tSIZE"
 	}
-	_, _ = fmt.Fprintln(tw, header)
+	fmt.Fprintln(tw, header)
 
 	for _, r := range rows {
 		fp := "no"
@@ -55,17 +62,28 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 			fp = "yes"
 		}
 
-		line := fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s",
-			r.Resource, r.Path, fp, r.Variants, r.Origin, r.SharedPath)
-
+		fields := []string{r.Resource, r.Path, fp, fmt.Sprintf("%d", r.Variants)}
+		if showOrigin {
+			fields = append(fields, string(r.Origin))
+		}
+		fields = append(fields, r.SharedPath)
 		if withSize {
-			line += "\t" + humanSize(r.Size)
+			fields = append(fields, humanSize(r.Size))
 		}
 
-		_, _ = fmt.Fprintln(tw, line)
+		fmt.Fprintln(tw, strings.Join(fields, "\t"))
 	}
 
 	return nil
+}
+
+func hasNonSharedListOrigin(rows []engine.ResourceListing) bool {
+	for _, r := range rows {
+		if r.Origin != config.OriginShared {
+			return true
+		}
+	}
+	return false
 }
 
 func humanSize(n int64) string {

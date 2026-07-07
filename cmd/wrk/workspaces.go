@@ -54,7 +54,7 @@ func printWorkspaces(w *os.File, summaries []engine.WorkspaceSummary) error {
 			tw, "%s %s\t%s\t%s\n",
 			marker,
 			s.Root,
-			s.State,
+			colorWorkspaceState(s.State),
 			formatCounts(s.Counts),
 		)
 	}

@@ -55,7 +55,7 @@ func runPlan(plan planner.Plan, options Options) error {
 
 	if plan.HasConflicts() {
 		return fmt.Errorf(
-			"cannot execute plan due to %d conflict(s)",
+			"%d conflict(s) — see plan output above",
 			len(plan.Conflicts),
 		)
 	}

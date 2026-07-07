@@ -45,4 +45,9 @@ func init() {
 		app.DefaultStorage(),
 		"Shared storage location",
 	)
+
+	rootCmd.PersistentFlags().BoolVar(
+		&noColor, "no-color", false,
+		"Disable ANSI color output (also respects the NO_COLOR env var)",
+	)
 }

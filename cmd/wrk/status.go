@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
@@ -16,8 +18,9 @@ var (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show the state of managed resources (read-only)",
+	Use:     "status",
+	Aliases: []string{"st"},
+	Short:   "Show the state of managed resources (read-only)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
@@ -29,21 +32,21 @@ var statusCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
-		var rows []engine.ResourceStatus
+		var report *engine.StatusReport
 		if statusAll {
-			rows, err = engine.StatusAll(repo, options)
+			report, err = engine.StatusAll(repo, options)
 		} else {
-			rows, err = engine.Status(repo, options)
+			report, err = engine.Status(repo, options)
 		}
 		if err != nil {
 			return err
 		}
 
-		if err := printStatus(os.Stdout, rows, statusAll); err != nil {
+		if err := printStatus(os.Stdout, report, statusAll); err != nil {
 			return err
 		}
 
-		if statusExitCode && hasProblems(rows) {
+		if statusExitCode && hasProblems(report.Rows) {
 			return fmt.Errorf("one or more resources need attention")
 		}
 
@@ -51,27 +54,59 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-func printStatus(w *os.File, rows []engine.ResourceStatus, all bool) error {
+func printStatus(w *os.File, report *engine.StatusReport, all bool) error {
+	// Configuration source header — only shown when a local override is
+	// in play, so the default output stays clean.
+	if len(report.Sources) > 1 {
+		fmt.Fprintln(w, dim("Config: "+strings.Join(report.Sources, " + ")))
+		fmt.Fprintln(w)
+	}
+
+	showOrigin := hasNonSharedOrigin(report.Rows)
+
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	defer func() {
 		_ = tw.Flush()
 	}()
 
 	if all {
-		_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
-		for _, r := range rows {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				r.WorkspaceRoot, r.Resource, r.Path, r.State, r.Origin, short(r.Fingerprint))
+		if showOrigin {
+			fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
+		} else {
+			fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
 		}
-		return nil
+	} else {
+		if showOrigin {
+			fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
+		} else {
+			fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
+		}
 	}
 
-	_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
-	for _, r := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			r.Resource, r.Path, r.State, r.Origin, short(r.Fingerprint))
+	for _, r := range report.Rows {
+		fields := []string{}
+		if all {
+			fields = append(fields, r.WorkspaceRoot)
+		}
+		fields = append(fields, r.Resource, r.Path, colorState(r.State))
+		if showOrigin {
+			fields = append(fields, string(r.Origin))
+		}
+		fields = append(fields, short(r.Fingerprint))
+
+		fmt.Fprintln(tw, strings.Join(fields, "\t"))
 	}
+
 	return nil
+}
+
+func hasNonSharedOrigin(rows []engine.ResourceStatus) bool {
+	for _, r := range rows {
+		if r.Origin != config.OriginShared {
+			return true
+		}
+	}
+	return false
 }
 
 // hasProblems reports whether any row is in a state that would prevent a

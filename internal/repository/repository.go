@@ -12,8 +12,8 @@ type Repository struct {
 	// common Git directory). Private: only this package needs it.
 	metadataDir string
 
-	// backend implements VCS-specific operations and is the single source
-	// of truth for which VCS this repository uses.
+	// backend implements VCS-specific operations and is the single
+	// source of truth for which VCS this repository uses.
 	backend backend
 }
 
@@ -36,5 +36,9 @@ func (r *Repository) VCS() VCS {
 	return r.backend.kind()
 }
 
-// MetadataDir returns the repository's shared metadata directory.
-func (r *Repository) MetadataDir() string { return r.metadataDir }
+// MetadataDir returns the repository's shared metadata directory (for
+// example, the common Git directory). Used by wrk to store repository-
+// local state such as the detach registry.
+func (r *Repository) MetadataDir() string {
+	return r.metadataDir
+}

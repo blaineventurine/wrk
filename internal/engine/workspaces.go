@@ -53,7 +53,7 @@ func WorkspaceSummaries(
 	repo *repository.Repository,
 	options Options,
 ) ([]WorkspaceSummary, error) {
-	rows, err := StatusAll(repo, options)
+	report, err := StatusAll(repo, options)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func WorkspaceSummaries(
 	order := []string{}
 	byRoot := map[string][]ResourceStatus{}
 
-	for _, r := range rows {
+	for _, r := range report.Rows {
 		if _, seen := byRoot[r.WorkspaceRoot]; !seen {
 			order = append(order, r.WorkspaceRoot)
 		}

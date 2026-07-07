@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/blaineventurine/wrk/internal/planner"
 )
@@ -71,6 +72,13 @@ func printPlan(w io.Writer, plan planner.Plan) error {
 		}
 	}
 
+	if hints := suggestions(plan.Conflicts); len(hints) > 0 {
+		out.println("\nSuggestions:")
+		for _, h := range hints {
+			out.printf("  → %s\n", h)
+		}
+	}
+
 	if destructive {
 		out.println("\n⚠ This plan will permanently discard independent local copies.")
 	}
@@ -110,4 +118,36 @@ func isSymlink(path string) bool {
 		return false
 	}
 	return info.Mode()&os.ModeSymlink != 0
+}
+
+// suggestions returns human-readable hints for common conflict patterns.
+// Duplicate suggestions are collapsed so the user doesn't see the same
+// tip repeated per resource.
+func suggestions(conflicts []planner.Conflict) []string {
+	seen := map[string]bool{}
+	var hints []string
+
+	add := func(hint string) {
+		if seen[hint] {
+			return
+		}
+		seen[hint] = true
+		hints = append(hints, hint)
+	}
+
+	for _, c := range conflicts {
+		msg := c.Message
+
+		switch {
+		case strings.Contains(msg, "shared resource already exists"):
+			add("Run `wrk relink` to discard the local copy and reconnect to shared storage.")
+			add("Or run `wrk detach` to make the current independent state permanent.")
+
+		case strings.Contains(msg, "no initialize hook is configured"):
+			add("Provide the resource manually in this workspace, or add an `initialize` hook to .wrk.yml.")
+			add("If the resource is intentionally provisioned out-of-band, set `create: false` on it.")
+		}
+	}
+
+	return hints
 }

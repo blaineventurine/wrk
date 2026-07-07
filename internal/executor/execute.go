@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/blaineventurine/wrk/internal/commands"
 	"github.com/blaineventurine/wrk/internal/planner"
@@ -128,12 +129,12 @@ func environment(env map[string]string) []string {
 func runInitialize(action planner.InitializeResource) error {
 	resolved, err := commands.Resolve(action.Commands, action.Context)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving hook commands: %w", err)
 	}
 
 	for _, command := range resolved {
 		if len(command.Args) == 0 {
-			return fmt.Errorf("resolved command has no arguments")
+			return fmt.Errorf("resolved hook command has no arguments")
 		}
 
 		cmd := exec.Command(command.Args[0], command.Args[1:]...)
@@ -144,7 +145,12 @@ func runInitialize(action planner.InitializeResource) error {
 		cmd.Stdin = os.Stdin
 
 		if err := cmd.Run(); err != nil {
-			return err
+			return fmt.Errorf(
+				"hook command failed: %s (in %s): %w",
+				strings.Join(command.Args, " "),
+				command.Cwd,
+				err,
+			)
 		}
 	}
 
