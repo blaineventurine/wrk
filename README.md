@@ -439,8 +439,10 @@ The workspace now has its own local copies of every managed resource.
 
 Reconnect later:
 
+Reconnect later (discarding the independent copies):
+
 ```bash
-wrk link
+wrk relink
 ```
 
 ---

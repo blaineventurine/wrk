@@ -10,7 +10,10 @@ import (
 	"wrk/internal/engine"
 )
 
-var statusAll bool
+var (
+	statusAll      bool
+	statusExitCode bool
+)
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
@@ -36,7 +39,15 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
-		return printStatus(os.Stdout, rows, statusAll)
+		if err := printStatus(os.Stdout, rows, statusAll); err != nil {
+			return err
+		}
+
+		if statusExitCode && hasProblems(rows) {
+			return fmt.Errorf("one or more resources need attention")
+		}
+
+		return nil
 	},
 }
 
@@ -61,6 +72,21 @@ func printStatus(w *os.File, rows []engine.ResourceStatus, all bool) error {
 	return nil
 }
 
+// hasProblems reports whether any row is in a state that would prevent a
+// clean `wrk link`. Intentional states (detached, expected) are not
+// problems.
+func hasProblems(rows []engine.ResourceStatus) bool {
+	for _, r := range rows {
+		switch r.State {
+		case engine.StateConflict,
+			engine.StateStale,
+			engine.StateAbsent:
+			return true
+		}
+	}
+	return false
+}
+
 func short(fp string) string {
 	if fp == "" {
 		return "-"
@@ -73,6 +99,10 @@ func short(fp string) string {
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+
 	statusCmd.Flags().BoolVar(&statusAll, "all", false,
 		"Show status across all workspaces")
+
+	statusCmd.Flags().BoolVar(&statusExitCode, "exit-code", false,
+		"Exit non-zero if any resource is in a problem state")
 }

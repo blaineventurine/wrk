@@ -9,11 +9,33 @@ import (
 )
 
 // BuildLink computes the actions required to materialize a resource in the
-// current workspace.
+// current workspace. If a resource has both an independent local copy and a
+// shared copy, it reports a conflict rather than risk discarding local work.
 func BuildLink(
 	instance resolver.ResourceInstance,
 	loc location.SharedLocation,
 	state workspace.State,
+) ResourcePlan {
+	return buildLink(instance, loc, state, false)
+}
+
+// BuildRelink is like BuildLink, but reconnects a workspace to shared
+// storage by discarding any independent local copy. It never conflicts on
+// an existing local copy — the caller has explicitly opted into discarding
+// it.
+func BuildRelink(
+	instance resolver.ResourceInstance,
+	loc location.SharedLocation,
+	state workspace.State,
+) ResourcePlan {
+	return buildLink(instance, loc, state, true)
+}
+
+func buildLink(
+	instance resolver.ResourceInstance,
+	loc location.SharedLocation,
+	state workspace.State,
+	discardLocal bool,
 ) ResourcePlan {
 	plan := ResourcePlan{}
 
@@ -29,7 +51,7 @@ func BuildLink(
 	}
 
 	if state.SharedExists {
-		linkToShared(&plan, instance, loc, state)
+		linkToShared(&plan, instance, loc, state, discardLocal)
 		return plan
 	}
 
@@ -43,13 +65,20 @@ func linkToShared(
 	instance resolver.ResourceInstance,
 	loc location.SharedLocation,
 	state workspace.State,
+	discardLocal bool,
 ) {
 	if state.WorkspaceExists {
-		plan.AddConflict(
-			instance,
-			"workspace resource exists but shared resource already exists",
-		)
-		return
+		if !discardLocal {
+			plan.AddConflict(
+				instance,
+				"an independent copy exists (detached); run `wrk relink` "+
+					"to discard it and reconnect to shared storage",
+			)
+			return
+		}
+
+		// relink: discard the independent local copy before linking.
+		plan.AddAction(instance, Remove{Path: instance.WorkspacePath})
 	}
 
 	symlinkIntoWorkspace(plan, instance, loc)

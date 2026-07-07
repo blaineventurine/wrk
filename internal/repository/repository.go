@@ -35,3 +35,6 @@ func newRepository(
 func (r *Repository) VCS() VCS {
 	return r.backend.kind()
 }
+
+// MetadataDir returns the repository's shared metadata directory.
+func (r *Repository) MetadataDir() string { return r.metadataDir }

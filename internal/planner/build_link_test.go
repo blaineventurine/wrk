@@ -188,3 +188,64 @@ func TestBuildLinkAlreadyLinkedIsNoOp(t *testing.T) {
 		)
 	}
 }
+
+func TestBuildRelinkDiscardsLocalCopyWhenSharedExists(t *testing.T) {
+	inst := instance()
+	loc := sharedLocation()
+
+	// The detach scenario: independent local copy AND shared both exist.
+	state := workspace.State{
+		WorkspaceExists: true,
+		SharedExists:    true,
+	}
+
+	// BuildLink must refuse (conflict)...
+	link := BuildLink(inst, loc, state)
+	if len(link.Conflicts) != 1 {
+		t.Fatalf("BuildLink: expected 1 conflict, got %+v", link.Conflicts)
+	}
+
+	// ...but BuildRelink discards the local copy and re-links.
+	relink := BuildRelink(inst, loc, state)
+	if len(relink.Conflicts) != 0 {
+		t.Fatalf("BuildRelink: unexpected conflicts: %+v", relink.Conflicts)
+	}
+
+	_ = findAction[Remove](t, relink)
+	sym := findAction[Symlink](t, relink)
+	if sym.Target != loc.Path {
+		t.Fatalf("Symlink.Target = %q, want %q", sym.Target, loc.Path)
+	}
+}
+
+func TestBuildRelinkAdoptsLocalWhenSharedMissing(t *testing.T) {
+	inst := instance()
+	loc := sharedLocation()
+
+	// Real local copy, shared missing: same as link — adopt via Move.
+	state := workspace.State{WorkspaceExists: true}
+
+	plan := BuildRelink(inst, loc, state)
+
+	if len(plan.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", plan.Conflicts)
+	}
+	_ = findAction[Move](t, plan)
+	_ = findAction[Symlink](t, plan)
+}
+
+func TestBuildRelinkAlreadyLinkedIsNoOp(t *testing.T) {
+	inst := instance()
+	loc := sharedLocation()
+
+	state := workspace.State{
+		WorkspaceSymlink:  true,
+		WorkspaceLinkText: loc.Path,
+		SharedExists:      true,
+	}
+
+	plan := BuildRelink(inst, loc, state)
+	if len(plan.Actions) != 0 || len(plan.Conflicts) != 0 {
+		t.Fatalf("expected no-op, got actions=%+v conflicts=%+v", plan.Actions, plan.Conflicts)
+	}
+}

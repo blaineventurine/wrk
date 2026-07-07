@@ -72,3 +72,13 @@ func buildPlan(
 
 	return plan, nil
 }
+
+func ignorePreparer(repo *repository.Repository) func(*config.Config) error {
+	return func(cfg *config.Config) error {
+		paths := make([]string, 0, len(cfg.Resources))
+		for _, r := range cfg.Resources {
+			paths = append(paths, r.Path)
+		}
+		return repo.Prepare(paths...)
+	}
+}
