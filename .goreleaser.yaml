@@ -1,0 +1,84 @@
+version: 2
+
+project_name: wrk
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: wrk
+    main: ./cmd/wrk
+    binary: wrk
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: wrk
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: Bug fixes
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: blaineventurine
+    name: wrk
+  draft: false
+  prerelease: auto
+  header: |
+    ## wrk {{ .Version }}
+
+    Install with `go install github.com/blaineventurine/wrk/cmd/wrk@{{ .Tag }}`,
+    or download a prebuilt binary below.
+  footer: |
+    ---
+    **Full changelog:** https://github.com/blaineventurine/wrk/compare/{{ .PreviousTag }}...{{ .Tag }}
