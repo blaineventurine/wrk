@@ -20,16 +20,28 @@ import (
 // After merging, every resource is validated. A single invalid resource
 // aborts the load — wrk will not operate on a partially-valid config.
 func Load(root string) (*Config, error) {
-	shared, err := loadFile(filepath.Join(root, Filename), true)
+	shared, err := loadFile(filepath.Join(root, Filename), false)
 	if err != nil {
 		return nil, err
 	}
-	tag(shared.Resources, OriginShared)
 
 	local, err := loadFile(filepath.Join(root, LocalFilename), false)
 	if err != nil {
 		return nil, err
 	}
+
+	if shared == nil && local == nil {
+		return nil, fmt.Errorf(
+			"%w: neither %s nor %s in %s",
+			ErrConfigNotFound, Filename, LocalFilename, root,
+		)
+	}
+
+	if shared == nil {
+		shared = &Config{Resources: []Resource{}}
+	}
+	tag(shared.Resources, OriginShared)
+
 	if local != nil {
 		tag(local.Resources, OriginLocal)
 		shared.Resources = merge(shared.Resources, local.Resources)

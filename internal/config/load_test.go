@@ -396,16 +396,6 @@ resources:
 	}
 }
 
-func TestLoadRequiresSharedFile(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, LocalFilename), `resources: []`)
-
-	_, err := Load(root)
-	if err == nil {
-		t.Fatal("expected error when .wrk.yml is missing")
-	}
-}
-
 // TestValidateRejects covers every path/name validation rule via a table
 // so adding new ones stays cheap.
 func TestValidateRejects(t *testing.T) {
@@ -729,5 +719,38 @@ func TestUserFacingExamplesAreValid(t *testing.T) {
 				t.Fatalf("%s failed to load: %v", dir, err)
 			}
 		})
+	}
+}
+
+func TestLoadLocalOnly(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, LocalFilename), `
+resources:
+  - name: envrc
+    path: .envrc
+    create: false
+`)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("expected local-only config to load, got %v", err)
+	}
+	if len(cfg.Resources) != 1 {
+		t.Fatalf("expected 1 resource, got %d", len(cfg.Resources))
+	}
+	if cfg.Resources[0].Origin != OriginLocal {
+		t.Errorf("Origin = %q, want %q", cfg.Resources[0].Origin, OriginLocal)
+	}
+}
+
+func TestLoadRejectsWhenNeitherExists(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("expected error when neither .wrk.yml nor .wrk.local.yml exists")
+	}
+	if !errors.Is(err, ErrConfigNotFound) {
+		t.Fatalf("expected ErrConfigNotFound, got %v", err)
 	}
 }

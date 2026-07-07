@@ -160,6 +160,10 @@ Additional examples are available in the [`examples/`](./examples/) directory:
 See [`examples/local-override/`](./examples/local-override/) for a complete
 worked example.
 
+> `.wrk.yml` is optional if `.wrk.local.yml` is present. If you're using
+> `wrk` for a personal project without any team-shared config, you can
+> keep everything in `.wrk.local.yml` alone.
+
 ### Resource fields
 
 | Field | Type | Description |
