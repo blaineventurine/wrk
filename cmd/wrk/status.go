@@ -71,15 +71,15 @@ func printStatus(w *os.File, report *engine.StatusReport, all bool) error {
 
 	if all {
 		if showOrigin {
-			fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
+			_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
 		} else {
-			fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
+			_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
 		}
 	} else {
 		if showOrigin {
-			fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
+			_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
 		} else {
-			fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
+			_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
 		}
 	}
 
@@ -94,7 +94,7 @@ func printStatus(w *os.File, report *engine.StatusReport, all bool) error {
 		}
 		fields = append(fields, short(r.Fingerprint))
 
-		fmt.Fprintln(tw, strings.Join(fields, "\t"))
+		_, _ = fmt.Fprintln(tw, strings.Join(fields, "\t"))
 	}
 
 	return nil
