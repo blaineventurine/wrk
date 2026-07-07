@@ -77,7 +77,7 @@ Every subsequent workspace simply links to it.
 ## Installation
 
 ```bash
-go install github.com/<you>/wrk/cmd/wrk@latest
+go install github.com/blainventurine/wrk/cmd/wrk@latest
 ```
 
 or build from source:
