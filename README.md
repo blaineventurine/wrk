@@ -112,7 +112,53 @@ resources:
             BUNDLE_PATH: "{shared}"
 ```
 
-Additional examples are available in the `examples/` directory.
+### Local overrides
+
+You can create a `.wrk.local.yml` alongside `.wrk.yml` to add or override
+resources for your own machine. It is never committed — `wrk` automatically
+ignores it via repository-local ignore rules.
+
+**Adding a personal-only resource:**
+
+```yaml
+# .wrk.local.yml
+resources:
+  - name: envrc
+    path: .envrc
+    create: false
+```
+
+**Overriding a shared resource by name:**
+
+```yaml
+# .wrk.local.yml
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/pnpm-lock.yaml"
+    hooks:
+      initialize:
+        - run: pnpm install
+          cwd: "{root}"
+```
+
+Local entries with the same `name` as a shared entry replace it entirely
+(they do not deep-merge). Entries with a new `name` are additions.
+
+The resource's origin is visible in `wrk status` and `wrk list` as `shared`,
+`local`, or `local-override`.
+
+Additional examples are available in the [`examples/`](./examples/) directory:
+
+- `examples/basic/` — minimal `.env` sharing
+- `examples/node/` — fingerprinted `node_modules` with Yarn
+- `examples/rails/` — fingerprinted `vendor/bundle`
+- `examples/local-override/` — using `.wrk.local.yml` to swap yarn → pnpm locally
+
+See [`examples/local-override/`](./examples/local-override/) for a complete
+worked example.
 
 ### Resource fields
 

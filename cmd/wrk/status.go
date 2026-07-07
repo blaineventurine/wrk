@@ -58,18 +58,18 @@ func printStatus(w *os.File, rows []engine.ResourceStatus, all bool) error {
 	}()
 
 	if all {
-		_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
+		_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
 		for _, r := range rows {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				r.WorkspaceRoot, r.Resource, r.Path, r.State, short(r.Fingerprint))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.WorkspaceRoot, r.Resource, r.Path, r.State, r.Origin, short(r.Fingerprint))
 		}
 		return nil
 	}
 
-	_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
+	_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			r.Resource, r.Path, r.State, short(r.Fingerprint))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			r.Resource, r.Path, r.State, r.Origin, short(r.Fingerprint))
 	}
 	return nil
 }

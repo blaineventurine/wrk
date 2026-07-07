@@ -1,0 +1,23 @@
+# Personal override: I prefer pnpm on my machine.
+#
+# This file lives beside .wrk.yml but is never committed — wrk
+# automatically adds it to the repository-local ignore rules.
+#
+# The `node` entry here replaces the same-named entry from .wrk.yml
+# (same-name entries override; entries with new names are additions).
+
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/pnpm-lock.yaml"
+    hooks:
+      initialize:
+        - run: pnpm install --frozen-lockfile
+          cwd: "{root}"
+
+  # Personal-only resource: my direnv config, expected to already exist.
+  - name: envrc
+    path: .envrc
+    create: false

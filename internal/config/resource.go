@@ -7,6 +7,8 @@ type Resource struct {
 	Fingerprint []string             `yaml:"fingerprint,omitempty"`
 	Hooks       map[string][]Command `yaml:"hooks,omitempty"`
 	Create      *bool                `yaml:"create,omitempty"`
+	// Origin is populated by Load; it is not read from YAML.
+	Origin Origin `yaml:"-"`
 }
 
 // ShouldCreate reports whether the resource should be created if it does

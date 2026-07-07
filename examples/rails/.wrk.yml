@@ -1,0 +1,26 @@
+# A Rails project that installs gems with Bundler.
+#
+# `vendor/bundle` is fingerprinted on Gemfile.lock and .ruby-version, so
+# a branch that upgrades Ruby or bumps a gem installs into its own
+# shared location.
+
+resources:
+  - name: env
+    path: .env
+    create: false
+
+  - name: bundler
+    path: vendor/bundle
+    fingerprint:
+      - "{root}/Gemfile"
+      - "{root}/Gemfile.lock"
+      - "{root}/.ruby-version"
+    hooks:
+      initialize:
+        - run: bundle install
+          cwd: "{root}"
+          env:
+            # Install into wrk's shared storage rather than Bundler's
+            # default path, so all workspaces reuse the same gems.
+            BUNDLE_PATH: "{shared}"
+            BUNDLE_JOBS: "4"

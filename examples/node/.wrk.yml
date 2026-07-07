@@ -1,0 +1,21 @@
+# A Node project that installs dependencies with Yarn.
+#
+# `node_modules` is fingerprinted on `package.json` and `yarn.lock`, so
+# workspaces on different branches with different dependency versions
+# get independent installations.
+
+resources:
+  - name: env
+    path: .env
+    # Provided by the developer; wrk should skip it when missing.
+    create: false
+
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/yarn.lock"
+    hooks:
+      initialize:
+        - run: yarn install --frozen-lockfile
+          cwd: "{root}"

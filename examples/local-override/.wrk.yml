@@ -1,0 +1,16 @@
+# Team-wide configuration: installs node_modules with Yarn.
+
+resources:
+  - name: env
+    path: .env
+    create: false
+
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/yarn.lock"
+    hooks:
+      initialize:
+        - run: yarn install --frozen-lockfile
+          cwd: "{root}"

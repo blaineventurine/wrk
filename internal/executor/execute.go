@@ -67,9 +67,7 @@ func Execute(plan planner.Plan) error {
 				return err
 			}
 		case planner.Remove:
-			if err := os.RemoveAll(
-				action.Path,
-			); err != nil {
+			if err := safeRemove(action.Path); err != nil {
 				return err
 			}
 
@@ -151,4 +149,28 @@ func runInitialize(action planner.InitializeResource) error {
 	}
 
 	return nil
+}
+
+// safeRemove refuses to remove a path that appears to be a repository
+// root or contain repository infrastructure. This is a last-resort
+// guard; validation should catch these upstream.
+func safeRemove(path string) error {
+	clean := filepath.Clean(path)
+
+	if clean == "/" || clean == "." {
+		return fmt.Errorf("refusing to remove %q", path)
+	}
+
+	// A directory that contains .git or .jj is a repository root; never
+	// remove it as part of a resource action.
+	for _, marker := range []string{".git", ".jj"} {
+		if _, err := os.Stat(filepath.Join(clean, marker)); err == nil {
+			return fmt.Errorf(
+				"refusing to remove %q: it contains repository metadata (%s)",
+				path, marker,
+			)
+		}
+	}
+
+	return os.RemoveAll(clean)
 }

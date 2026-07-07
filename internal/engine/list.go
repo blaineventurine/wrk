@@ -27,6 +27,8 @@ type ResourceListing struct {
 	// Size is the total bytes under the resource's shared storage subtree.
 	// Only populated when withSize is requested; -1 otherwise.
 	Size int64
+
+	Origin config.Origin
 }
 
 // List reports the configured resources and their shared storage for the
@@ -79,6 +81,7 @@ func List(
 				SharedPath:    loc.Path,
 				Variants:      countVariants(subtree, fingerprinted),
 				Size:          -1,
+				Origin:        instance.Resource.Origin,
 			}
 
 			if withSize {

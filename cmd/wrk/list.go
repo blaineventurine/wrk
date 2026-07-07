@@ -43,7 +43,7 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 		_ = tw.Flush()
 	}()
 
-	header := "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tSHARED PATH"
+	header := "RESOURCE\tPATH\tFINGERPRINTED\tVARIANTS\tORIGIN\tSHARED PATH"
 	if withSize {
 		header += "\tSIZE"
 	}
@@ -55,8 +55,8 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 			fp = "yes"
 		}
 
-		line := fmt.Sprintf("%s\t%s\t%s\t%d\t%s",
-			r.Resource, r.Path, fp, r.Variants, r.SharedPath)
+		line := fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s",
+			r.Resource, r.Path, fp, r.Variants, r.Origin, r.SharedPath)
 
 		if withSize {
 			line += "\t" + humanSize(r.Size)

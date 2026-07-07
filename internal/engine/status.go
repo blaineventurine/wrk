@@ -17,6 +17,7 @@ type ResourceStatus struct {
 	SharedPath    string
 	Fingerprint   string // empty if the resource is not fingerprinted
 	State         State
+	Origin        config.Origin
 }
 
 // State is the derived condition of a resource instance.
@@ -78,6 +79,7 @@ func Status(repo *repository.Repository, options Options) ([]ResourceStatus, err
 				SharedPath:    loc.Path,
 				Fingerprint:   loc.Fingerprint,
 				State:         derived,
+				Origin:        instance.Resource.Origin,
 			})
 		}
 	}

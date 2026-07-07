@@ -1,0 +1,10 @@
+# The simplest useful configuration: share a .env file across all
+# workspaces of this repository.
+#
+# `.env` is expected to already exist in the primary workspace before
+# running `wrk link` — wrk will move it into shared storage and link
+# every future workspace to it.
+
+resources:
+  - name: env
+    path: .env

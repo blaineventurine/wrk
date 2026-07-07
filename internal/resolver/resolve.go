@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -61,19 +62,37 @@ func newInstance(
 	resource config.Resource,
 	workspacePath string,
 ) (ResourceInstance, error) {
-	relative, err := filepath.Rel(
-		root,
-		workspacePath,
-	)
+	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return ResourceInstance{}, err
+	}
+	absWs, err := filepath.Abs(workspacePath)
+	if err != nil {
+		return ResourceInstance{}, err
+	}
+	if absWs == absRoot {
+		return ResourceInstance{}, fmt.Errorf(
+			"resource %q resolves to the repository root; refusing",
+			resource.Name,
+		)
+	}
+
+	rel, err := filepath.Rel(absRoot, absWs)
+	if err != nil {
+		return ResourceInstance{}, err
+	}
+	if rel == "." || strings.HasPrefix(rel, "..") {
+		return ResourceInstance{}, fmt.Errorf(
+			"resource %q resolves outside the repository (%s)",
+			resource.Name, workspacePath,
+		)
 	}
 
 	instance := ResourceInstance{
 		Resource:      resource,
 		Root:          root,
 		WorkspacePath: workspacePath,
-		RelativePath:  filepath.ToSlash(relative),
+		RelativePath:  filepath.ToSlash(rel),
 	}
 
 	// Fingerprint inputs are expanded with an empty shared path: a
