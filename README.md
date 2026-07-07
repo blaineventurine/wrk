@@ -68,8 +68,9 @@ Every subsequent workspace simply links to it.
 - Automatic workspace provisioning.
 - Automatic repository preparation.
 - Works with Jujutsu workspaces and Git worktrees.
+- Read-only introspection (`status`, `workspaces`, `list`).
 - Dry-run mode.
-- Fully reversible (`wrk detach`).
+- Fully reversible (`wrk detach`) with an explicit reconnect (`wrk relink`).
 
 ---
 
@@ -113,6 +114,16 @@ resources:
 
 Additional examples are available in the `examples/` directory.
 
+### Resource fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Human-readable identifier used in output. |
+| `path` | string | Workspace-relative path of the resource (file or directory). |
+| `fingerprint` | list | Optional. Files whose contents determine which shared variant is used. See [Fingerprinting](#fingerprinting). |
+| `hooks.initialize` | list | Optional. Commands run once to create the shared resource. See [Command execution](#command-execution). |
+| `create` | bool | Optional; defaults to `true`. When `false`, `wrk` will never treat "no shared copy and no hook" as an error — the resource is expected to be provided out-of-band (e.g. a secret file managed elsewhere). |
+
 ### Command execution
 
 Hook `run` strings are **tokenized**, not interpreted by a shell.
@@ -121,12 +132,12 @@ Hook `run` strings are **tokenized**, not interpreted by a shell.
 escapes are respected) and executes the command directly. It does **not**
 invoke `sh -c`, so shell-only features are unavailable:
 
-| Not supported in `run`            | Use instead                                  |
-|-----------------------------------|----------------------------------------------|
-| `FOO=bar cmd`                     | the `env:` map                               |
-| `cmd-a && cmd-b`                  | separate `run:` entries, or an explicit shell|
-| `cmd | other`,`cmd > file`       | an explicit shell                            |
-| `$VAR` expansion                  | placeholders (`{root}`, `{shared}`, …) or `env:` |
+| Not supported in `run`      | Use instead                                       |
+|-----------------------------|---------------------------------------------------|
+| `FOO=bar cmd`               | the `env:` map                                    |
+| `cmd-a && cmd-b`            | separate `run:` entries, or an explicit shell     |
+| `cmd \| other`, `cmd > file`| an explicit shell                                 |
+| `$VAR` expansion            | placeholders (`{root}`, `{shared}`, …) or `env:`  |
 
 Set environment variables with `env:`:
 
@@ -196,7 +207,16 @@ resources:
     path: .env
 ```
 
-`wrk` will never create `.env`.
+`wrk` will never create `.env`. If it is missing everywhere, `wrk link`
+reports a conflict — unless you set `create: false`, in which case the
+resource is skipped quietly:
+
+```yaml
+resources:
+  - name: env
+    path: .env
+    create: false
+```
 
 On the other hand:
 
@@ -221,6 +241,8 @@ Subsequent workspaces simply reuse the shared copy.
 
 ## Commands
 
+### Provisioning
+
 Initialize or repair the current workspace:
 
 ```bash
@@ -239,22 +261,93 @@ Create and provision a new workspace:
 wrk new ../feature-auth
 ```
 
-Detach the current workspace from shared resources:
+### Independence and reconnection
+
+Detach the current workspace from shared resources (creates independent
+local copies):
 
 ```bash
 wrk detach
 ```
 
+Reconnect the current workspace to shared storage, **discarding** the
+independent copies created by `detach`:
+
+```bash
+wrk relink
+```
+
+> `wrk link` is intentionally conservative: it will never destroy a local
+> copy. Use `wrk relink` when you explicitly want to throw away independent
+> work and reconnect to shared storage. Destructive actions are flagged in
+> the plan output with a ⚠ warning.
+
+### Introspection (read-only)
+
+Show the state of every managed resource in the current workspace:
+
+```bash
+wrk status
+```
+
+Show state across every workspace of the repository:
+
+```bash
+wrk status --all
+```
+
+Exit non-zero if any resource needs attention (useful in CI or pre-commit
+hooks):
+
+```bash
+wrk status --exit-code
+```
+
+Show every workspace and its overall state:
+
+```bash
+wrk workspaces
+```
+
+Example output:
+
+```
+  WORKSPACE                              STATE      RESOURCES
+* /Users/blaine/repos/monolith           linked     2 linked
+  /Users/blaine/repos/monolith-feature   detached   2 detached
+  /Users/blaine/repos/monolith-hotfix    partial    1 linked, 1 detached
+  /Users/blaine/repos/monolith-wip       unhealthy  1 linked, 1 conflict
+```
+
+Workspace states roll up per-resource state:
+
+| State | Meaning |
+|---|---|
+| `linked` | All resources are linked (or intentionally expected out-of-band). |
+| `detached` | All resources have been intentionally detached. |
+| `partial` | Some resources are linked, some are detached. |
+| `pending` | At least one resource is waiting for its initialize hook to run. |
+| `unhealthy` | At least one resource needs user action (conflict, stale link, etc.). |
+
+List configured resources and their shared storage:
+
+```bash
+wrk list
+```
+
+Include on-disk size of each resource (slower — walks the storage tree):
+
+```bash
+wrk list --size
+```
+
+### Global options
+
 Override automatic repository detection:
 
 ```bash
 wrk --vcs git new ../feature
-```
-
-or
-
-```bash
-wrk --vcs jj new ../feature
+wrk --vcs jj  new ../feature
 ```
 
 Use a different storage location:
@@ -393,8 +486,8 @@ A fingerprint is based on:
 Absolute filesystem paths are intentionally ignored.
 
 This means that different Jujutsu workspaces (or Git worktrees) for the same
-repository always compute the same fingerprint when their dependency manifests
-are identical.
+repository always compute the same fingerprint when their dependency
+manifests are identical.
 
 ### Choosing fingerprint inputs
 
@@ -411,6 +504,8 @@ Typical examples:
 Avoid fingerprinting files that change frequently but do not affect the
 resource itself.
 
+---
+
 ## Typical workflow
 
 Initialize the primary workspace once:
@@ -423,11 +518,17 @@ Create a new feature workspace:
 
 ```bash
 wrk new ../feature-auth
-
 cd ../feature-auth
 ```
 
 The new workspace is immediately ready to use.
+
+Check state at any time:
+
+```bash
+wrk status
+wrk workspaces
+```
 
 Need to experiment independently?
 
@@ -437,13 +538,21 @@ wrk detach
 
 The workspace now has its own local copies of every managed resource.
 
-Reconnect later:
-
 Reconnect later (discarding the independent copies):
 
 ```bash
 wrk relink
 ```
+
+---
+
+## Concurrency
+
+`wrk` acquires a per-shared-resource lock (via `flock`) around any
+provisioning action, so multiple workspaces racing to initialize the same
+resource are serialized. The winner runs the initialize hook (or moves the
+resource into shared storage); the loser skips the hook and links to the
+winner's result.
 
 ---
 
@@ -467,5 +576,3 @@ and lets package managers do what they already do well.
 ## Status
 
 `wrk` is experimental but intended for daily use.
-
-Feedback and real-world workflows are welcome.
