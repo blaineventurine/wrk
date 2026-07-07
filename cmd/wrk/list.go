@@ -54,7 +54,7 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 	if withSize {
 		header += "\tSIZE"
 	}
-	fmt.Fprintln(tw, header)
+	_, _ = fmt.Fprintln(tw, header)
 
 	for _, r := range rows {
 		fp := "no"
@@ -71,7 +71,7 @@ func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
 			fields = append(fields, humanSize(r.Size))
 		}
 
-		fmt.Fprintln(tw, strings.Join(fields, "\t"))
+		_, _ = fmt.Fprintln(tw, strings.Join(fields, "\t"))
 	}
 
 	return nil

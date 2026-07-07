@@ -58,8 +58,8 @@ func printStatus(w *os.File, report *engine.StatusReport, all bool) error {
 	// Configuration source header — only shown when a local override is
 	// in play, so the default output stays clean.
 	if len(report.Sources) > 1 {
-		fmt.Fprintln(w, dim("Config: "+strings.Join(report.Sources, " + ")))
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, dim("Config: "+strings.Join(report.Sources, " + ")))
+		_, _ = fmt.Fprintln(w)
 	}
 
 	showOrigin := hasNonSharedOrigin(report.Rows)
