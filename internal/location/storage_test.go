@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wrk/internal/config"
-	"wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/resolver"
 )
 
 func instance(

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/config"
 )
 
 func TestResourceInstanceContext(t *testing.T) {

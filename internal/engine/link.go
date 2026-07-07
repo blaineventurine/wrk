@@ -3,9 +3,9 @@ package engine
 import (
 	"fmt"
 
-	"wrk/internal/executor"
-	"wrk/internal/planner"
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/executor"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // Link initializes or repairs the current workspace.

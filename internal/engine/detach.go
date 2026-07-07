@@ -3,8 +3,8 @@ package engine
 import (
 	"path/filepath"
 
-	"wrk/internal/planner"
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // Detach makes the current workspace independent of shared resources by

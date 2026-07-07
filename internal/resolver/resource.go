@@ -3,8 +3,8 @@ package resolver
 import (
 	"path/filepath"
 
-	"wrk/internal/config"
-	"wrk/internal/placeholders"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/placeholders"
 )
 
 // ResourceInstance is a concrete resource after glob expansion and

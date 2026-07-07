@@ -1,8 +1,8 @@
 package engine
 
 import (
-	"wrk/internal/planner"
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // BuildRelinkPlan builds a plan that reconnects the workspace to shared

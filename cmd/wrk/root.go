@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"wrk/internal/app"
+	"github.com/blaineventurine/wrk/internal/app"
 )
 
 var (

@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/engine"
 )
 
 var newCmd = &cobra.Command{

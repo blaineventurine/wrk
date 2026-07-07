@@ -1,6 +1,6 @@
 package planner
 
-import "wrk/internal/resolver"
+import "github.com/blaineventurine/wrk/internal/resolver"
 
 // PlannedAction associates an action with the resource that produced it.
 type PlannedAction struct {

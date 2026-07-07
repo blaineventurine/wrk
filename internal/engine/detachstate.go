@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // detachRegistry maps a workspace root to the relative resource paths that

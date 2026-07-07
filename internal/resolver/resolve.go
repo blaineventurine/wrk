@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"wrk/internal/config"
-	"wrk/internal/placeholders"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/placeholders"
 )
 
 // Resolve expands a configured resource into one or more concrete resource

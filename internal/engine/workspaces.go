@@ -3,7 +3,7 @@ package engine
 import (
 	"path/filepath"
 
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // WorkspaceState is the summary state of a workspace: a roll-up of the

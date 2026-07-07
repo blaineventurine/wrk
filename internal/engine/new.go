@@ -1,6 +1,6 @@
 package engine
 
-import "wrk/internal/repository"
+import "github.com/blaineventurine/wrk/internal/repository"
 
 // NewWorkspace creates and provisions a new workspace.
 func NewWorkspace(

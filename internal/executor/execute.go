@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"wrk/internal/commands"
-	"wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/commands"
+	"github.com/blaineventurine/wrk/internal/planner"
 )
 
 // Execute executes a plan.

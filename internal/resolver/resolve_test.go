@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/config"
 )
 
 func touch(

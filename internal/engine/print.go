@@ -6,7 +6,7 @@ import (
 	"os"
 	"sort"
 
-	"wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/planner"
 )
 
 func printPlan(w io.Writer, plan planner.Plan) error {

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 func currentRepository() (*repository.Repository, error) {

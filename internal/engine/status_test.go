@@ -3,10 +3,10 @@ package engine
 import (
 	"testing"
 
-	"wrk/internal/config"
-	"wrk/internal/location"
-	"wrk/internal/resolver"
-	"wrk/internal/workspace"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/location"
+	"github.com/blaineventurine/wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/workspace"
 )
 
 func TestDeriveState(t *testing.T) {

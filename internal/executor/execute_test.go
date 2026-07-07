@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wrk/internal/planner"
-	"wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/resolver"
 )
 
 func TestExecuteEmptyPlan(t *testing.T) {

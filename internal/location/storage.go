@@ -3,8 +3,8 @@ package location
 import (
 	"path/filepath"
 
-	"wrk/internal/fingerprint"
-	"wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/fingerprint"
+	"github.com/blaineventurine/wrk/internal/resolver"
 )
 
 func For(

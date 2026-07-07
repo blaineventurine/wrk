@@ -6,8 +6,8 @@ import (
 
 	"github.com/google/shlex"
 
-	"wrk/internal/config"
-	"wrk/internal/placeholders"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/placeholders"
 )
 
 // Resolve expands placeholders in commands and prepares them for execution.

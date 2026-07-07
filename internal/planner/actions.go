@@ -1,8 +1,8 @@
 package planner
 
 import (
-	"wrk/internal/config"
-	"wrk/internal/placeholders"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/placeholders"
 )
 
 type Action interface {

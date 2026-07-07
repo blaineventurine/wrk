@@ -1,12 +1,12 @@
 package engine
 
 import (
-	"wrk/internal/config"
-	"wrk/internal/location"
-	"wrk/internal/planner"
-	"wrk/internal/repository"
-	"wrk/internal/resolver"
-	"wrk/internal/workspace"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/location"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/workspace"
 )
 
 // resourcePlanner builds the plan for a single resolved resource instance.

@@ -4,10 +4,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"wrk/internal/config"
-	"wrk/internal/location"
-	"wrk/internal/repository"
-	"wrk/internal/resolver"
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/location"
+	"github.com/blaineventurine/wrk/internal/repository"
+	"github.com/blaineventurine/wrk/internal/resolver"
 )
 
 // ResourceListing describes a configured resource and its shared storage.
