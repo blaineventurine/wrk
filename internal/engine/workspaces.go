@@ -103,11 +103,16 @@ func rollup(rows []ResourceStatus, counts map[State]int) WorkspaceState {
 		return WorkspaceEmpty
 	}
 
-	// Any unhealthy resource dominates.
+	// Any unhealthy resource dominates. Missing counts as unhealthy
+	// because a workspace whose shared side exists but has never been
+	// linked into the workspace is not yet usable — `wrk status` shows
+	// the row red per-resource, so the rollup MUST match rather than
+	// falsely reporting a green WorkspaceLinked.
 	if counts[StateConflict]+
 		counts[StateStale]+
 		counts[StateNotLinked]+
-		counts[StateAbsent] > 0 {
+		counts[StateAbsent]+
+		counts[StateMissing] > 0 {
 		return WorkspaceUnhealthy
 	}
 

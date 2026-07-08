@@ -50,6 +50,26 @@ func TestRollup(t *testing.T) {
 			map[State]int{StateAbsent: 1},
 			WorkspaceUnhealthy,
 		},
+
+		// H7: Missing counted as unhealthy. A fresh-checkout workspace
+		// whose shared exists but has never been linked into it renders
+		// every row red in per-resource `wrk status`; the rollup MUST
+		// match rather than falsely flagging WorkspaceLinked.
+		{
+			"all missing is unhealthy",
+			map[State]int{StateMissing: 3},
+			WorkspaceUnhealthy,
+		},
+		{
+			"mixed linked + missing is unhealthy",
+			map[State]int{StateLinked: 2, StateMissing: 1},
+			WorkspaceUnhealthy,
+		},
+		{
+			"missing beats pending in the priority order",
+			map[State]int{StateMissing: 1, StatePending: 1},
+			WorkspaceUnhealthy,
+		},
 	}
 
 	for _, tc := range cases {

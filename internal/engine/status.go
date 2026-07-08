@@ -137,7 +137,15 @@ func deriveState(
 	state workspace.State,
 ) State {
 	if state.WorkspaceSymlink {
-		if state.WorkspaceLinkText == loc.Path {
+		// A symlink pointing at the correct shared location is only
+		// truly "linked" when the shared bytes exist. A dangling
+		// symlink whose LinkText matches loc.Path (the shared side
+		// was GC'd, an external process cleaned up, or a race with
+		// another workspace's rebuild) reads through as ENOENT, so
+		// the resource is effectively broken. Surface it as stale
+		// so `wrk link` re-provisions instead of the no-op the
+		// LinkText-only comparison used to produce.
+		if state.WorkspaceLinkText == loc.Path && state.SharedExists {
 			return StateLinked
 		}
 		return StateStale

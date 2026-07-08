@@ -236,6 +236,14 @@ func TestMissingEverythingWithInitialize(t *testing.T) {
 	}
 }
 
+// TestWrongSymlinkRelinks pins that a stale, wrk-managed workspace
+// symlink (target under the storage tree, wrong variant) is repaired
+// atomically by a single Symlink action. Historically buildLink
+// emitted a separate Remove-then-Symlink pair, but that ordering left
+// the workspace with no symlink at all if the intermediate steps
+// (CreateDirectory, InitializeResource) failed. The trailing Symlink
+// action's own Lstat+Remove path (executor) handles the atomic replace
+// once every prerequisite has succeeded — see H2 in the audit.
 func TestWrongSymlinkRelinks(t *testing.T) {
 	plan := BuildLink(
 		instance(),
@@ -247,19 +255,23 @@ func TestWrongSymlinkRelinks(t *testing.T) {
 		},
 	)
 
-	if len(plan.Actions) != 2 {
+	if len(plan.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", plan.Conflicts)
+	}
+
+	if len(plan.Actions) != 1 {
 		t.Fatalf(
-			"expected 2 actions, got %d",
+			"expected 1 action (Symlink), got %d: %+v",
 			len(plan.Actions),
+			plan.Actions,
 		)
 	}
 
-	if _, ok := plan.Actions[0].Action.(Remove); !ok {
-		t.Fatal("expected Remove")
-	}
-
-	if _, ok := plan.Actions[1].Action.(Symlink); !ok {
-		t.Fatal("expected Symlink")
+	if _, ok := plan.Actions[0].Action.(Symlink); !ok {
+		t.Fatalf(
+			"expected Symlink, got %T",
+			plan.Actions[0].Action,
+		)
 	}
 }
 

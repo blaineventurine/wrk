@@ -95,6 +95,23 @@ func TestDeriveState(t *testing.T) {
 			state: workspace.State{},
 			want:  StateAbsent,
 		},
+
+		// H6: a symlink whose LinkText matches loc.Path but whose
+		// shared bytes are gone reads through as ENOENT. Historically
+		// this classified as StateLinked (a no-op status), which
+		// silently accepted a dangling link — every subsequent access
+		// through the workspace symlink would 404. Surface it as stale
+		// so `wrk link` re-provisions.
+		{
+			name: "stale: symlink matches loc.Path but shared is missing",
+			inst: plain,
+			state: workspace.State{
+				WorkspaceSymlink:  true,
+				WorkspaceLinkText: shared,
+				SharedExists:      false,
+			},
+			want: StateStale,
+		},
 	}
 
 	for _, tc := range cases {

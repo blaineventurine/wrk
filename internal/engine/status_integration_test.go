@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -263,5 +264,152 @@ func TestStatusAllAggregatesAcrossWorkspaces(t *testing.T) {
 	sort.Strings(report.Sources)
 	if len(report.Sources) != 1 || report.Sources[0] != config.Filename {
 		t.Errorf("sources = %v, want [%q] (dedup broken)", report.Sources, config.Filename)
+	}
+}
+
+// TestStatusReportsStaleForBrokenSymlinkToMissingShared pins H6: after
+// Link connects the workspace to shared storage, an external cleanup
+// of the shared side (a GC pass, an out-of-band `rm -rf`, another
+// workspace's fingerprint-guarded rebuild that removed our variant)
+// leaves a dangling symlink pointing at nothing. `wrk status` MUST
+// report the resource as stale — the historical bug was `linked`
+// because deriveState only compared LinkText to loc.Path and never
+// consulted SharedExists. That mis-classification let the operator
+// assume the workspace was healthy while every access through the
+// symlink failed with ENOENT.
+func TestStatusReportsStaleForBrokenSymlinkToMissingShared(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: env\n"+
+			"    path: .env\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Confirm the setup: Status is happy before we break anything, so
+	// any change we observe below is entirely due to the shared cleanup.
+	report, err := Status(repo, opts)
+	if err != nil {
+		t.Fatalf("Status pre-cleanup: %v", err)
+	}
+	if len(report.Rows) != 1 || report.Rows[0].State != StateLinked {
+		t.Fatalf(
+			"pre-cleanup rows = %+v, want single StateLinked row",
+			report.Rows,
+		)
+	}
+
+	// External cleanup of the shared side. The workspace symlink text
+	// is unchanged; only the file it points at is gone.
+	sharedAbs, err := filepath.Abs(filepath.Join(storage, repo.RepositoryID, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(sharedAbs); err != nil {
+		t.Fatalf("removing shared: %v", err)
+	}
+	// Sanity: the workspace path IS still a symlink, and its target
+	// still matches what wrk originally wrote — we're pinning the
+	// exact scenario the bug covered.
+	info, err := os.Lstat(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("lstat workspace .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("workspace .env is not a symlink; mode=%v", info.Mode())
+	}
+	link, err := os.Readlink(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("readlink workspace .env: %v", err)
+	}
+	if link != sharedAbs {
+		t.Fatalf("symlink target = %q, want %q (setup wired wrong)", link, sharedAbs)
+	}
+
+	// Now the actual assertion: Status must classify the broken link
+	// as stale, not linked.
+	report, err = Status(repo, opts)
+	if err != nil {
+		t.Fatalf("Status post-cleanup: %v", err)
+	}
+	if len(report.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1: %+v", len(report.Rows), report.Rows)
+	}
+	if got := report.Rows[0].State; got != StateStale {
+		t.Errorf(
+			"State = %q, want %q (shared missing but symlink still on disk)",
+			got, StateStale,
+		)
+	}
+}
+
+// TestLinkRecoversBrokenSymlinkWhenNoRepairPath pins the companion
+// planning behavior for H6: with the workspace symlink pointing at a
+// GC'd shared target AND no hook to rebuild AND no local copy to
+// adopt, the second Link must surface a conflict rather than the
+// historical silent no-op. Historically buildLink short-circuited on
+// "LinkText matches loc.Path" without consulting SharedExists, so it
+// returned an empty plan and Link exited 0, leaving the operator
+// unaware that the resource was broken.
+func TestLinkRecoversBrokenSymlinkWhenNoRepairPath(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: env\n"+
+			"    path: .env\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link #1: %v", err)
+	}
+
+	// External cleanup of shared.
+	sharedAbs, err := filepath.Abs(filepath.Join(storage, repo.RepositoryID, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(sharedAbs); err != nil {
+		t.Fatalf("removing shared: %v", err)
+	}
+
+	// Second Link. No workspace copy to adopt (the workspace path is
+	// still just a symlink), no hook, no shared -> conflict.
+	var out bytes.Buffer
+	err = Link(repo, Options{StorageRoot: storage, Stdout: &out})
+	if err == nil {
+		t.Fatalf(
+			"Link #2 succeeded despite unprovisionable broken symlink; "+
+				"stdout:\n%s",
+			out.String(),
+		)
+	}
+	if !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("Link #2 error = %q, want to contain %q", err.Error(), "conflict")
+	}
+
+	// The workspace path is untouched — still a dangling symlink to
+	// the same target — so a subsequent recovery (writing shared
+	// bytes back into place, or restoring from backup) works with no
+	// further wrk intervention.
+	info, err := os.Lstat(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("lstat workspace .env after failed Link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf(
+			"workspace .env is no longer a symlink after failed Link; mode=%v",
+			info.Mode(),
+		)
 	}
 }
