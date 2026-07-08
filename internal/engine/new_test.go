@@ -122,74 +122,66 @@ func listNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestNewWorkspaceSkipsLinkOnCleanPrimary pins D4: when the primary
-// workspace has nothing to link (empty config → empty plan), `wrk new`
-// MUST NOT trigger Link — no plan output, no clearDetached side effect
-// on the primary's registry entry.
-//
-// Observable signal: clearDetached. Link's success path clears the
-// primary's detach-registry entry; skipping Link leaves it alone. We
-// stage an entry beforehand, force NewWorkspace to abort AFTER the
-// primary-preflight (by creating the destination so ResolveDestination
-// refuses it), and check the entry survives.
+// TestNewWorkspaceSkipsLinkOnCleanPrimary: an empty plan skips Link on
+// the primary. Signal: staged detach entry survives.
 func TestNewWorkspaceSkipsLinkOnCleanPrimary(t *testing.T) {
-	repo := newTestRepo(t)
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources: []\n",
+	})
 
-	// Empty config → empty plan → the D4 skip should fire.
-	if err := os.WriteFile(
-		filepath.Join(repo.Root, ".wrk.yml"),
-		[]byte("resources: []\n"),
-		0o644,
-	); err != nil {
-		t.Fatalf("write .wrk.yml: %v", err)
-	}
-
-	// Stage a detach-registry entry for the primary. If Link runs, its
-	// clearDetached step will remove this — that's the discriminator.
 	if err := recordDetached(repo, []string{"marker"}); err != nil {
 		t.Fatalf("recordDetached: %v", err)
 	}
 
-	// Force the destination check to fail so NewWorkspace returns before
-	// touching the new workspace at all. Whatever happened to the primary
-	// (Link run vs skipped) is by then already committed.
-	parent := filepath.Dir(repo.Root)
-	dest := filepath.Join(parent, "feature")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		t.Fatalf("mkdir dest: %v", err)
-	}
-
 	var out bytes.Buffer
-	err := NewWorkspace(repo, "feature", Options{Stdout: &out})
-	if err == nil {
-		t.Fatalf(
-			"expected error (destination exists), got nil\nstdout:\n%s",
-			out.String(),
-		)
+	if err := NewWorkspace(repo, "feature", Options{
+		Stdout:      &out,
+		StorageRoot: storageIn(t, repo.Root),
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v\nstdout:\n%s", err, out.String())
 	}
 
-	// The primary's detach entry MUST still be there: skipping Link
-	// means clearDetached was never called.
 	reg := readRegistry(t, repo)
 	entry := reg[repo.Root]
 	if len(entry) != 1 || entry[0] != "marker" {
 		t.Fatalf(
-			"primary detach entry lost: got %v, want [marker]\n"+
-				"Link ran on a clean primary — D4 regression.",
+			"primary detach entry lost: got %v, want [marker] — Link ran on a clean primary.",
 			entry,
 		)
 	}
 }
 
-// TestNewWorkspaceRunsLinkWhenPrimaryHasActions confirms the flip side
-// of D4: a primary with a non-empty plan still runs Link. Signal: the
-// staged detach entry IS cleared, because Link's success path clears it.
+// TestNewWorkspaceRunsLinkWhenPrimaryHasActions: a non-empty plan runs
+// Link. Signal: staged detach entry is cleared.
 func TestNewWorkspaceRunsLinkWhenPrimaryHasActions(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	writeFile(t, filepath.Join(repo.Root, ".env"), "")
+
+	if err := recordDetached(repo, []string{"marker"}); err != nil {
+		t.Fatalf("recordDetached: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := NewWorkspace(repo, "feature", Options{
+		Stdout:      &out,
+		StorageRoot: storageIn(t, repo.Root),
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v\nstdout:\n%s", err, out.String())
+	}
+
+	if _, ok := readRegistry(t, repo)[repo.Root]; ok {
+		t.Fatal("primary detach entry survived a non-empty-plan Link — clearDetached didn't run.")
+	}
+}
+
+// TestNewWorkspaceValidatesDestinationBeforePrimary: an invalid
+// destination MUST short-circuit before the primary Link. Signals:
+// detach entry survives AND .env is not symlinked.
+func TestNewWorkspaceValidatesDestinationBeforePrimary(t *testing.T) {
 	repo := newTestRepo(t)
 
-	// One resource that isn't yet linked → BuildLinkPlan produces at
-	// least one action (Move / CreateSymlink), which trips the D4 gate
-	// and forces Link to run.
 	if err := os.WriteFile(
 		filepath.Join(repo.Root, ".wrk.yml"),
 		[]byte("resources:\n  - name: env\n    path: .env\n"),
@@ -197,47 +189,32 @@ func TestNewWorkspaceRunsLinkWhenPrimaryHasActions(t *testing.T) {
 	); err != nil {
 		t.Fatalf("write .wrk.yml: %v", err)
 	}
-	// Ensure the resource exists so a Move action is planned rather than
-	// a NotFound-style skip; empty file is enough.
-	if err := os.WriteFile(
-		filepath.Join(repo.Root, ".env"),
-		nil,
-		0o644,
-	); err != nil {
-		t.Fatalf("touch .env: %v", err)
-	}
+	writeFile(t, filepath.Join(repo.Root, ".env"), "")
 
 	if err := recordDetached(repo, []string{"marker"}); err != nil {
 		t.Fatalf("recordDetached: %v", err)
 	}
 
-	// Same abort-before-CreateWorkspace trick so we don't need a real
-	// git-worktree-add setup.
-	parent := filepath.Dir(repo.Root)
-	dest := filepath.Join(parent, "feature")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		t.Fatalf("mkdir dest: %v", err)
-	}
-
 	var out bytes.Buffer
-	err := NewWorkspace(repo, "feature", Options{
+	err := NewWorkspace(repo, ".", Options{
 		Stdout:      &out,
-		StorageRoot: t.TempDir(),
+		StorageRoot: storageIn(t, repo.Root),
 	})
 	if err == nil {
-		t.Fatalf(
-			"expected error (destination exists), got nil\nstdout:\n%s",
-			out.String(),
-		)
+		t.Fatalf("NewWorkspace(.) succeeded; want validation error\nstdout:\n%s", out.String())
 	}
 
-	reg := readRegistry(t, repo)
-	if _, ok := reg[repo.Root]; ok {
-		t.Fatalf(
-			"primary detach entry survived a non-empty-plan Link: %v\n"+
-				"Link should have run (plan had actions) and cleared it.",
-			reg[repo.Root],
-		)
+	entry := readRegistry(t, repo)[repo.Root]
+	if len(entry) != 1 || entry[0] != "marker" {
+		t.Fatalf("primary detach entry lost: got %v — primary Link ran before dest check.", entry)
+	}
+
+	info, err := os.Lstat(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal(".env was symlinked as a side effect of failed `wrk new .`.")
 	}
 }
 
