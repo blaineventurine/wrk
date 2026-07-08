@@ -50,7 +50,9 @@ func Load(root string) (*Config, error) {
 	if local != nil {
 		sources = append(sources, LocalFilename)
 		tag(local.Resources, OriginLocal)
-		shared.Resources = merge(shared.Resources, local.Resources)
+		merged, warnings := merge(shared.Resources, local.Resources)
+		shared.Resources = merged
+		shared.Warnings = warnings
 	}
 
 	shared.Sources = sources
@@ -203,7 +205,12 @@ func tag(resources []Resource, origin Origin) {
 // entries with unmatched names are appended.
 //
 // Local entries without a Name are always treated as additions.
-func merge(shared, local []Resource) []Resource {
+//
+// A local override that redirects the resource's Path (relative to the
+// shared entry) is surfaced as a non-fatal warning: the override is
+// applied, but the redirection is worth flagging because it can be a
+// silent source of "my hooks ran against the wrong directory".
+func merge(shared, local []Resource) ([]Resource, []string) {
 	byName := map[string]int{}
 	for i, r := range local {
 		if r.Name == "" {
@@ -214,6 +221,7 @@ func merge(shared, local []Resource) []Resource {
 
 	consumed := map[int]bool{}
 	result := make([]Resource, 0, len(shared)+len(local))
+	var warnings []string
 
 	for _, s := range shared {
 		if s.Name != "" {
@@ -222,6 +230,13 @@ func merge(shared, local []Resource) []Resource {
 				override.Origin = OriginLocalOverride
 				result = append(result, override)
 				consumed[i] = true
+
+				if override.Path != s.Path {
+					warnings = append(warnings, fmt.Sprintf(
+						"local override for %q redirects path from %q to %q",
+						s.Name, s.Path, override.Path,
+					))
+				}
 				continue
 			}
 		}
@@ -235,7 +250,7 @@ func merge(shared, local []Resource) []Resource {
 		result = append(result, l)
 	}
 
-	return result
+	return result, warnings
 }
 
 func normalize(cfg *Config) {

@@ -45,6 +45,7 @@ func List(
 	if err != nil {
 		return nil, err
 	}
+	printWarnings(cfg, options.Stdout)
 
 	var listings []ResourceListing
 

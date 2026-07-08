@@ -106,10 +106,34 @@ func newInstance(
 	)
 
 	for _, input := range resource.Fingerprint {
-		fingerprintInputs = append(
-			fingerprintInputs,
-			placeholders.Expand(input, ctx),
-		)
+		expanded, err := placeholders.ExpandStrict(input, ctx)
+		if err != nil {
+			return ResourceInstance{}, fmt.Errorf(
+				"resource %q: fingerprint input: %w",
+				resource.Name, err,
+			)
+		}
+
+		// Containment: after placeholder expansion, the input MUST resolve
+		// inside the repository root. Otherwise `{root}/../secret` (or any
+		// path escaping via `..`) could pin a fingerprint to files outside
+		// the repo — silently, and with cache-key consequences.
+		resolved := expanded
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(absRoot, resolved)
+		}
+		resolved = filepath.Clean(resolved)
+
+		rel, err := filepath.Rel(absRoot, resolved)
+		if err != nil || rel == ".." ||
+			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return ResourceInstance{}, fmt.Errorf(
+				"resource %q: fingerprint input %q escapes repository root",
+				resource.Name, expanded,
+			)
+		}
+
+		fingerprintInputs = append(fingerprintInputs, expanded)
 	}
 
 	instance.FingerprintInputs = fingerprintInputs

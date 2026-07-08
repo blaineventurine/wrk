@@ -39,15 +39,16 @@ func TestResourceInstanceContext(t *testing.T) {
 func TestNewInstanceFingerprintIgnoresShared(t *testing.T) {
 	root := filepath.FromSlash("/repo")
 
+	// {root} is the only placeholder that gives a sensible fingerprint
+	// input rooted in the repo; {shared} would expand to "" (yielding a
+	// path outside the repo) — that case is covered by
+	// TestNewInstanceFingerprintRejectsSharedPlaceholder.
 	resource := config.Resource{
 		Name: "bundler",
 		Path: "vendor/bundle",
 		Fingerprint: []string{
 			"{root}/Gemfile",
 			"{root}/Gemfile.lock",
-			// {shared} must NOT be expanded here; a fingerprint that
-			// depended on the shared path would be self-referential.
-			"{shared}/ignored",
 		},
 	}
 
@@ -63,8 +64,6 @@ func TestNewInstanceFingerprintIgnoresShared(t *testing.T) {
 	want := []string{
 		filepath.FromSlash("/repo/Gemfile"),
 		filepath.FromSlash("/repo/Gemfile.lock"),
-		// {shared} expands to "" -> "/ignored"
-		filepath.FromSlash("/ignored"),
 	}
 
 	if len(instance.FingerprintInputs) != len(want) {
@@ -83,5 +82,79 @@ func TestNewInstanceFingerprintIgnoresShared(t *testing.T) {
 				i, got, want[i],
 			)
 		}
+	}
+}
+
+// TestNewInstanceFingerprintRejectsSharedPlaceholder pins the contract
+// that {shared} in a fingerprint input is rejected. Fingerprints are
+// expanded with an empty shared path (so they never depend on the shared
+// location), which means {shared}/whatever collapses to /whatever — a
+// path outside the repo. The containment check catches that.
+func TestNewInstanceFingerprintRejectsSharedPlaceholder(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+
+	resource := config.Resource{
+		Name: "bundler",
+		Path: "vendor/bundle",
+		Fingerprint: []string{
+			"{shared}/ignored",
+		},
+	}
+
+	_, err := newInstance(
+		root,
+		resource,
+		filepath.Join(root, "vendor", "bundle"),
+	)
+	if err == nil {
+		t.Fatal("expected error for {shared}-rooted fingerprint input")
+	}
+}
+
+// TestNewInstanceFingerprintRejectsEscape pins the containment check
+// itself: a fingerprint input that resolves outside the repository root
+// via `..` MUST be rejected up front.
+func TestNewInstanceFingerprintRejectsEscape(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+
+	resource := config.Resource{
+		Name: "bundler",
+		Path: "vendor/bundle",
+		Fingerprint: []string{
+			"{root}/../secret",
+		},
+	}
+
+	_, err := newInstance(
+		root,
+		resource,
+		filepath.Join(root, "vendor", "bundle"),
+	)
+	if err == nil {
+		t.Fatal("expected error for fingerprint input escaping repo root")
+	}
+}
+
+// TestNewInstanceFingerprintRejectsUnknownPlaceholder pins the strict-
+// expand upgrade: a typo like {shred} MUST error rather than passing
+// through as a literal path component.
+func TestNewInstanceFingerprintRejectsUnknownPlaceholder(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+
+	resource := config.Resource{
+		Name: "bundler",
+		Path: "vendor/bundle",
+		Fingerprint: []string{
+			"{shred}/Gemfile",
+		},
+	}
+
+	_, err := newInstance(
+		root,
+		resource,
+		filepath.Join(root, "vendor", "bundle"),
+	)
+	if err == nil {
+		t.Fatal("expected error for unknown placeholder in fingerprint")
 	}
 }

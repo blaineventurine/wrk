@@ -50,6 +50,7 @@ func Status(
 	if err != nil {
 		return nil, err
 	}
+	printWarnings(cfg, options.Stdout)
 
 	reg, err := loadRegistry(repo)
 	if err != nil {

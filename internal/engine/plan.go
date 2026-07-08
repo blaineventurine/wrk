@@ -33,6 +33,7 @@ func buildPlan(
 	if err != nil {
 		return planner.Plan{}, err
 	}
+	printWarnings(cfg, options.Stdout)
 
 	if prepare != nil {
 		if err := prepare(cfg); err != nil {

@@ -754,3 +754,93 @@ func TestLoadRejectsWhenNeitherExists(t *testing.T) {
 		t.Fatalf("expected ErrConfigNotFound, got %v", err)
 	}
 }
+
+// TestMergeWarnsOnPathOverride pins that a local override with a
+// different Path than the shared entry it replaces surfaces a
+// human-readable warning through cfg.Warnings. A same-name override
+// with a matching Path is silent.
+func TestMergeWarnsOnPathOverride(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: env
+    path: .env
+  - name: node
+    path: node_modules
+`)
+	writeFile(t, filepath.Join(root, LocalFilename), `
+resources:
+  - name: env
+    path: env.dev
+  - name: node
+    path: node_modules
+`)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.Warnings) != 1 {
+		t.Fatalf("Warnings = %v, want exactly one entry", cfg.Warnings)
+	}
+
+	w := cfg.Warnings[0]
+	for _, want := range []string{`"env"`, `".env"`, `"env.dev"`, "redirects"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q missing %q", w, want)
+		}
+	}
+}
+
+// TestLoadNoWarningsWithoutOverride confirms Warnings stays nil for a
+// vanilla shared-only load — nothing to complain about.
+func TestLoadNoWarningsWithoutOverride(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: env
+    path: .env
+`)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("Warnings = %v, want none", cfg.Warnings)
+	}
+}
+
+// TestLoadNoWarningsForMatchingPathOverride confirms that overriding
+// the hook (but keeping the same Path) is silent — Warnings is reserved
+// for redirections, not for every override.
+func TestLoadNoWarningsForMatchingPathOverride(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: node
+    path: node_modules
+    hooks:
+      initialize:
+        - run: yarn install
+`)
+	writeFile(t, filepath.Join(root, LocalFilename), `
+resources:
+  - name: node
+    path: node_modules
+    hooks:
+      initialize:
+        - run: pnpm install
+`)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("Warnings = %v, want none (path unchanged)", cfg.Warnings)
+	}
+}
