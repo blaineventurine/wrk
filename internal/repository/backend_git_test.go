@@ -567,3 +567,132 @@ func TestParsePrunableWorktreesEmptyOnClean(t *testing.T) {
 		t.Fatalf("parsePrunableWorktrees(clean) = %v, want empty", got)
 	}
 }
+
+// TestGitBackendRemoveWorkspace exercises the happy path: seed a
+// linked worktree, then removeWorkspace(force=false) MUST both
+// delete the directory AND drop the metadata record so a follow-up
+// porcelain listing is clean. Just running `git worktree remove`
+// with a wrong path (or forgetting to pass `--`) would leave the
+// worktree standing and the assertion below would catch it.
+func TestGitBackendRemoveWorkspace(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	feature := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+		t.Fatalf("createWorkspace: %v", err)
+	}
+
+	if err := (gitBackend{}).removeWorkspace(root, feature, false); err != nil {
+		t.Fatalf("removeWorkspace: %v", err)
+	}
+
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("worktree directory survives removeWorkspace: err=%v", err)
+	}
+
+	// The porcelain listing must no longer mention the removed
+	// worktree. A remove that silently no-op'd would still show the
+	// record and let a downstream Detect stumble into a stale path.
+	out, err := capture(root, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("post-remove worktree list: %v", err)
+	}
+	if strings.Contains(out, "feature") {
+		t.Errorf("post-remove porcelain still mentions feature:\n%s", out)
+	}
+}
+
+// TestGitBackendRemoveWorkspaceIdempotent pins the "already gone"
+// branch: a target path that git never registered as a worktree
+// MUST NOT surface an error — the executor calls this defensively
+// so a user who rm -rf'd their worktree manually can still run the
+// `wrk` remove command without hitting a red herring.
+func TestGitBackendRemoveWorkspaceIdempotent(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	nonexistent := filepath.Join(parent, "never-was")
+	if err := (gitBackend{}).removeWorkspace(root, nonexistent, false); err != nil {
+		t.Errorf("idempotent removeWorkspace of missing target: %v", err)
+	}
+}
+
+// TestGitBackendRemoveWorkspaceForce covers the --force branch: git
+// refuses to remove a worktree whose working tree contains
+// modifications or untracked files, so the force=true argument MUST
+// reach the git CLI as `--force`. A regression that dropped the
+// flag (or applied it in the wrong order relative to `--`) would
+// leave the worktree standing and the outer test would fail.
+func TestGitBackendRemoveWorkspaceForce(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	feature := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+		t.Fatalf("createWorkspace: %v", err)
+	}
+
+	// Untracked file inside the worktree — enough for `git worktree
+	// remove` (without --force) to refuse, so force=false would
+	// fail this test and prove the flag is what carried the day.
+	if err := os.WriteFile(
+		filepath.Join(feature, "dirty"),
+		[]byte("unclean"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (gitBackend{}).removeWorkspace(root, feature, true); err != nil {
+		t.Fatalf("removeWorkspace --force: %v", err)
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("force remove left dir behind: err=%v", err)
+	}
+}
+
+// TestRepositoryRemoveWorkspace pins the Repository-level wrapper:
+// Detect + RemoveWorkspace on a live secondary worktree MUST drop
+// the worktree, exercising Repository.RemoveWorkspace's filepath.Abs
+// canonicalization plus dispatch through the backend interface.
+func TestRepositoryRemoveWorkspace(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	feature := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+		t.Fatalf("createWorkspace: %v", err)
+	}
+
+	repo, err := Detect(root, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if err := repo.RemoveWorkspace(feature, false); err != nil {
+		t.Fatalf("RemoveWorkspace: %v", err)
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("worktree directory survives RemoveWorkspace: err=%v", err)
+	}
+}

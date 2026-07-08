@@ -119,6 +119,36 @@ func (jjBackend) pruneGhosts(root string) ([]string, error) {
 	return pruned, nil
 }
 
+// removeWorkspace forgets the workspace whose working-copy root
+// matches target via `jj workspace forget`. jj requires the
+// workspace NAME, not its path, so we translate through the same
+// template listing detectGhosts uses; canonicalization on both
+// sides keeps macOS /private vs /var symlinks aligned. If no
+// workspace resolves to target we return nil, matching the
+// git backend's idempotent behavior. force is accepted for
+// interface parity but ignored: as of jj 0.43 `workspace forget`
+// has no --force flag and jj happily forgets a workspace whose
+// working copy is dirty or gone.
+func (jjBackend) removeWorkspace(root, target string, _ bool) error {
+	entries, err := listJJWorkspaces(root)
+	if err != nil {
+		return err
+	}
+
+	canonTarget := canonicalize(target)
+	for _, e := range entries {
+		if e.name == "" || e.path == "" {
+			continue
+		}
+		if canonicalize(e.path) != canonTarget {
+			continue
+		}
+		// "--" guards a workspace name that begins with "-".
+		return passthrough(root, "jj", "workspace", "forget", "--", e.name)
+	}
+	return nil
+}
+
 // jjWorkspaceEntry pairs a workspace name with the path jj reported
 // for its root. `ghost` is true when jj's template evaluation itself
 // failed — i.e. the working copy is unreachable and the path was

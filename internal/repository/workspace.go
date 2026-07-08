@@ -24,6 +24,23 @@ func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
 	return Detect(dest, r.VCS())
 }
 
+// RemoveWorkspace tears down the workspace/worktree at target.
+// force passes through to the VCS command (git worktree remove
+// --force); jj workspace forget has no --force flag so force is a
+// no-op on the jj backend. Idempotent: if the workspace is already
+// absent from VCS metadata, returns nil.
+//
+// target is canonicalized with filepath.Abs — NOT EvalSymlinks —
+// because the caller passed a specific path; walking through
+// symlinks might land on a different workspace than intended.
+func (r *Repository) RemoveWorkspace(target string, force bool) error {
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	return r.backend.removeWorkspace(r.Root, abs, force)
+}
+
 // ResolveDestination applies the sibling-default policy and refuses
 // destinations that already exist or nest inside a live workspace.
 // Read-only; shared with CreateWorkspace so preflight is single-source.

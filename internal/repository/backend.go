@@ -35,6 +35,14 @@ type backend interface {
 	// callers can surface them in output. Returns an empty slice (not
 	// nil) when the repository is clean.
 	pruneGhosts(root string) ([]string, error)
+
+	// removeWorkspace tears down the workspace/worktree at target,
+	// running from root. force enables VCS-specific override of
+	// safety refusals (`git worktree remove --force`); jj's
+	// `workspace forget` has no equivalent flag and treats force as
+	// a no-op. Idempotent: if target is not currently tracked as a
+	// live workspace, returns nil.
+	removeWorkspace(root, target string, force bool) error
 }
 
 func backendFor(vcs VCS) (backend, error) {

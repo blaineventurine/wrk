@@ -388,3 +388,63 @@ func TestParseJJInlineErrorRejectsPlainPath(t *testing.T) {
 		t.Fatalf("parseJJInlineError(plain path) = (%q, true), want (_, false)", got)
 	}
 }
+
+// TestJJBackendRemoveWorkspace pins the happy path: seed a jj
+// secondary workspace, forget it via removeWorkspace, and check
+// that jj's own workspace list no longer surfaces its name. The
+// backend translates the target PATH into the workspace NAME jj
+// requires, so a regression that fed the path directly to
+// `workspace forget` would produce a jj-side error rather than a
+// silent success.
+func TestJJBackendRemoveWorkspace(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	feature := filepath.Join(parent, "feature")
+	if err := (jjBackend{}).createWorkspace(root, feature); err != nil {
+		t.Fatalf("createWorkspace: %v", err)
+	}
+
+	if err := (jjBackend{}).removeWorkspace(root, feature, false); err != nil {
+		t.Fatalf("removeWorkspace: %v", err)
+	}
+
+	// jj retains the workspace directory on disk (workspace forget
+	// is a metadata operation) — the assertion is on the listing,
+	// not the filesystem. Any residual "feature" mention means the
+	// forget never ran.
+	cmd := exec.Command("jj", "-R", root, "workspace", "list")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jj workspace list: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "feature") {
+		t.Errorf("jj still lists feature workspace:\n%s", out)
+	}
+}
+
+// TestJJBackendRemoveWorkspaceIdempotent pins the "already gone"
+// branch mirroring the git version: a target that jj never knew
+// about MUST NOT error — callers rely on this to reconcile stale
+// state without a preflight lookup.
+func TestJJBackendRemoveWorkspaceIdempotent(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	nonexistent := filepath.Join(parent, "never-was")
+	if err := (jjBackend{}).removeWorkspace(root, nonexistent, false); err != nil {
+		t.Errorf("idempotent jj removeWorkspace of missing target: %v", err)
+	}
+}

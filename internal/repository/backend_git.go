@@ -73,6 +73,41 @@ func (gitBackend) pruneGhosts(root string) ([]string, error) {
 	return ghosts, nil
 }
 
+// removeWorkspace tears down the worktree at target via `git
+// worktree remove`. If target is not among the live worktrees the
+// call succeeds silently — a user who rm -rf'd the directory
+// out-of-band should be able to invoke this without seeing a
+// failure, and the metadata cleanup is `wrk gc`'s job via
+// pruneGhosts. Both sides of the path comparison are canonicalized
+// so macOS's /private vs /var symlink pair doesn't miss a match.
+func (gitBackend) removeWorkspace(root, target string, force bool) error {
+	out, err := capture(root, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+
+	canonTarget := canonicalize(target)
+	found := false
+	for _, ws := range parseWorktreePorcelain(out) {
+		if canonicalize(ws) == canonTarget {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	// "--" separates options from the (absolute) target path so a
+	// destination beginning with "-" cannot be reparsed as a flag.
+	args = append(args, "--", target)
+	return passthrough(root, "git", args...)
+}
+
 // parseWorktreePorcelain extracts the roots of live worktrees from
 // `git worktree list --porcelain` output.
 //
