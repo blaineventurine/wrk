@@ -1,0 +1,18 @@
+# golangci-lint v2 configuration.
+#
+# Kept minimal on purpose: we run the default linter set and only relax
+# checks that generate noise for zero real safety.
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Writing to os.Stdout / os.Stderr via fmt.F*print* can technically
+      # return an error, but there is nothing sensible for a CLI to do
+      # when its own stdout is broken. Checking these errors would force
+      # every command-line print site to be wrapped in `_, _ = ...`, and
+      # that noise buries the errcheck violations that actually matter.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
