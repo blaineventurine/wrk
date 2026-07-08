@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/blaineventurine/wrk/internal/commands"
@@ -196,12 +197,20 @@ func environment(env map[string]string) []string {
 		return nil
 	}
 
-	result := make([]string, 0, len(env))
+	// Sort by key so that KEY=VALUE ordering is deterministic. Go maps
+	// randomize iteration order; os/exec doesn't care about the order,
+	// but reproducible hook logs are worth the cheap sort.
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 
-	for key, value := range env {
+	result := make([]string, 0, len(env))
+	for _, key := range keys {
 		result = append(
 			result,
-			fmt.Sprintf("%s=%s", key, value),
+			fmt.Sprintf("%s=%s", key, env[key]),
 		)
 	}
 

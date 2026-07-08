@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -17,7 +18,8 @@ func registryPath(repo *repository.Repository) string {
 }
 
 func loadRegistry(repo *repository.Repository) (detachRegistry, error) {
-	data, err := os.ReadFile(registryPath(repo))
+	path := registryPath(repo)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return detachRegistry{}, nil
 	}
@@ -26,7 +28,14 @@ func loadRegistry(repo *repository.Repository) (detachRegistry, error) {
 	}
 	reg := detachRegistry{}
 	if err := json.Unmarshal(data, &reg); err != nil {
-		return detachRegistry{}, nil // tolerate corruption; treat as empty
+		// Corruption is tolerated (starting from empty is safe: the
+		// registry is accretive and only tracks user-declared detaches),
+		// but a silent reset would hide a real problem. Log to stderr
+		// so the operator sees the file that got wiped on next save.
+		fmt.Fprintf(os.Stderr,
+			"wrk: detach registry at %s is corrupt (%v), treating as empty\n",
+			path, err)
+		return detachRegistry{}, nil
 	}
 	return reg, nil
 }

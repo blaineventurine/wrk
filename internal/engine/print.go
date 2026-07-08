@@ -108,7 +108,7 @@ func describeAction(action planner.Action) (string, bool) {
 		}
 		return "discard independent local copy at " + a.Path, true
 	default:
-		return fmt.Sprintf("%T", action), false
+		panic(fmt.Sprintf("engine/print: describeAction missing case for %T", action))
 	}
 }
 

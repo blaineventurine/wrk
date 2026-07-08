@@ -72,3 +72,43 @@ func TestTreeSizeMissingIsZero(t *testing.T) {
 		t.Fatalf("treeSize (missing) = %d, want 0", got)
 	}
 }
+
+// TestTreeSizeContinuesOnPermissionError pins M11: a subdirectory
+// wrk cannot read must not fail the whole walk. treeSize returns a
+// lower bound (counting the readable siblings) rather than aborting
+// the caller's `wrk list --size` command with a permission error.
+func TestTreeSizeContinuesOnPermissionError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; skipping")
+	}
+
+	root := t.TempDir()
+
+	// One readable sibling with known size…
+	if err := os.WriteFile(filepath.Join(root, "readable"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// …and one subtree the walk cannot enter.
+	locked := filepath.Join(root, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "hidden"), []byte("xxxxx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir() cleanup will chmod the parent when tearing down; we
+	// still need to restore this one so removal succeeds.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	got, err := treeSize(root)
+	if err != nil {
+		t.Fatalf("treeSize returned error despite permission-denied subtree: %v", err)
+	}
+	if got < 5 {
+		t.Fatalf("treeSize = %d, want at least 5 (readable sibling)", got)
+	}
+}

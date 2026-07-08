@@ -51,3 +51,60 @@ func TestDimUnwrapped(t *testing.T) {
 		t.Fatalf("dim(no-color) = %q, want %q", got, "hello")
 	}
 }
+
+// TestUseColorHonorsCLICOLORForce pins M15: when CLICOLOR_FORCE is set
+// to a non-empty value other than "0", useColor returns true even
+// though stdout in the test process is not a TTY. The overrides for
+// disabling color (--no-color, NO_COLOR) still take priority.
+func TestUseColorHonorsCLICOLORForce(t *testing.T) {
+	// Ensure the other env vars we care about are clean, then set
+	// CLICOLOR_FORCE and confirm useColor returns true despite the
+	// non-TTY test stdout.
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	if !useColor() {
+		t.Fatalf("useColor() = false with CLICOLOR_FORCE=1, want true")
+	}
+}
+
+// TestUseColorCLICOLORForceZeroDoesNotForce ensures the standard
+// escape hatch — CLICOLOR_FORCE=0 — is respected: it must not enable
+// color on non-TTYs.
+func TestUseColorCLICOLORForceZeroDoesNotForce(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "0")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	// Test binaries run without a TTY, so the fallback path is exercised.
+	if useColor() {
+		t.Fatalf("useColor() = true with CLICOLOR_FORCE=0, want false")
+	}
+}
+
+// TestUseColorNoColorBeatsCLICOLORForce pins the precedence: NO_COLOR
+// wins over CLICOLOR_FORCE even when both are set. Users who set
+// NO_COLOR globally should not have that opinion overridden by an
+// upstream shell that also exports CLICOLOR_FORCE.
+func TestUseColorNoColorBeatsCLICOLORForce(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	if useColor() {
+		t.Fatalf("useColor() = true with NO_COLOR=1 and CLICOLOR_FORCE=1, want false")
+	}
+}

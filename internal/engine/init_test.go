@@ -437,6 +437,75 @@ func TestPackageJSONWorkspacesMissing(t *testing.T) {
 	}
 }
 
+// TestInitDetectsBrokenSymlinkAsEnvExample pins M6: `has` uses Lstat,
+// so an .env.example that is a broken symlink still counts as
+// "present" for detection purposes. Under the old Stat-based check,
+// this repo would silently miss the .env convention.
+func TestInitDetectsBrokenSymlinkAsEnvExample(t *testing.T) {
+	dir := t.TempDir()
+
+	// Symlink to a non-existent target — Lstat succeeds, Stat does not.
+	link := filepath.Join(dir, ".env.example")
+	target := filepath.Join(dir, ".env.example.gone")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Sanity: the symlink target really is missing (so Stat would fail).
+	if _, err := os.Stat(link); err == nil {
+		t.Skip("environment resolves symlinks eagerly; test cannot exercise the Lstat path here")
+	}
+
+	got := detect(dir)
+
+	found := false
+	for _, d := range got {
+		if d.kind == "env" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("detect(broken .env.example symlink) = %+v, want an 'env' detection", got)
+	}
+}
+
+// TestInitExclusiveCreateDoesNotClobber pins M7: without --force, Init
+// uses O_EXCL to open the target, so an existing file survives byte-
+// for-byte and the error message tells the user how to override.
+// Together these close the pre-M7 TOCTOU window where a racing writer
+// could see the file wiped between the exists-check and the write.
+func TestInitExclusiveCreateDoesNotClobber(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, ".wrk.yml")
+	original := "resources:\n  - name: kept\n    path: kept\n"
+	writeFile(t, target, original)
+
+	// Also drop a detection so render() would produce non-empty content
+	// if the O_EXCL guard failed.
+	touch(t, filepath.Join(dir, "Gemfile"))
+
+	err := Init(InitOptions{Root: dir, Stdout: &bytes.Buffer{}})
+	if err == nil {
+		t.Fatal("expected error when .wrk.yml already exists without --force")
+	}
+	if !strings.Contains(err.Error(), "already exists") ||
+		!strings.Contains(err.Error(), "--force") {
+		t.Fatalf("error = %q, want mention of 'already exists' and '--force'", err.Error())
+	}
+
+	// The exclusive-create path must not truncate: file content stays
+	// exactly what we wrote.
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != original {
+		t.Fatalf("target was modified\n got: %q\nwant: %q", got, original)
+	}
+}
+
+
 // --- helpers ---
 
 func writeFile(t *testing.T, path, content string) {

@@ -2,10 +2,12 @@ package engine
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/repository"
@@ -195,6 +197,54 @@ func TestLoadRegistryToleratesCorruption(t *testing.T) {
 	got := sortedRegistryEntry(readRegistry(t, repo), repo.Root)
 	if want := []string{"b"}; !equalSlice(got, want) {
 		t.Fatalf("registry entry after recovery = %v, want %v", got, want)
+	}
+}
+
+// TestLoadRegistryLogsCorruption pins M12: the recovery-from-empty
+// path is still correct (existing test above), but a corrupt registry
+// must also announce itself on stderr so an operator can see what got
+// wiped on the next save. Silence used to hide real filesystem issues.
+func TestLoadRegistryLogsCorruption(t *testing.T) {
+	repo := newTestRepo(t)
+
+	// Seed the registry path with garbage.
+	path := registryPath(repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not json {"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture stderr for the duration of the call.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	reg, loadErr := loadRegistry(repo)
+
+	// Restore stderr and collect the pipe output.
+	_ = w.Close()
+	os.Stderr = origStderr
+	buf, _ := io.ReadAll(r)
+
+	if loadErr != nil {
+		t.Fatalf("loadRegistry: %v", loadErr)
+	}
+	if len(reg) != 0 {
+		t.Fatalf("loadRegistry from corrupt file = %v, want empty", reg)
+	}
+	out := string(buf)
+	if !strings.Contains(out, "detach registry") ||
+		!strings.Contains(out, "corrupt") ||
+		!strings.Contains(out, "treating as empty") {
+		t.Fatalf("stderr = %q, want corruption warning mentioning the file and 'treating as empty'", out)
+	}
+	if !strings.Contains(out, path) {
+		t.Fatalf("stderr = %q, want mention of registry path %q", out, path)
 	}
 }
 

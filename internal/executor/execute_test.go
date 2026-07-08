@@ -441,3 +441,43 @@ func TestExecuteSymlinkRefusesRealFile(t *testing.T) {
 		t.Errorf("expected real file preserved, got %q", got)
 	}
 }
+
+// TestEnvironmentIsSorted pins M18: the KEY=VALUE slice environment
+// returns must be sorted by key. os/exec doesn't care about the order,
+// but hook logs (`wrk --debug` etc.) become reproducible only if the
+// environment we assemble is stable across runs; Go's map iteration is
+// not.
+func TestEnvironmentIsSorted(t *testing.T) {
+	// Keys chosen so map-order flakes would surface quickly: they all
+	// start with distinct letters and lexicographic order does not
+	// match any obvious insertion pattern.
+	in := map[string]string{
+		"zeta":   "z",
+		"alpha":  "a",
+		"middle": "m",
+	}
+
+	got := environment(in)
+	want := []string{"alpha=a", "middle=m", "zeta=z"}
+
+	if len(got) != len(want) {
+		t.Fatalf("environment(...) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("environment[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestEnvironmentEmpty pins the fast path: an empty input returns nil
+// so callers can hand the result straight to exec.Cmd.Env, which
+// treats nil as "inherit".
+func TestEnvironmentEmpty(t *testing.T) {
+	if got := environment(nil); got != nil {
+		t.Fatalf("environment(nil) = %v, want nil", got)
+	}
+	if got := environment(map[string]string{}); got != nil {
+		t.Fatalf("environment(empty) = %v, want nil", got)
+	}
+}

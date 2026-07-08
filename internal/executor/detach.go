@@ -71,18 +71,24 @@ func copyFile(
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = out.Close()
-	}()
 
 	if _, err := io.Copy(
 		out,
 		in,
 	); err != nil {
+		_ = out.Close()
 		return err
 	}
 
 	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+
+	// Close is deliberately checked here instead of via defer: on some
+	// filesystems the final flush-to-disk error is only surfaced by
+	// Close(), and losing it would leave a silently truncated file.
+	if err := out.Close(); err != nil {
 		return err
 	}
 

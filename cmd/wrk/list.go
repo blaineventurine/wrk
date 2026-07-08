@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -43,7 +44,7 @@ var listCmd = &cobra.Command{
 	},
 }
 
-func printList(w *os.File, rows []engine.ResourceListing, withSize bool) error {
+func printList(w io.Writer, rows []engine.ResourceListing, withSize bool) error {
 	showOrigin := hasNonSharedListOrigin(rows)
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -102,6 +103,12 @@ func humanSize(n int64) string {
 	for x := n / unit; x >= unit; x /= unit {
 		div *= unit
 		exp++
+	}
+	// Clamp to the last defined suffix ('E'). humanSize is only ever fed
+	// counts of bytes on a real filesystem, so this is a defensive belt
+	// against unbounded overflow rather than a case anyone can trip.
+	if exp > 5 {
+		exp = 5
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }

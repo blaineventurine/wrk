@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/location"
@@ -135,44 +138,57 @@ func countVariants(subtree string, fingerprinted bool) int {
 func isBookkeeping(name string) bool {
 	switch {
 	case name == ".wrk-lock",
-		hasSuffix(name, ".wrk-lock"),
-		hasSuffix(name, ".wrk-tmp"),
-		hasSuffix(name, ".wrk-backup"):
+		strings.HasSuffix(name, ".wrk-lock"),
+		strings.HasSuffix(name, ".wrk-tmp"),
+		strings.HasSuffix(name, ".wrk-backup"):
 		return true
 	}
 	return false
 }
 
-func hasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
-}
-
 // treeSize returns the total size in bytes of all regular files under root.
 // Symlinks are not followed. A missing root yields size 0.
+//
+// Errors reading individual entries (missing files, permission denied,
+// stat failures) are tolerated: the walk continues and the affected
+// bytes are simply omitted from the reported total. The returned size is
+// therefore a lower bound on real usage in the face of partial access,
+// which is preferable to failing the whole `wrk list --size` command.
 func treeSize(root string) (int64, error) {
 	var total int64
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
-			return err
+			if errors.Is(err, fs.ErrPermission) {
+				// Skip the whole subtree we can't descend into.
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			// Other transient errors (stale fs handles, etc.) are also
+			// tolerated: reporting a slightly-low size beats aborting.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() || d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
+			// File vanished, permission dropped between readdir and
+			// stat — skip and keep counting the rest.
+			return nil
 		}
 		total += info.Size()
 		return nil
 	})
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
 	}
 

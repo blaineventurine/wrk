@@ -141,6 +141,11 @@ func parseRemote(url string) string {
 		)
 	}
 
+	// Unknown URL scheme (e.g. file://, plain local paths, custom
+	// remote helpers). Fall back to the local-hash identity path in
+	// repositoryID rather than logging: the fallback is silent and
+	// deterministic, and users hitting it usually already know their
+	// remote is unusual.
 	return ""
 }
 

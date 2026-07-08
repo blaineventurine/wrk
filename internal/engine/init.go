@@ -30,29 +30,43 @@ type detection struct {
 func Init(options InitOptions) error {
 	target := filepath.Join(options.Root, ".wrk.yml")
 
-	if !options.DryRun && !options.Force {
-		if _, err := os.Stat(target); err == nil {
-			return fmt.Errorf(
-				"%s already exists — use --force to overwrite",
-				target,
-			)
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	detections := detect(options.Root)
-	content := render(options.Root, detections)
-
 	if options.DryRun {
+		detections := detect(options.Root)
+		content := render(options.Root, detections)
 		fmt.Fprintln(options.Stdout, "# Would write to:", target)
 		fmt.Fprintln(options.Stdout)
 		_, err := fmt.Fprint(options.Stdout, content)
 		return err
 	}
 
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-		return err
+	detections := detect(options.Root)
+	content := render(options.Root, detections)
+
+	if options.Force {
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			return err
+		}
+	} else {
+		// O_EXCL closes the TOCTOU window between the exists-check and
+		// the write: another writer racing us gets EEXIST here, and so
+		// do we for pre-existing files.
+		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				return fmt.Errorf(
+					"%s already exists — use --force to overwrite",
+					target,
+				)
+			}
+			return err
+		}
+		if _, err := f.WriteString(content); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(options.Stdout, "✓ wrote %s\n", target)
@@ -77,7 +91,11 @@ func detect(root string) []detection {
 	var results []detection
 
 	has := func(name string) bool {
-		_, err := os.Stat(filepath.Join(root, name))
+		// Lstat, not Stat, so a broken symlink still counts as "present":
+		// the intent here is "does this project use this convention?", and
+		// the answer is yes even when the target the symlink points at is
+		// currently missing.
+		_, err := os.Lstat(filepath.Join(root, name))
 		return err == nil
 	}
 
@@ -132,9 +150,16 @@ func detect(root string) []detection {
 
 // packageJSONWorkspaces reads the "workspaces" field from a package.json.
 // Returns the raw patterns (e.g. ["packages/*", "apps/*"]) or nil.
+//
+// Best-effort: read or parse errors are logged to stderr and the caller
+// continues without a workspaces detection. This keeps `wrk init` from
+// failing on a broken package.json in an otherwise-supported repo.
 func packageJSONWorkspaces(path string) []string {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"wrk: couldn't read %s: %v (skipping workspace detection)\n",
+			path, err)
 		return nil
 	}
 
@@ -142,7 +167,13 @@ func packageJSONWorkspaces(path string) []string {
 	var raw struct {
 		Workspaces json.RawMessage `json:"workspaces"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil || raw.Workspaces == nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"wrk: couldn't parse %s: %v (skipping workspace detection)\n",
+			path, err)
+		return nil
+	}
+	if raw.Workspaces == nil {
 		return nil
 	}
 
@@ -180,12 +211,20 @@ func humanKind(kind string) string {
 }
 
 // render composes the generated .wrk.yml from YAML fragments embedded
-// under examples/init/. When nothing is detected the entire file is a
-// single commented walkthrough (empty.yml); otherwise a header block
-// is followed by `resources:` and each detection's fragment indented
-// two spaces to sit under it.
+// under examples/init/. When nothing (uncommented) is detected the entire
+// file is a single commented walkthrough (empty.yml); otherwise a header
+// block is followed by `resources:` and each detection's fragment
+// indented two spaces to sit under it.
+//
+// A detection whose fragment ships fully commented (today: only
+// `cargo-commented`) is not, on its own, a real recommendation: rendering
+// only such fragments would give the user a `resources:` header followed
+// by nothing but comments, which reads worse than the walkthrough
+// template. When every detection is in the commented-only whitelist we
+// fall through to the empty template instead. Extend the whitelist as
+// new comment-only fragments are added.
 func render(root string, detections []detection) string {
-	if len(detections) == 0 {
+	if len(detections) == 0 || allCommentedOnly(detections) {
 		return loadSnippet("empty.yml", nil)
 	}
 
@@ -199,6 +238,22 @@ func render(root string, detections []detection) string {
 	}
 
 	return b.String()
+}
+
+// commentedOnlyKinds enumerates detection kinds whose YAML fragment is
+// entirely commented out. Add here (not to a broader heuristic) so the
+// intent is explicit at review time.
+var commentedOnlyKinds = map[string]bool{
+	"cargo-commented": true,
+}
+
+func allCommentedOnly(detections []detection) bool {
+	for _, d := range detections {
+		if !commentedOnlyKinds[d.kind] {
+			return false
+		}
+	}
+	return true
 }
 
 // snippetFor returns the raw YAML fragment for a detection kind. Only

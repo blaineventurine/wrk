@@ -22,14 +22,15 @@ const (
 	ansiGreen  = "\x1b[32m"
 	ansiYellow = "\x1b[33m"
 	ansiDim    = "\x1b[2m"
-	ansiBold   = "\x1b[1m"
 )
 
 // useColor reports whether ANSI color should be emitted to stdout.
 //
 // Honors the NO_COLOR standard (https://no-color.org/) and the
 // --no-color flag, and skips coloring when stdout is not a terminal
-// (pipes, redirects, dumb terminals).
+// (pipes, redirects, dumb terminals). CLICOLOR_FORCE (any non-empty
+// value other than "0") overrides only the TTY check — NO_COLOR and
+// --no-color still win.
 func useColor() bool {
 	if noColor {
 		return false
@@ -39,6 +40,9 @@ func useColor() bool {
 	}
 	if os.Getenv("TERM") == "dumb" {
 		return false
+	}
+	if v := os.Getenv("CLICOLOR_FORCE"); v != "" && v != "0" {
+		return true
 	}
 	return isatty.IsTerminal(os.Stdout.Fd())
 }

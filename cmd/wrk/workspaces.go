@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -42,7 +43,7 @@ var workspacesCmd = &cobra.Command{
 	},
 }
 
-func printWorkspaces(w *os.File, summaries []engine.WorkspaceSummary) error {
+func printWorkspaces(w io.Writer, summaries []engine.WorkspaceSummary) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	defer func() {
 		_ = tw.Flush()

@@ -23,6 +23,13 @@ func newRepository(
 	metadataDir string,
 	backend backend,
 ) *Repository {
+	// Internal constructor: every caller lives in this package and has
+	// already resolved these values. A nil backend or empty root is a
+	// programmer bug that would surface much later as a confusing nil
+	// deref inside the VCS layer, so refuse it up front.
+	if root == "" || backend == nil {
+		panic("repository: newRepository called with empty root or nil backend")
+	}
 	return &Repository{
 		Root:         root,
 		RepositoryID: repositoryID,

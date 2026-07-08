@@ -57,6 +57,13 @@ func Load(root string) (*Config, error) {
 
 	shared.Sources = sources
 
+	// Invariant: validate runs on the fully-merged config, and it never
+	// depends on the nil-safe defaults that normalize fills in during
+	// loadFile — so validation errors reference exactly what the user
+	// wrote, not a partially-normalized view of it. If a future
+	// validation rule needs a normalize-supplied field, either add a
+	// normalize step here on `shared` after merge or teach validate to
+	// tolerate the raw form. Do not silently reverse the order.
 	if err := validate(shared); err != nil {
 		return nil, err
 	}

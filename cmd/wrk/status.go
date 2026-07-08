@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -63,7 +64,7 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-func printStatus(w *os.File, report *engine.StatusReport, all bool) error {
+func printStatus(w io.Writer, report *engine.StatusReport, all bool) error {
 	// Configuration source header — only shown when a local override is
 	// in play, so the default output stays clean.
 	if len(report.Sources) > 1 {
