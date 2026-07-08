@@ -167,7 +167,7 @@ worked example.
 | `path` | string | Workspace-relative path of the resource (file or directory). |
 | `fingerprint` | list | Optional. Files whose contents determine which shared variant is used. See [Fingerprinting](#fingerprinting). |
 | `hooks.initialize` | list | Optional. Commands run once to create the shared resource. See [Command execution](#command-execution). |
-| `create` | bool | Optional; defaults to `true`. When `false`, `wrk` will never treat "no shared copy and no hook" as an error — the resource is expected to be provided out-of-band (e.g. a secret file managed elsewhere). |
+| `create` | bool | Optional; defaults to `true`. When `false`, `wrk` treats a missing resource as **intentional** — nothing is provisioned, no hook runs, and `wrk status` reports it as `expected` instead of `absent`. Use this when the file is provided by an external tool (a secrets manager, `direnv`, `1Password`, `sops`) rather than by wrk. |
 
 ### Command execution
 
@@ -252,9 +252,13 @@ resources:
     path: .env
 ```
 
-`wrk` will never create `.env`. If it is missing everywhere, `wrk link`
-reports a conflict — unless you set `create: false`, in which case the
-resource is skipped quietly:
+`wrk` will never create `.env`. If it is missing everywhere, `wrk status`
+reports it as `absent` and `wrk link` fails with a conflict — wrk has no
+way to produce it and no reason to believe you have another source.
+
+If the file *is* actually provided elsewhere (a secrets manager, `direnv`,
+`1Password`, `sops`, a build-time template — anything outside wrk's scope),
+tell wrk that missing is the correct state by setting `create: false`:
 
 ```yaml
 resources:
@@ -262,6 +266,11 @@ resources:
     path: .env
     create: false
 ```
+
+Now the state is `expected` instead of `absent`, `wrk link` skips it
+silently, and `wrk status --exit-code` treats it as healthy. When the
+external tool eventually drops the file into place, wrk will happily
+share it across workspaces on the next `wrk link`.
 
 On the other hand:
 
@@ -387,9 +396,9 @@ Show state across every workspace of the repository:
 wrk status --all
 ```
 
-Exit non-zero if any resource is in a state that `wrk link` would fix —
-`conflict`, `stale`, `absent`, `pending`, `missing`, or `not-linked` — useful
-in CI or pre-commit hooks:
+Exit non-zero if any resource needs user attention (any state except
+`linked`, `expected`, or `detached` — see [Resource states](#resource-states)
+below). Useful in CI or pre-commit hooks:
 
 ```bash
 wrk status --exit-code
@@ -416,15 +425,33 @@ Example output:
   /Users/blaine/repos/monolith-wip       unhealthy  1 linked, 1 conflict
 ```
 
-Workspace states roll up per-resource state:
+### Resource states
+
+Every row of `wrk status` reports one of these per-resource states:
+
+| State | Meaning | What to do |
+|---|---|---|
+| `linked` | The workspace path is a symlink pointing at the correct shared copy. | Nothing — this is the healthy state. |
+| `expected` | Nothing exists locally, and the resource is `create: false`. Provided out-of-band (e.g. `direnv`, a secrets manager). | Nothing — the missing file is intentional. |
+| `detached` | You ran `wrk detach`; the workspace path is now an independent local copy. Recorded on purpose. | `wrk link` to reunite with shared storage (keeping local edits requires manual merge), or `wrk relink` to discard local edits and reconnect. |
+| `pending` | Nothing exists yet, but an `initialize` hook is configured. | `wrk link` — the hook runs, then the symlink is installed. |
+| `missing` | The shared copy exists but the workspace symlink is not in place. | `wrk link`. |
+| `not-linked` | A real local copy exists but no shared copy yet. | `wrk link` — the local copy moves into shared storage and a symlink takes its place. |
+| `stale` | The workspace *is* a symlink, but it points at the wrong shared target. Almost always because a fingerprint input (e.g. `package.json`, `Gemfile.lock`) changed since the last `wrk link`, so a new shared variant now applies. | `wrk link` — the symlink is repointed to the current variant. |
+| `conflict` | Both a real local copy AND a shared copy exist. `wrk link` refuses to clobber either. | Decide which one is authoritative. Delete the workspace copy and run `wrk link` to accept the shared copy, or run `wrk detach` to accept the workspace copy and keep it independent. |
+| `absent` | Nothing exists anywhere, no `initialize` hook is configured, and `create` is `true`. wrk has no way to produce it. | Provide the file, add a hook, or (if the file is provided externally) set `create: false`. |
+
+`wrk status --exit-code` treats every state except `linked`, `expected`, and `detached` as a problem — those three are stable resting states, everything else needs attention.
+
+Workspace states are a rollup of the [resource states](#resource-states) above:
 
 | State | Meaning |
 |---|---|
-| `linked` | All resources are linked (or intentionally expected out-of-band). |
-| `detached` | All resources have been intentionally detached. |
-| `partial` | Some resources are linked, some are detached. |
-| `pending` | At least one resource is waiting for its initialize hook to run. |
-| `unhealthy` | At least one resource needs user action (conflict, stale link, etc.). |
+| `linked` | Every resource is `linked` or `expected`. Nothing to do. |
+| `detached` | Every resource is `detached`. |
+| `partial` | A mix of `linked` and `detached` resources — deliberate mid-state. |
+| `pending` | At least one resource is `pending` (waiting for its initialize hook). Otherwise healthy. |
+| `unhealthy` | At least one resource needs user action — `conflict`, `stale`, `missing`, `not-linked`, or `absent`. |
 
 List configured resources and their shared storage:
 
