@@ -6,3 +6,5 @@ dist/
 
 coverage.out
 
+# Compiled Go test binaries left behind after `go test -c`.
+*.test
