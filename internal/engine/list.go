@@ -140,7 +140,9 @@ func isBookkeeping(name string) bool {
 	case name == ".wrk-lock",
 		strings.HasSuffix(name, ".wrk-lock"),
 		strings.HasSuffix(name, ".wrk-tmp"),
-		strings.HasSuffix(name, ".wrk-backup"):
+		strings.HasSuffix(name, ".wrk-backup"),
+		strings.HasSuffix(name, ".wrk-deleting"),
+		strings.HasSuffix(name, ".wrk-forgetting"):
 		return true
 	}
 	return false

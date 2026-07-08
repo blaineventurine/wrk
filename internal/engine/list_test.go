@@ -112,3 +112,21 @@ func TestTreeSizeContinuesOnPermissionError(t *testing.T) {
 		t.Fatalf("treeSize = %d, want at least 5 (readable sibling)", got)
 	}
 }
+
+func TestIsBookkeepingHonorsCleanupMarkers(t *testing.T) {
+	cases := map[string]bool{
+		".wrk-lock":                true,
+		"5fd1d0d6.wrk-lock":        true,
+		"5fd1d0d6.wrk-tmp":         true,
+		"5fd1d0d6.wrk-backup":      true,
+		"5fd1d0d6.wrk-deleting":    true,
+		"5fd1d0d6.wrk-forgetting":  true,
+		"5fd1d0d6":                 false,
+		".installed":               false,
+	}
+	for name, want := range cases {
+		if got := isBookkeeping(name); got != want {
+			t.Errorf("isBookkeeping(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
