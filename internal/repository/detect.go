@@ -45,7 +45,7 @@ func findRoot(start string) (string, error) {
 	for {
 		if exists(filepath.Join(current, ".jj")) ||
 			exists(filepath.Join(current, ".git")) {
-			return current, nil
+			return canonicalize(current), nil
 		}
 
 		parent := filepath.Dir(current)

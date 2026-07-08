@@ -20,8 +20,15 @@ func (jjBackend) createWorkspace(root, dest string) error {
 }
 
 func (jjBackend) workspaces(root string) ([]string, error) {
-	// `jj workspace list` prints one workspace per line as "name: <ids>".
-	out, err := capture(root, "jj", "workspace", "list")
+	// One process, canonical paths, no name parsing. `self.root()`
+	// is the WorkspaceRef method that returns the workspace root
+	// path; on jj too old to know it, this call fails loudly rather
+	// than silently falling back to the old per-workspace shell-out.
+	out, err := capture(
+		root,
+		"jj", "workspace", "list",
+		"--template", `self.root() ++ "\n"`,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -29,23 +36,11 @@ func (jjBackend) workspaces(root string) ([]string, error) {
 	var paths []string
 
 	for _, line := range strings.Split(out, "\n") {
-		name, _, ok := strings.Cut(line, ":")
-		if !ok {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-
-		// Resolve the name to a filesystem path.
-		wsRoot, err := capture(root, "jj", "workspace", "root", "--name", name)
-		if err != nil {
-			return nil, err
-		}
-
-		paths = append(paths, strings.TrimSpace(wsRoot))
+		paths = append(paths, line)
 	}
 
 	return paths, nil

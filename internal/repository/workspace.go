@@ -21,27 +21,9 @@ import (
 // jj, and wrk's shared-storage links assume workspace roots are
 // siblings, not parents/children of one another.
 func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
-	dest := resolveDestination(r.Root, destination)
-
-	if _, err := os.Stat(dest); err == nil {
-		return nil, fmt.Errorf("destination already exists: %s", dest)
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	workspaces, err := r.Workspaces()
+	dest, err := r.ResolveDestination(destination)
 	if err != nil {
 		return nil, err
-	}
-	if ws, err := containingWorkspace(dest, workspaces); err != nil {
-		return nil, err
-	} else if ws != "" {
-		return nil, fmt.Errorf(
-			"destination %s is inside existing workspace %s; "+
-				"new workspaces must be created outside any existing one "+
-				"(wrk defaults bare names to a sibling of the current workspace)",
-			dest, ws,
-		)
 	}
 
 	if err := r.backend.createWorkspace(r.Root, dest); err != nil {
@@ -49,6 +31,41 @@ func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
 	}
 
 	return Detect(dest, r.VCS())
+}
+
+// ResolveDestination applies wrk's sibling-default policy, then
+// verifies that the destination does not already exist and does not
+// sit inside any live workspace of this repository. Returns the
+// resolved absolute path.
+//
+// Read-only: this performs the same preflight as CreateWorkspace but
+// creates nothing. It is used by `wrk new --dry-run` and by
+// CreateWorkspace itself so the two share a single source of truth.
+func (r *Repository) ResolveDestination(destination string) (string, error) {
+	dest := resolveDestination(r.Root, destination)
+
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("destination already exists: %s", dest)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	workspaces, err := r.Workspaces()
+	if err != nil {
+		return "", err
+	}
+	if ws, err := containingWorkspace(dest, workspaces); err != nil {
+		return "", err
+	} else if ws != "" {
+		return "", fmt.Errorf(
+			"destination %s is inside existing workspace %s; "+
+				"new workspaces must be created outside any existing one "+
+				"(wrk defaults bare names to a sibling of the current workspace)",
+			dest, ws,
+		)
+	}
+
+	return dest, nil
 }
 
 // Workspaces returns the roots of every live workspace/worktree for this
@@ -88,10 +105,11 @@ func isBareName(name string) bool {
 // Both sides are canonicalized (symlinks resolved) before comparison
 // because VCS tooling — `git worktree list`, `jj workspace list` —
 // reports canonical paths, whereas dest is built from the caller's
-// r.Root and may still traverse a symlink (macOS /var → /private/var
-// is the common case). Without canonicalization, filepath.Rel between
-// the two forms wanders through "../.." and false-negatives every
-// nesting check.
+// r.Root. Since B4, findRoot canonicalizes at detection time so r.Root
+// is already canonical; the canonicalize calls below are defense-in-
+// depth for callers that hand-craft a Repository or pass a raw path.
+// Without canonicalization, filepath.Rel between the two forms wanders
+// through "../.." and false-negatives every nesting check.
 func containingWorkspace(dest string, workspaces []string) (string, error) {
 	absDest, err := filepath.Abs(dest)
 	if err != nil {
@@ -123,25 +141,4 @@ func containingWorkspace(dest string, workspaces []string) (string, error) {
 	}
 
 	return "", nil
-}
-
-// canonicalize returns the symlink-resolved form of path, walking up
-// to the deepest existing ancestor when path itself does not yet
-// exist (as is the case for a to-be-created workspace destination).
-// If no ancestor resolves — e.g. path is entirely fictional — the
-// input is returned unchanged.
-func canonicalize(path string) string {
-	var suffix []string
-	current := path
-	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			return filepath.Join(append([]string{resolved}, suffix...)...)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return path
-		}
-		suffix = append([]string{filepath.Base(current)}, suffix...)
-		current = parent
-	}
 }

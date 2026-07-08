@@ -43,24 +43,37 @@ func originURL(root string) string {
 // parseRemote converts a Git remote URL into a host/path identifier, or ""
 // if the URL is not recognized.
 //
+// The host portion is lowercased and the scheme's default port is stripped
+// (`:22` for ssh/git, `:80` for http, `:443` for https) so that
+// `https://GitHub.com/…`, `https://github.com:443/…`, and
+// `ssh://git@github.com:22/…` all converge on `github.com/…`. The path is
+// preserved verbatim — repository paths are case-sensitive on the wire and
+// forge servers reject folded variants.
+//
+// Host aliases (e.g. `ssh.github.com` vs `github.com`, or user-configured
+// SSH `Host` shortcuts) are NOT resolved: users who want those to share
+// storage must standardize their `origin` remote.
+//
 // Examples:
 //
-//	git@github.com:org/repo.git      -> github.com/org/repo
-//	https://github.com/org/repo.git  -> github.com/org/repo
-//	ssh://git@host:22/org/repo       -> host/org/repo
+//	git@github.com:org/repo.git         -> github.com/org/repo
+//	https://github.com/org/repo.git     -> github.com/org/repo
+//	https://GitHub.com/Org/Repo.git     -> github.com/Org/Repo
+//	ssh://git@github.com:22/org/repo    -> github.com/org/repo
+//	ssh://git@host:2222/org/repo        -> host:2222/org/repo
 func parseRemote(url string) string {
 	switch {
 	case strings.HasPrefix(url, "git@"):
-		// scp-like syntax: git@host:path
-		parts := strings.SplitN(url[len("git@"):], ":", 2)
-		if len(parts) != 2 {
+		// scp-like syntax: git@host:path. First colon is the separator.
+		host, path, ok := strings.Cut(url[len("git@"):], ":")
+		if !ok || host == "" || path == "" {
 			return ""
 		}
 
 		return filepath.ToSlash(
 			filepath.Join(
-				parts[0],
-				strings.TrimSuffix(parts[1], ".git"),
+				strings.ToLower(host),
+				strings.TrimSuffix(path, ".git"),
 			),
 		)
 
@@ -70,22 +83,57 @@ func parseRemote(url string) string {
 		strings.HasPrefix(url, "git://"):
 
 		u, err := urlpkg.Parse(url)
-		if err != nil {
+		if err != nil || u.Host == "" {
 			return ""
 		}
+
+		host := normalizeHost(u.Scheme, u.Host)
 
 		path := strings.TrimPrefix(
 			strings.TrimSuffix(u.Path, ".git"),
 			"/",
 		)
+		if path == "" {
+			return ""
+		}
 
 		return filepath.ToSlash(
 			filepath.Join(
-				u.Host,
+				host,
 				path,
 			),
 		)
 	}
 
+	return ""
+}
+
+// normalizeHost lowercases the host and strips the scheme's default port
+// so that the same remote written with an explicit default port matches
+// the elided form. Non-default ports are preserved (`example.com:2222`).
+func normalizeHost(scheme, host string) string {
+	host = strings.ToLower(host)
+
+	name, port, ok := strings.Cut(host, ":")
+	if !ok {
+		return host
+	}
+
+	if port == defaultPort(scheme) {
+		return name
+	}
+
+	return host
+}
+
+func defaultPort(scheme string) string {
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "ssh", "git":
+		return "22"
+	}
 	return ""
 }
