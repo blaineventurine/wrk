@@ -841,3 +841,375 @@ func TestRelinkYesInNonTTYExecutes(t *testing.T) {
 		t.Fatalf(".env should be a symlink after relink --yes, got mode=%s", info.Mode())
 	}
 }
+
+// TestNewWithAbsolutePathCreatesWorktreeThere pins Medium #10: an
+// absolute path is respected literally by ResolveDestination, so
+// `wrk new /somewhere/else` places the new git worktree at
+// /somewhere/else (NOT next to the primary). Verified end-to-end:
+// the directory exists, its `.git` is a linked-worktree gitdir FILE
+// (not a directory), and `wrk workspaces` from the primary now
+// lists the canonicalized absolute path as a live worktree. The
+// workspaces assertion is the load-bearing one — the .git-file
+// signature would still hold even if the worktree were somehow
+// orphaned from git's metadata.
+func TestNewWithAbsolutePathCreatesWorktreeThere(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	// One `create:false` resource so `wrk workspaces` produces a row
+	// per worktree — WorkspaceSummaries is built from Status rows, and
+	// an empty `resources: []` config yields no rows at all. `create:
+	// false` keeps the resource in state `expected` (out-of-band) with
+	// no plan actions and no conflict, so the primary Link inside
+	// NewWorkspace stays a no-op.
+	writeFile(t, filepath.Join(repo, ".wrk.yml"),
+		"resources:\n  - name: env\n    path: .env\n    create: false\n")
+	gitCommitAll(t, repo, "init")
+
+	// Canonicalize the destination base so it matches `git worktree
+	// list --porcelain` output — on macOS t.TempDir() sits under
+	// /var/folders/... which is a symlink to /private/var/folders/...
+	// and git reports the canonical form.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	absDest := filepath.Join(base, "far-away-feature")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", absDest)
+	if code != 0 {
+		t.Fatalf("new %s exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			absDest, code, stdout, stderr)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "-f", absDest).Run()
+		_ = os.RemoveAll(absDest)
+	})
+
+	info, err := os.Stat(absDest)
+	if err != nil {
+		t.Fatalf("stat abs dest %s: %v", absDest, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("abs dest %s should be a directory, got mode=%s", absDest, info.Mode())
+	}
+
+	// Linked-worktree signature: .git is a FILE containing `gitdir:`.
+	dotGit := filepath.Join(absDest, ".git")
+	gitInfo, err := os.Stat(dotGit)
+	if err != nil {
+		t.Fatalf("stat %s: %v (git worktree add did not run)", dotGit, err)
+	}
+	if gitInfo.IsDir() {
+		t.Fatalf(".git in linked worktree is a directory; want a gitdir file")
+	}
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		t.Fatalf("read .git file: %v", err)
+	}
+	if !strings.HasPrefix(string(data), "gitdir:") {
+		t.Fatalf(".git should start with `gitdir:`; got %q", string(data))
+	}
+
+	// `wrk workspaces` from the primary MUST list the absolute-path
+	// worktree. This is what proves git accepted it as a workspace of
+	// this repository — not merely that some directory happens to
+	// exist at absDest.
+	wcode, wout, werr := runWrk(t, repo, "--storage", storage, "workspaces")
+	if wcode != 0 {
+		t.Fatalf("workspaces exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			wcode, wout, werr)
+	}
+	if !strings.Contains(wout, absDest) {
+		t.Errorf("workspaces output missing the absolute-path worktree %q; got:\n%s",
+			absDest, wout)
+	}
+}
+
+// TestNewAbsolutePathAlreadyExistsRefusesCleanly pins Medium #10's
+// unhappy twin: when the target absolute path already exists on
+// disk, `wrk new` MUST refuse before invoking git — nothing user-
+// authored may be clobbered. The failure is a real error (not the
+// exit-code sentinel), so the process exits 2 and stderr names
+// "already exists" so the user knows exactly what is in the way.
+// Byte-level assertion on the pre-existing marker proves no
+// clobber occurred.
+func TestNewAbsolutePathAlreadyExistsRefusesCleanly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	absDest := filepath.Join(base, "already-there")
+	if err := os.MkdirAll(absDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(absDest, "keep.txt")
+	writeFile(t, marker, "preserved\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", absDest)
+	if code != 2 {
+		t.Fatalf("new <existing abs> exit = %d, want 2 (real error path)\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("stderr should mention 'already exists'; got:\n%s", stderr)
+	}
+
+	// Marker byte-for-byte identical — nothing overwrote it.
+	body, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("marker vanished after refused new: %v", err)
+	}
+	if string(body) != "preserved\n" {
+		t.Errorf("marker content changed: got %q, want %q", string(body), "preserved\n")
+	}
+	// And no `.git` file was dropped into the pre-existing dir —
+	// git worktree add never ran.
+	if _, err := os.Stat(filepath.Join(absDest, ".git")); !os.IsNotExist(err) {
+		t.Errorf(".git should not have been created inside the pre-existing dir; stat err = %v", err)
+	}
+}
+
+// TestNewExplicitParentRelativeCreatesSibling pins Medium #11:
+// `wrk new ../explicit-feature` is the pre-sibling-default calling
+// convention that longtime users still type from muscle memory. It
+// has a path separator, so ResolveDestination treats it literally
+// against the primary root — landing on the exact same sibling
+// directory the bare-name policy would have chosen. This test locks
+// in that backwards-compat path: the resulting sibling is a real
+// linked worktree (`.git` file present, `.wrk.yml` from the initial
+// commit rides over) so any regression that turned the explicit
+// form into a plain mkdir would flip red.
+func TestNewExplicitParentRelativeCreatesSibling(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", "../explicit-feature")
+	if code != 0 {
+		t.Fatalf("new ../explicit-feature exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+
+	sibling := filepath.Join(filepath.Dir(repo), "explicit-feature")
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "-f", sibling).Run()
+		_ = os.RemoveAll(sibling)
+	})
+
+	info, err := os.Stat(sibling)
+	if err != nil {
+		t.Fatalf("sibling not created at %s: %v", sibling, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("sibling %s should be a directory, got mode=%s", sibling, info.Mode())
+	}
+
+	// Real linked worktree — .git is a FILE with `gitdir:` prefix.
+	dotGit := filepath.Join(sibling, ".git")
+	gitInfo, err := os.Stat(dotGit)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dotGit, err)
+	}
+	if gitInfo.IsDir() {
+		t.Fatalf(".git is a directory; want linked-worktree gitdir file")
+	}
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		t.Fatalf("read .git: %v", err)
+	}
+	if !strings.HasPrefix(string(data), "gitdir:") {
+		t.Fatalf(".git should start with `gitdir:`; got %q", string(data))
+	}
+
+	// The tracked .wrk.yml rides over from the initial commit — the
+	// worktree really is a checkout of primary's HEAD.
+	if _, err := os.Stat(filepath.Join(sibling, ".wrk.yml")); err != nil {
+		t.Errorf(".wrk.yml missing in sibling worktree: %v", err)
+	}
+}
+
+// TestNewExplicitSubdirectoryPathIsRejected pins Medium #11's dark
+// side: `wrk new ./inside/foo` resolves to a path INSIDE the primary
+// workspace root. Nested worktrees confuse both git and jj, and
+// wrk's shared-storage design assumes workspaces are siblings — so
+// the containment guard MUST reject this before any filesystem
+// side effect. Exit code is the real-error 2, stderr carries the
+// canonical "inside existing workspace" message, and — critically —
+// neither the nested destination NOR the intermediate `inside/`
+// directory is created on disk. The guard fires on
+// ResolveDestination, before any mkdir.
+func TestNewExplicitSubdirectoryPathIsRejected(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", "./inside/foo")
+	if code != 2 {
+		t.Fatalf("new ./inside/foo exit = %d, want 2\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "inside existing workspace") {
+		t.Errorf("stderr should carry the nesting-guard message; got:\n%s", stderr)
+	}
+
+	// Neither the nested destination nor the intermediate path may
+	// exist — a partial mkdir would fool the next invocation into
+	// "already exists" and mask the real reason for the refusal.
+	dest := filepath.Join(repo, "inside", "foo")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("nested destination %s should not exist after refused new; stat err = %v", dest, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "inside")); !os.IsNotExist(err) {
+		t.Errorf("intermediate `inside/` directory should not be created; stat err = %v", err)
+	}
+}
+
+// TestNewBareNameCollidesWithExistingSiblingDirectory pins Medium
+// #12: `wrk new feature` from the primary defaults to the sibling
+// path <parent>/feature. If a directory already sits there, the
+// exists-check MUST refuse — no clobbering, no accidental
+// `git worktree add` on top of unrelated user content. Verified by
+// seeding the sibling with a marker file and confirming the marker
+// survives the refused invocation byte-for-byte, plus asserting
+// that no `.git` sentinel was dropped into the pre-existing dir.
+func TestNewBareNameCollidesWithExistingSiblingDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	// Seed the sibling that `wrk new feature` would target.
+	sibling := filepath.Join(filepath.Dir(repo), "feature")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(sibling, "userdata.txt")
+	writeFile(t, marker, "do-not-touch\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", "feature")
+	if code != 2 {
+		t.Fatalf("new feature exit = %d, want 2 (colliding sibling)\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("stderr should carry 'already exists'; got:\n%s", stderr)
+	}
+
+	// Marker byte-for-byte identical — nothing overwrote it.
+	body, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("marker vanished: %v", err)
+	}
+	if string(body) != "do-not-touch\n" {
+		t.Errorf("marker content changed: got %q, want %q", string(body), "do-not-touch\n")
+	}
+	// The sibling is still a plain directory — `wrk new` did NOT
+	// convert it into a git worktree by dropping a `.git` file.
+	if _, err := os.Stat(filepath.Join(sibling, ".git")); !os.IsNotExist(err) {
+		t.Errorf(".git should not have been created inside the pre-existing sibling; stat err = %v", err)
+	}
+}
+
+// TestNewSameNameTwiceFailsSecondTime pins Medium #16 via the most-
+// reproducible path: the second identical `wrk new` collides with
+// the destination that the first one just created. The
+// ResolveDestination exists-check catches it BEFORE git runs, so
+// the error surfaces as a real error (exit 2, stderr "already
+// exists"), NOT the exit-code sentinel. The first worktree — its
+// `.git` gitdir file and its `.wrk.yml` — MUST be byte-for-byte
+// identical after the refused second call.
+//
+// NOTE on Medium #16: a raw `git worktree add` failure that ISN'T
+// caught by our exists-check (e.g. a branch-name collision from a
+// foreign worktree) is not reproducible hermetically from the CLI,
+// and the same exists-check catches every user-facing invocation
+// in practice. If a future regression removed the exists-check,
+// this test still flips red because the second call would then
+// succeed and the first worktree would be replaced.
+func TestNewSameNameTwiceFailsSecondTime(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	sibling := filepath.Join(filepath.Dir(repo), "feature")
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "-f", sibling).Run()
+		_ = os.RemoveAll(sibling)
+	})
+
+	// First call: succeeds and lays down the linked worktree.
+	if code, out, se := runWrk(t, repo, "--storage", storage, "new", "feature"); code != 0 {
+		t.Fatalf("first new feature exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, se)
+	}
+	dotGit := filepath.Join(sibling, ".git")
+	firstGit, err := os.ReadFile(dotGit)
+	if err != nil {
+		t.Fatalf("read .git after first new: %v", err)
+	}
+	firstCfg, err := os.ReadFile(filepath.Join(sibling, ".wrk.yml"))
+	if err != nil {
+		t.Fatalf("read .wrk.yml after first new: %v", err)
+	}
+
+	// Second call: MUST fail with "already exists" from
+	// ResolveDestination — before git ever runs.
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "new", "feature")
+	if code != 2 {
+		t.Fatalf("second new feature exit = %d, want 2\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("stderr should mention 'already exists'; got:\n%s", stderr)
+	}
+
+	// First worktree is untouched: same .git gitdir contents and
+	// same .wrk.yml content, byte-for-byte.
+	secondGit, err := os.ReadFile(dotGit)
+	if err != nil {
+		t.Fatalf("read .git after refused second new: %v", err)
+	}
+	if !bytes.Equal(firstGit, secondGit) {
+		t.Errorf("first worktree's .git changed after refused second new\nbefore: %q\nafter:  %q",
+			firstGit, secondGit)
+	}
+	secondCfg, err := os.ReadFile(filepath.Join(sibling, ".wrk.yml"))
+	if err != nil {
+		t.Fatalf("read .wrk.yml after refused second new: %v", err)
+	}
+	if !bytes.Equal(firstCfg, secondCfg) {
+		t.Errorf("first worktree's .wrk.yml changed after refused second new\nbefore: %q\nafter:  %q",
+			firstCfg, secondCfg)
+	}
+}
