@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"path/filepath"
 
 	"github.com/blaineventurine/wrk/internal/planner"
@@ -10,9 +11,10 @@ import (
 // Detach makes the current workspace independent of shared resources by
 // replacing managed symlinks with independent local copies.
 //
-// On success (and when not a dry run), it records which resources were
-// detached so that `wrk status` can distinguish a deliberate detach from a
-// coincidental conflict. The record is cleared by `link`/`relink`.
+// On success (and when not a dry run), it accretes a record of which
+// resources have been detached so that `wrk status` can distinguish a
+// deliberate detach from a coincidental conflict. Subsequent detaches
+// union with the existing record; only `link`/`relink` clears it.
 func Detach(
 	repo *repository.Repository,
 	options Options,
@@ -30,7 +32,10 @@ func Detach(
 		return nil
 	}
 
-	return recordDetached(repo, detachedPaths(repo, plan))
+	if err := recordDetached(repo, detachedPaths(repo, plan)); err != nil {
+		return fmt.Errorf("detach succeeded but failed to update detach record: %w", err)
+	}
+	return nil
 }
 
 // detachedPaths returns the workspace-relative paths touched by Detach

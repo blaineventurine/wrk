@@ -44,13 +44,42 @@ func saveRegistry(repo *repository.Repository, reg detachRegistry) error {
 }
 
 // recordDetached marks the given relative paths as detached for repo.Root.
+//
+// The registry is accretive: paths are unioned with any prior entry so a
+// no-op detach (nothing new to detach) never wipes existing records. Only
+// clearDetached removes an entry.
 func recordDetached(repo *repository.Repository, relPaths []string) error {
 	reg, err := loadRegistry(repo)
 	if err != nil {
 		return err
 	}
-	reg[repo.Root] = relPaths
+	reg.union(repo.Root, relPaths)
 	return saveRegistry(repo, reg)
+}
+
+// union merges add into the entry for root, preserving order (existing
+// paths first, then new ones) and dropping duplicates. A no-op call
+// against a missing entry leaves the registry untouched.
+func (r detachRegistry) union(root string, add []string) {
+	existing := r[root]
+	if len(existing) == 0 && len(add) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(existing)+len(add))
+	merged := make([]string, 0, len(existing)+len(add))
+	for _, p := range existing {
+		if !seen[p] {
+			seen[p] = true
+			merged = append(merged, p)
+		}
+	}
+	for _, p := range add {
+		if !seen[p] {
+			seen[p] = true
+			merged = append(merged, p)
+		}
+	}
+	r[root] = merged
 }
 
 // clearDetached removes any detached record for repo.Root.

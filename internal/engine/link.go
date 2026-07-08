@@ -25,7 +25,10 @@ func Link(repo *repository.Repository, options Options) error {
 
 	// A successful link reconnects the workspace to shared storage, so
 	// clear any prior detach record.
-	return clearDetached(repo)
+	if err := clearDetached(repo); err != nil {
+		return fmt.Errorf("link succeeded but failed to clear detach record: %w", err)
+	}
+	return nil
 }
 
 // Relink reconnects the current workspace to shared storage, discarding any
@@ -44,7 +47,10 @@ func Relink(repo *repository.Repository, options Options) error {
 		return nil
 	}
 
-	return clearDetached(repo)
+	if err := clearDetached(repo); err != nil {
+		return fmt.Errorf("relink succeeded but failed to clear detach record: %w", err)
+	}
+	return nil
 }
 
 // runPlan prints, validates, and (unless dry-run) executes a plan.
