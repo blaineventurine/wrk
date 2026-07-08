@@ -119,3 +119,214 @@ func TestFindRootErrorMentionsSearchedPath(t *testing.T) {
 		t.Fatalf("error missing searched path %q: %v", dir, err)
 	}
 }
+
+// TestDetectVCSGitOnly pins the plain-git branch: a repo whose only
+// marker is .git under Auto MUST select Git. This is by far the
+// commonest wrk deployment; a swap of the switch arms would route
+// every git repo through jj and fail at commonDir.
+func TestDetectVCSGitOnly(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+
+	got, err := detectVCS(root, Auto)
+	if err != nil {
+		t.Fatalf("detectVCS(Auto, git-only): %v", err)
+	}
+	if got != Git {
+		t.Fatalf("detectVCS(Auto, git-only) = %q, want %q", got, Git)
+	}
+}
+
+// TestDetectVCSJJOnly pins the pure-jj branch: `jj init` without
+// --colocate leaves only .jj on disk. Under Auto that MUST select JJ.
+func TestDetectVCSJJOnly(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".jj"))
+
+	got, err := detectVCS(root, Auto)
+	if err != nil {
+		t.Fatalf("detectVCS(Auto, jj-only): %v", err)
+	}
+	if got != JJ {
+		t.Fatalf("detectVCS(Auto, jj-only) = %q, want %q", got, JJ)
+	}
+}
+
+// TestDetectVCSColocatedPrefersJJ pins the documented preference for
+// colocated repos: both markers present under Auto MUST resolve to JJ.
+// This encodes the design decision that on a colocated checkout the
+// user is driving via jj — flipping this silently would break every
+// `wrk` invocation on a jj-primary colocated repo.
+func TestDetectVCSColocatedPrefersJJ(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+	makeDir(t, filepath.Join(root, ".jj"))
+
+	got, err := detectVCS(root, Auto)
+	if err != nil {
+		t.Fatalf("detectVCS(Auto, colocated): %v", err)
+	}
+	if got != JJ {
+		t.Fatalf("detectVCS(Auto, colocated) = %q, want %q (jj preferred)",
+			got, JJ)
+	}
+}
+
+// TestDetectVCSAutoMissingMarkersErrors covers the Auto fall-through:
+// findRoot only ascends until it sees a marker, so reaching detectVCS
+// with NEITHER marker means the marker vanished between detection and
+// selection (a race with `rm -rf .git`, an in-flight VCS migration,
+// etc.). detectVCS MUST call out that specific race so the user can
+// retry, not conflate it with the generic unsupported-VCS message.
+func TestDetectVCSAutoMissingMarkersErrors(t *testing.T) {
+	root := t.TempDir()
+	// No .git and no .jj on purpose.
+
+	_, err := detectVCS(root, Auto)
+	if err == nil {
+		t.Fatal("detectVCS(Auto, empty): expected error")
+	}
+	if !strings.Contains(err.Error(), "vanished") {
+		t.Fatalf("error should call out the race, got: %v", err)
+	}
+}
+
+// TestDetectVCSExplicitGitOnJJErrors pins the explicit-Git guard: if
+// the user asked for git but only .jj is present, we MUST NOT
+// silently fall back — the caller is asserting a VCS choice and
+// wants to know when it does not match reality.
+func TestDetectVCSExplicitGitOnJJErrors(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".jj"))
+
+	_, err := detectVCS(root, Git)
+	if err == nil {
+		t.Fatal("detectVCS(Git, jj-only): expected error")
+	}
+	if !strings.Contains(err.Error(), "not Git-managed") {
+		t.Fatalf("error should say not Git-managed, got: %v", err)
+	}
+}
+
+// TestDetectVCSExplicitJJOnGitErrors is the mirror of the previous
+// test: --vcs=jj on a plain git repo MUST fail loudly.
+func TestDetectVCSExplicitJJOnGitErrors(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+
+	_, err := detectVCS(root, JJ)
+	if err == nil {
+		t.Fatal("detectVCS(JJ, git-only): expected error")
+	}
+	if !strings.Contains(err.Error(), "not Jujutsu-managed") {
+		t.Fatalf("error should say not Jujutsu-managed, got: %v", err)
+	}
+}
+
+// TestDetectVCSExplicitGitOnColocated pins that when the user asks
+// for Git explicitly on a colocated repo (both markers), Git is
+// respected — the explicit choice overrides the Auto preference for
+// jj.
+func TestDetectVCSExplicitGitOnColocated(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+	makeDir(t, filepath.Join(root, ".jj"))
+
+	got, err := detectVCS(root, Git)
+	if err != nil {
+		t.Fatalf("detectVCS(Git, colocated): %v", err)
+	}
+	if got != Git {
+		t.Fatalf("detectVCS(Git, colocated) = %q, want %q", got, Git)
+	}
+}
+
+// TestDetectVCSExplicitJJOnColocated is the mirror: --vcs=jj on
+// colocated returns JJ. Together with the previous test this pins
+// that the explicit arms honor the caller.
+func TestDetectVCSExplicitJJOnColocated(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+	makeDir(t, filepath.Join(root, ".jj"))
+
+	got, err := detectVCS(root, JJ)
+	if err != nil {
+		t.Fatalf("detectVCS(JJ, colocated): %v", err)
+	}
+	if got != JJ {
+		t.Fatalf("detectVCS(JJ, colocated) = %q, want %q", got, JJ)
+	}
+}
+
+// TestDetectVCSUnknownPreferredErrors pins the default arm: an
+// unrecognized VCS string yields "unsupported VCS" rather than
+// crashing at backendFor. ParseVCS should catch this earlier, but
+// detectVCS is called through internal paths too — the guard here
+// keeps the layering honest.
+func TestDetectVCSUnknownPreferredErrors(t *testing.T) {
+	root := t.TempDir()
+	makeDir(t, filepath.Join(root, ".git"))
+
+	_, err := detectVCS(root, VCS("hg"))
+	if err == nil {
+		t.Fatal("detectVCS(unknown): expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("error should say unsupported, got: %v", err)
+	}
+}
+
+// TestDetectOutsideAnyRepoErrors pins that Detect propagates
+// findRoot's failure when called from a path that isn't inside any
+// git or jj repository. Silently returning a non-nil *Repository
+// with a zero root would set the caller up to write metadata into
+// wildly wrong places.
+func TestDetectOutsideAnyRepoErrors(t *testing.T) {
+	dir := canonPath(t, t.TempDir())
+
+	repo, err := Detect(dir, Auto)
+	if err == nil {
+		t.Fatalf("Detect outside any repo: got %v, want error", repo)
+	}
+	if repo != nil {
+		t.Fatalf("Detect returned non-nil repo %v on error", repo)
+	}
+	// findRoot's error names the searched path — this is the
+	// contract propagated up through Detect.
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("error missing searched path %q: %v", dir, err)
+	}
+}
+
+// TestDetectPropagatesCommonDirError pins that a broken colocation
+// (jj repo whose .git was removed out-of-band) surfaces as an error
+// from Detect, not a partially-populated *Repository. A caller that
+// assumed Detect either failed or returned a working repository
+// would otherwise dereference a bogus metadataDir.
+func TestDetectPropagatesCommonDirError(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initColocatedJJRepo(t, root)
+	// Remove .git so the colocated pairing is broken but .jj
+	// remains — detectVCS still picks JJ, commonDir then fails.
+	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
+		t.Fatalf("rm .git: %v", err)
+	}
+
+	repo, err := Detect(root, Auto)
+	if err == nil {
+		t.Fatalf("Detect on broken colocated: got %v, want error", repo)
+	}
+	if repo != nil {
+		t.Fatalf("Detect returned non-nil repo %v on error", repo)
+	}
+	// The wrap put in by jjBackend.commonDir names "colocated" —
+	// pinning that phrase confirms Detect passed the wrap through
+	// verbatim instead of re-wrapping / dropping the guidance.
+	if !strings.Contains(err.Error(), "colocated") {
+		t.Fatalf("error missing colocation guidance: %v", err)
+	}
+}

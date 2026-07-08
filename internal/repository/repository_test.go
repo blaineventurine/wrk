@@ -51,3 +51,42 @@ func msg(v any) string {
 	}
 	return ""
 }
+
+// TestRepositoryAccessors is a single spot check that the two trivial
+// getters return the values wired in at construction time. The point
+// isn't to prove the assignment — it's to prove the RUNTIME contract:
+//   - VCS() reports the backend's kind, not a stale copy from a field
+//     (a refactor that stored VCS in the struct AND had backend.kind()
+//     drift would still pass a field-echo test but break real dispatch).
+//   - MetadataDir() returns the exact string handed to newRepository,
+//     because downstream code joins paths under it verbatim.
+func TestRepositoryAccessors(t *testing.T) {
+	// Real backend so VCS() actually exercises the interface
+	// dispatch, not a hand-crafted mock returning whatever we like.
+	r := newRepository(
+		"/tmp/example",
+		"local/abcdef",
+		"/tmp/example/.git",
+		gitBackend{},
+	)
+
+	if got := r.VCS(); got != Git {
+		t.Fatalf("Repository.VCS() = %q, want %q", got, Git)
+	}
+	if got := r.MetadataDir(); got != "/tmp/example/.git" {
+		t.Fatalf("Repository.MetadataDir() = %q, want %q",
+			got, "/tmp/example/.git")
+	}
+
+	// And with the other backend to prove dispatch actually
+	// switches — a hard-coded return would pass the previous check.
+	rjj := newRepository(
+		"/tmp/example",
+		"local/abcdef",
+		"/tmp/example/.git",
+		jjBackend{},
+	)
+	if got := rjj.VCS(); got != JJ {
+		t.Fatalf("Repository.VCS() with jjBackend = %q, want %q", got, JJ)
+	}
+}

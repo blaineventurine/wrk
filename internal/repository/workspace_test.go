@@ -1,7 +1,10 @@
 package repository
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -153,5 +156,293 @@ func TestResolveDestinationRejectsWhitespace(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "destination cannot be") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCreateWorkspaceFullFlow exercises the whole
+// Detect → CreateWorkspace → Detect(destination) chain against a real
+// git repo. It pins:
+//   - the bare name "feature" is resolved to a sibling of the primary
+//   - `git worktree add` runs successfully
+//   - the returned *Repository is rooted at the NEW worktree, not the
+//     primary — a caller could chain wrk commands against the new
+//     workspace without a second Detect
+func TestCreateWorkspaceFullFlow(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect(primary): %v", err)
+	}
+
+	newRepo, err := repo.CreateWorkspace("feature")
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	wantRoot := filepath.Join(parent, "feature")
+	if newRepo.Root != wantRoot {
+		t.Fatalf("new Repository.Root = %q, want %q (sibling of primary)",
+			newRepo.Root, wantRoot)
+	}
+
+	// The worktree really exists on disk with the linked-worktree
+	// gitdir file — this is what makes Detect(newRepo.Root) work.
+	info, err := os.Stat(wantRoot)
+	if err != nil {
+		t.Fatalf("stat new workspace: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("new workspace %q is not a directory", wantRoot)
+	}
+
+	// Same repository ID as the primary — every workspace of the
+	// same repo MUST hash to the same identity, otherwise the
+	// detach registry and shared storage would fork.
+	if newRepo.RepositoryID != repo.RepositoryID {
+		t.Fatalf("new workspace repository ID = %q, want %q (same repo)",
+			newRepo.RepositoryID, repo.RepositoryID)
+	}
+}
+
+// TestCreateWorkspaceRefusesNesting pins the ResolveDestination guard:
+// asking to create a workspace INSIDE an existing one MUST fail with
+// a message users can act on. Nested worktrees confuse git and jj,
+// and wrk's shared-storage links assume siblings.
+func TestCreateWorkspaceRefusesNesting(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	// "./inside" is an explicit relative path so it stays under the
+	// primary — resolveDestination treats it literally, and then the
+	// containingWorkspace check MUST fire.
+	_, err = repo.CreateWorkspace("./inside")
+	if err == nil {
+		t.Fatal("CreateWorkspace(./inside): expected nesting error")
+	}
+	if !strings.Contains(err.Error(), "inside existing workspace") {
+		t.Fatalf("error missing nesting phrase; got: %v", err)
+	}
+
+	// The nested directory MUST NOT have been created — the guard
+	// runs BEFORE the backend touches disk.
+	if _, statErr := os.Stat(filepath.Join(primary, "inside")); !os.IsNotExist(statErr) {
+		t.Fatalf("nested destination should not exist; stat err = %v", statErr)
+	}
+}
+
+// TestCreateWorkspaceRefusesExistingDestination pins the "already
+// exists" preflight: attempting to create a workspace at a path that
+// already exists MUST fail cleanly, not clobber the directory and
+// not partially initialize a worktree there.
+func TestCreateWorkspaceRefusesExistingDestination(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	// Pre-create the sibling destination "feature" with a marker
+	// file inside so we can prove it was untouched afterwards.
+	dest := filepath.Join(parent, "feature")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dest, "marker.txt")
+	if err := os.WriteFile(marker, []byte("pre-existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	_, err = repo.CreateWorkspace("feature")
+	if err == nil {
+		t.Fatal("CreateWorkspace(feature): expected 'already exists' error")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error missing 'already exists'; got: %v", err)
+	}
+
+	// Marker file MUST still be there — the preflight ran BEFORE
+	// git got involved.
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("marker file gone: %v", err)
+	}
+	if string(data) != "pre-existing\n" {
+		t.Fatalf("marker overwritten: got %q", string(data))
+	}
+}
+
+// TestRepositoryWorkspacesReturnsAllLive covers the exported
+// Workspaces method: after `wrk new feature`, listing from the
+// PRIMARY MUST include both workspaces. This is what powers
+// `wrk list` — a regression that silently drops the primary or
+// misses secondaries would break the whole overview.
+func TestRepositoryWorkspacesReturnsAllLive(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if _, err := repo.CreateWorkspace("feature"); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	got, err := repo.Workspaces()
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+
+	sort.Strings(got)
+	want := []string{
+		filepath.Join(parent, "feature"),
+		primary,
+	}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("Workspaces() = %v (%d), want %v (%d)",
+			got, len(got), want, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Workspaces()[%d] = %q, want %q",
+				i, got[i], want[i])
+		}
+	}
+}
+
+// TestCreateWorkspaceBackendFailurePropagates pins that when the
+// backend's createWorkspace fails, CreateWorkspace does NOT swallow
+// the error and does NOT return a bogus *Repository. A caller that
+// switched on (nil, nil) vs (nil, err) needs the (nil, err) contract
+// honored end to end.
+//
+// We provoke the failure with a branch conflict: git derives the
+// worktree branch name from the last path component, and git refuses
+// to check out a branch that is already used by another worktree.
+// ResolveDestination sees no directory at `../existing` so control
+// reaches the backend call, which then fails.
+func TestCreateWorkspaceBackendFailurePropagates(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	// Create branch "existing" and check it out at ../feature.
+	// The branch is now claimed by that worktree and any subsequent
+	// `git worktree add ../existing` (which derives the branch name
+	// from the last component) will fail.
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = primary
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("branch", "existing")
+	runGit("worktree", "add", "--quiet",
+		filepath.Join(parent, "feature"), "existing")
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	newRepo, err := repo.CreateWorkspace("existing")
+	if err == nil {
+		t.Fatalf("CreateWorkspace: got %v, want error from branch conflict",
+			newRepo)
+	}
+	if newRepo != nil {
+		t.Fatalf("CreateWorkspace error path returned %v, want nil", newRepo)
+	}
+	// Wrapped by passthrough — MUST name git.
+	if !strings.Contains(err.Error(), "git") {
+		t.Fatalf("error missing command name: %v", err)
+	}
+}
+
+// TestResolveDestinationPropagatesWorkspacesError pins that when the
+// backend's Workspaces() call fails mid-preflight, ResolveDestination
+// returns that error — it does NOT swallow it and let a stale
+// workspace list drive the containingWorkspace decision. A caller
+// that silently proceeded on a broken repo could create a "sibling"
+// workspace directly inside a workspace it no longer sees.
+//
+// We provoke the failure by Detecting a valid git repo, then rm -rf
+// .git out-of-band — subsequent `git worktree list` fails, and the
+// error MUST surface all the way up through ResolveDestination.
+func TestResolveDestinationPropagatesWorkspacesError(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	// Break the repo AFTER detection so ResolveDestination's own
+	// Workspaces call is what fails, not Detect.
+	if err := os.RemoveAll(filepath.Join(primary, ".git")); err != nil {
+		t.Fatalf("rm .git: %v", err)
+	}
+
+	dest, err := repo.ResolveDestination("feature")
+	if err == nil {
+		t.Fatalf("ResolveDestination on broken repo: got %q, want error",
+			dest)
+	}
+	if dest != "" {
+		t.Fatalf("ResolveDestination error path returned %q, want empty",
+			dest)
 	}
 }
