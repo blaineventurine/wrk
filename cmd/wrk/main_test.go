@@ -801,7 +801,7 @@ func TestHelpListsAllSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--help exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
-	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces"} {
+	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces", "gc"} {
 		if !strings.Contains(stdout, sub) {
 			t.Errorf("--help output missing subcommand %q; full help:\n%s", sub, stdout)
 		}
@@ -1211,5 +1211,154 @@ func TestNewSameNameTwiceFailsSecondTime(t *testing.T) {
 	if !bytes.Equal(firstCfg, secondCfg) {
 		t.Errorf("first worktree's .wrk.yml changed after refused second new\nbefore: %q\nafter:  %q",
 			firstCfg, secondCfg)
+	}
+}
+
+// setupGCFixture stands up a git repo whose sole configured resource
+// is a fingerprinted node_modules. It runs `wrk link` twice with a
+// different fingerprint input between the two calls, leaving one
+// stale variant subdirectory (the v1 one, no longer symlinked from
+// any live workspace) alongside the current v2 variant. Returns the
+// repo root and the two variant paths in stale/current order so
+// callers can assert on-disk mutation.
+func setupGCFixture(t *testing.T) (repo, staleVariant, currentVariant string) {
+	t.Helper()
+
+	repo = freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"),
+		"resources:\n"+
+			"  - name: node\n"+
+			"    path: node_modules\n"+
+			"    fingerprint:\n"+
+			"      - \"{root}/package.json\"\n"+
+			"    hooks:\n"+
+			"      initialize:\n"+
+			"        - run: sh -c 'mkdir -p \"{shared}\" && touch \"{shared}/.installed\"'\n",
+	)
+	writeFile(t, filepath.Join(repo, "package.json"), `{"v":1}`)
+
+	storage := storagePath(repo)
+
+	// Variant 1.
+	if code, stdout, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("link v1 exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// Bump the fingerprint input and remove the current symlink so
+	// the second link builds a fresh variant subdir rather than
+	// treating the existing symlink as "already correctly linked".
+	writeFile(t, filepath.Join(repo, "package.json"), `{"v":2}`)
+	if err := os.Remove(filepath.Join(repo, "node_modules")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove node_modules before v2 link: %v", err)
+	}
+
+	// Variant 2.
+	if code, stdout, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("link v2 exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// The current symlink points at the v2 variant; the other entry
+	// under node_modules/ is the stale v1 that gc should sweep.
+	current, err := os.Readlink(filepath.Join(repo, "node_modules"))
+	if err != nil {
+		t.Fatalf("readlink node_modules: %v", err)
+	}
+	currentVariant = current
+
+	nmParent := filepath.Dir(current)
+	entries, err := os.ReadDir(nmParent)
+	if err != nil {
+		t.Fatalf("read variant parent %q: %v", nmParent, err)
+	}
+	var others []string
+	for _, e := range entries {
+		// Skip sibling bookkeeping files (.wrk-lock, .wrk-provisioning,
+		// .wrk-deleting). Variants are always directories.
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(nmParent, e.Name())
+		if p == current {
+			continue
+		}
+		others = append(others, p)
+	}
+	if len(others) != 1 {
+		t.Fatalf("expected exactly one stale variant next to %q, got %v", current, others)
+	}
+	staleVariant = others[0]
+	return repo, staleVariant, currentVariant
+}
+
+// TestMainGCDryRunHasNoEffect pins the --dry-run contract on the CLI:
+// the plan is printed, exit is 0, and nothing on disk is mutated —
+// specifically, the stale variant subdirectory is still present after
+// the invocation.
+func TestMainGCDryRunHasNoEffect(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo, stale, _ := setupGCFixture(t)
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storagePath(repo), "gc", "--dry-run")
+	if code != 0 {
+		t.Fatalf("gc --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	// PrintGCPlan groups variants by resource path (`node_modules:`)
+	// and always emits a `Total:` footer when the plan is non-empty.
+	// Either missing means the plan was not printed properly.
+	if !strings.Contains(stdout, "node_modules") || !strings.Contains(stdout, "Total:") {
+		t.Errorf("dry-run output missing plan content:\n%s", stdout)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("stale variant %q should still exist after --dry-run: %v", stale, err)
+	}
+}
+
+// TestMainGCRefusesNonTTYWithoutYes pins the confirmation gate: a
+// non-terminal stdin (which `runWrk` always provides — no pty) with
+// no --yes must refuse rather than silently prompt for input nobody
+// will type. Exit is non-zero and the stale variant survives.
+func TestMainGCRefusesNonTTYWithoutYes(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo, stale, _ := setupGCFixture(t)
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storagePath(repo), "gc")
+	if code == 0 {
+		t.Fatalf("gc without --yes on non-TTY should not exit 0\nstdout:\n%s\nstderr:\n%s",
+			stdout, stderr)
+	}
+	if !strings.Contains(stderr, "--yes") {
+		t.Errorf("stderr should mention --yes escape hatch, got: %q", stderr)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("stale variant %q should survive a refused gc: %v", stale, err)
+	}
+}
+
+// TestMainGCYesDeletesStaleVariant pins the happy path: --yes carries
+// the caller past the non-TTY refusal, ExecuteGC runs, and the stale
+// variant subdirectory is gone from disk while the current one
+// survives.
+func TestMainGCYesDeletesStaleVariant(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo, stale, current := setupGCFixture(t)
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storagePath(repo), "gc", "--yes")
+	if code != 0 {
+		t.Fatalf("gc --yes exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale variant %q should be gone after gc --yes, stat err = %v", stale, err)
+	}
+	if _, err := os.Stat(current); err != nil {
+		t.Errorf("current variant %q should survive gc --yes: %v", current, err)
 	}
 }
