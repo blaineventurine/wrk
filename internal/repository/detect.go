@@ -37,11 +37,12 @@ func Detect(start string, preferred VCS) (*Repository, error) {
 }
 
 func findRoot(start string) (string, error) {
-	current, err := filepath.Abs(start)
+	absStart, err := filepath.Abs(start)
 	if err != nil {
 		return "", err
 	}
 
+	current := absStart
 	for {
 		if exists(filepath.Join(current, ".jj")) ||
 			exists(filepath.Join(current, ".git")) {
@@ -57,7 +58,10 @@ func findRoot(start string) (string, error) {
 		current = parent
 	}
 
-	return "", fmt.Errorf("not inside a Git or Jujutsu repository")
+	return "", fmt.Errorf(
+		"not inside a Git or Jujutsu repository (searched from %s)",
+		absStart,
+	)
 }
 
 func detectVCS(root string, preferred VCS) (VCS, error) {
@@ -75,6 +79,15 @@ func detectVCS(root string, preferred VCS) (VCS, error) {
 			// Colocated repository: prefer jj.
 			return JJ, nil
 		}
+		// Race: findRoot saw a marker, but by the time we
+		// re-statted here the .git/.jj directory was removed
+		// (concurrent `rm -rf .git`, VCS migration, etc.).
+		// Falling through to the generic "unsupported VCS" message
+		// leaves users chasing a nonsense error; call the scenario
+		// out so they can retry.
+		return "", fmt.Errorf(
+			"repository markers vanished between detection and vcs selection; please re-run wrk",
+		)
 
 	case Git:
 		if hasGit {

@@ -11,12 +11,12 @@ import (
 // repositoryID derives a stable identifier shared across all workspaces of
 // the same repository.
 //
-// It prefers the parsed "origin" remote (for example, github.com/org/repo)
-// so that clones on different machines share storage. When no usable remote
-// exists, it falls back to a hash of the repository's common metadata
-// directory, namespaced under "local/".
+// It prefers a parsed remote URL (for example, github.com/org/repo) so
+// that clones on different machines share storage. When no usable
+// remote exists, it falls back to a hash of the repository's common
+// metadata directory, namespaced under "local/".
 func repositoryID(root, gitDir string) (string, error) {
-	if url := originURL(root); url != "" {
+	if url := preferredRemoteURL(root); url != "" {
 		if id := parseRemote(url); id != "" {
 			return id, nil
 		}
@@ -30,13 +30,49 @@ func repositoryID(root, gitDir string) (string, error) {
 	), nil
 }
 
-// originURL returns the URL of the "origin" remote, or "" if there is none.
-func originURL(root string) string {
-	out, err := capture(root, "git", "remote", "get-url", "origin")
+// preferredRemoteURL returns the URL of the remote wrk considers
+// canonical for identity purposes, or "" if none is usable.
+//
+// Preference order:
+//
+//  1. "origin" — the overwhelming common case.
+//  2. "upstream" — fork-first workflows where the user's own fork is
+//     tracked under a different name (or no remote at all) and
+//     "upstream" points at the shared repository.
+//  3. The sole remote, if exactly one is configured under some other
+//     name — captures ad-hoc names ("gh", "gl", ...) where the choice
+//     is unambiguous.
+//
+// When multiple non-{origin,upstream} remotes are configured we
+// deliberately give up: picking the "wrong" one would move a
+// repository's workspace storage under a different identity on the
+// next detection, which is more disruptive than falling back to the
+// local hash.
+func preferredRemoteURL(root string) string {
+	for _, name := range []string{"origin", "upstream"} {
+		if url := remoteURL(root, name); url != "" {
+			return url
+		}
+	}
+
+	out, err := capture(root, "git", "remote")
 	if err != nil {
 		return ""
 	}
+	names := strings.Fields(strings.TrimSpace(out))
+	if len(names) == 1 {
+		return remoteURL(root, names[0])
+	}
+	return ""
+}
 
+// remoteURL returns the fetch URL of the named remote, or "" if the
+// remote is missing or git rejected the query.
+func remoteURL(root, name string) string {
+	out, err := capture(root, "git", "remote", "get-url", name)
+	if err != nil {
+		return ""
+	}
 	return strings.TrimSpace(out)
 }
 

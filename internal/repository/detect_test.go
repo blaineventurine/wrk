@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +89,33 @@ func TestDetectCanonicalizesRootFromNestedPath(t *testing.T) {
 	}
 	if repo.Root != want {
 		t.Fatalf("Repository.Root = %q, want canonical %q", repo.Root, want)
+	}
+}
+
+// TestFindRootErrorMentionsSearchedPath pins M21: when detection
+// bottoms out at the filesystem root without finding a VCS marker,
+// the error must name the absolute path we searched from so users can
+// tell they were in the wrong directory instead of guessing why wrk
+// refused to run.
+func TestFindRootErrorMentionsSearchedPath(t *testing.T) {
+	// t.TempDir() on macOS/Linux sits under /tmp or /var/folders,
+	// far from any user git checkout — findRoot will walk all the
+	// way to `/` without finding a marker.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = findRoot(dir)
+	if err == nil {
+		t.Fatal("findRoot: expected error outside any repository")
+	}
+
+	// The message carries the absolute form of the caller's start
+	// path — the pre-EvalSymlinks input, since findRoot uses
+	// filepath.Abs. We passed an already-canonical path so both
+	// forms match.
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("error missing searched path %q: %v", dir, err)
 	}
 }
