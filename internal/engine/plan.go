@@ -75,10 +75,19 @@ func buildPlan(
 }
 
 // ignorePreparer builds a prepare hook that ensures wrk-managed paths (and
-// the local config override file) are ignored by the VCS.
+// the local config override file) are ignored by the VCS. Wildcard
+// patterns for the executor's staging files (`.wrk-tmp`, `.wrk-backup`,
+// `.wrk-lock`) are always included so a crash mid-operation cannot leave
+// tracked-looking leftovers in `git status` — for directory resources
+// those could be many MB of stray content.
 func ignorePreparer(repo *repository.Repository) func(*config.Config) error {
 	return func(cfg *config.Config) error {
-		paths := []string{config.LocalFilename}
+		paths := []string{
+			config.LocalFilename,
+			"*.wrk-tmp",
+			"*.wrk-backup",
+			"*.wrk-lock",
+		}
 		for _, r := range cfg.Resources {
 			paths = append(paths, r.Path)
 		}

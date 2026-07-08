@@ -844,3 +844,87 @@ resources:
 		t.Fatalf("Warnings = %v, want none (path unchanged)", cfg.Warnings)
 	}
 }
+
+// TestValidateRejectsResourcePathWithReservedSuffix pins the fix for
+// the executor scratch-file collision: a resource whose basename ends
+// in `.wrk-tmp`, `.wrk-backup`, or `.wrk-lock` would be silently
+// clobbered (or, for `.wrk-backup`, deleted) during Symlink/Detach.
+// The check runs on the pre-expansion path, so glob syntax like
+// `*/.wrk-tmp` is caught before the resolver ever runs.
+func TestValidateRejectsResourcePathWithReservedSuffix(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"tmp suffix on plain basename", "foo.wrk-tmp"},
+		{"backup suffix on plain basename", "foo.wrk-backup"},
+		{"lock suffix on plain basename", "foo.wrk-lock"},
+		{"tmp basename in subdir", "some/dir/.wrk-tmp"},
+		{"backup basename in subdir", "some/dir/.wrk-backup"},
+		{"lock basename in subdir", "some/dir/.wrk-lock"},
+		{"tmp suffix on glob basename", "packages/*/.wrk-tmp"},
+		{"backup suffix on glob basename", "packages/*/.wrk-backup"},
+		{"lock suffix on glob basename", "packages/*/.wrk-lock"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: scratch
+    path: `+tc.path+`
+`)
+
+			_, err := Load(root)
+			if err == nil {
+				t.Fatalf("expected reserved-suffix rejection for %q, got nil", tc.path)
+			}
+			if !strings.Contains(err.Error(), "reserved suffix") {
+				t.Fatalf("error = %q, want to contain %q", err.Error(), "reserved suffix")
+			}
+			// The message must name the offending path so the user
+			// can find the entry in a large config.
+			if !strings.Contains(err.Error(), tc.path) {
+				t.Fatalf("error = %q, want to contain offending path %q", err.Error(), tc.path)
+			}
+		})
+	}
+}
+
+// TestValidateAllowsPathsContainingSuffixInMiddle confirms the check
+// only fires when the *basename* ends with a reserved suffix. A path
+// where the suffix appears in a directory component (basename is
+// something else) or a basename that merely contains the suffix but
+// does not end with it must load cleanly — otherwise we'd over-reject
+// legitimate configs and break user workflows.
+func TestValidateAllowsPathsContainingSuffixInMiddle(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"suffix in directory component", "foo.wrk-tmp/bar"},
+		{"suffix in nested directory", "foo.wrk-backup/nested/file"},
+		{"suffix in grandparent", "foo.wrk-lock/child/leaf"},
+		{"basename ends with suffix-ish but not exact", "foo.wrk-tmpish"},
+		{"basename with backup-like word", "foo.wrk-backup2"},
+		{"basename with lock-like word", "foo.wrk-locker"},
+		// Case-sensitive check: uppercase must NOT be rejected.
+		{"uppercase suffix", "foo.WRK-TMP"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: allowed
+    path: `+tc.path+`
+`)
+
+			if _, err := Load(root); err != nil {
+				t.Fatalf("valid path %q rejected: %v", tc.path, err)
+			}
+		})
+	}
+}

@@ -71,6 +71,17 @@ func Load(root string) (*Config, error) {
 	return shared, nil
 }
 
+// reservedSuffixes are the basename suffixes the executor uses for its
+// staging files (`<link>.wrk-tmp`, `<link>.wrk-backup`,
+// `<destination>.wrk-lock`). A resource whose path basename ends in
+// one of these would be silently clobbered or deleted mid-operation,
+// so validate() rejects it up front.
+var reservedSuffixes = [...]string{
+	".wrk-tmp",
+	".wrk-backup",
+	".wrk-lock",
+}
+
 // validate rejects configurations that could cause wrk to operate on
 // paths outside the repository or on repository infrastructure.
 //
@@ -161,6 +172,25 @@ func validate(cfg *Config) error {
 				"%s: path %q is inside repository infrastructure (%s)",
 				context, r.Path, firstSegment,
 			)
+		}
+
+		// Reject basenames ending in an executor scratch-file suffix.
+		// The executor writes `<link>.wrk-tmp`, `<link>.wrk-backup`,
+		// and `<destination>.wrk-lock` during Symlink/Detach; a user
+		// resource at one of those names would be silently clobbered
+		// (or deleted, in the .wrk-backup case). Check the raw
+		// pre-expansion basename so glob paths like `*/.wrk-tmp` fail
+		// too, before resolver ever runs.
+		base := filepath.Base(clean)
+		for _, suffix := range reservedSuffixes {
+			if strings.HasSuffix(base, suffix) {
+				return fmt.Errorf(
+					"%s: path %q uses a reserved suffix "+
+						"(`.wrk-tmp`, `.wrk-backup`, `.wrk-lock` are "+
+						"used internally); rename the resource path",
+					context, r.Path,
+				)
+			}
 		}
 	}
 
