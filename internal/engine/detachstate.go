@@ -40,7 +40,21 @@ func saveRegistry(repo *repository.Repository, reg detachRegistry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+
+	// Write atomically: truncating the real file mid-write on a crash
+	// leaves invalid JSON on disk, which loadRegistry silently treats as
+	// empty. Rendering the registry to a sibling tmp file first and then
+	// renaming means the real path is only ever the old (valid) file or
+	// the new (valid) file — never a truncated in-between.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // recordDetached marks the given relative paths as detached for repo.Root.

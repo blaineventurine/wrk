@@ -32,12 +32,30 @@ func Execute(plan planner.Plan) error {
 			}
 
 			if err := withLock(action.Destination, func() error {
-				// Double-check: a racing process may have already provisioned the
-				// shared resource while we were waiting for the lock.
-				if _, err := os.Lstat(action.Destination); err == nil {
-					// Winner already provisioned it. Our workspace copy is now
-					// redundant; discard it so the trailing Symlink can take its
-					// place. (Same fingerprint => equivalent contents.)
+				// Double-check: a racing process may have already provisioned
+				// the shared resource while we were waiting for the lock.
+				// Before discarding the workspace copy, verify the
+				// destination is a plausible provisioned artifact — same
+				// kind as the source, and never a symlink (shared storage
+				// stores real bytes, not indirection). A broken symlink or
+				// wrong-kind file at the destination would otherwise cause
+				// us to hand the user a link to garbage.
+				destInfo, err := os.Lstat(action.Destination)
+				if err == nil {
+					srcInfo, srcErr := os.Lstat(action.Source)
+					if srcErr != nil {
+						return srcErr
+					}
+					if err := checkMoveDestinationKind(
+						action.Destination, destInfo,
+						srcInfo,
+					); err != nil {
+						return err
+					}
+					// Winner already provisioned it. Our workspace copy is
+					// now redundant; discard it so the trailing Symlink can
+					// take its place. (Same fingerprint => equivalent
+					// contents.)
 					return os.RemoveAll(action.Source)
 				} else if !os.IsNotExist(err) {
 					return err
@@ -104,8 +122,31 @@ func Execute(plan planner.Plan) error {
 				return err
 			}
 
-			// Ignore the error if the link doesn't exist.
-			_ = os.Remove(action.Link)
+			// Guard the Remove: on a real file/dir at Link, os.Remove
+			// masks the truth with a bare "file exists" from the trailing
+			// Symlink call. Refuse anything that isn't a symlink or
+			// missing so the operator sees the real state; the plan
+			// builder is supposed to catch this upstream, and if it
+			// didn't, deleting a real file/dir here would be worse than
+			// stopping.
+			existing, err := os.Lstat(action.Link)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if err == nil {
+				if existing.Mode()&os.ModeSymlink == 0 {
+					return fmt.Errorf(
+						"refusing to replace %s: expected a symlink or nothing, found %s",
+						action.Link, fileKind(existing),
+					)
+				}
+				if err := os.Remove(action.Link); err != nil {
+					return fmt.Errorf(
+						"removing existing symlink at %s: %w",
+						action.Link, err,
+					)
+				}
+			}
 
 			if err := os.Symlink(
 				action.Target,
@@ -226,4 +267,41 @@ func safeRemove(path string) error {
 	}
 
 	return os.RemoveAll(clean)
+}
+
+// checkMoveDestinationKind verifies that a pre-existing destination is
+// a plausible artifact for the winning racer to have provisioned: same
+// kind as the workspace source (both directories or both regular
+// files) and never a symlink. Anything else means we were about to
+// discard the workspace copy in favor of garbage.
+func checkMoveDestinationKind(destination string, destInfo, srcInfo os.FileInfo) error {
+	destKind := fileKind(destInfo)
+	srcKind := fileKind(srcInfo)
+
+	// Symlinks are rejected outright: shared storage should be real
+	// bytes, not indirection, even when the source happens to be a
+	// symlink too.
+	if destInfo.Mode()&os.ModeSymlink != 0 || destKind != srcKind {
+		return fmt.Errorf(
+			"shared destination %s exists but is not the expected kind (%s, want %s); refusing to discard workspace copy (run wrk relink or investigate manually)",
+			destination, destKind, srcKind,
+		)
+	}
+	return nil
+}
+
+// fileKind returns a short human word describing the file mode, used
+// in refusal error messages so operators can see at a glance what the
+// executor found on disk.
+func fileKind(info os.FileInfo) string {
+	switch mode := info.Mode(); {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "directory"
+	case mode.IsRegular():
+		return "regular file"
+	default:
+		return "other"
+	}
 }

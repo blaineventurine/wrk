@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -25,8 +26,22 @@ func withLock(target string, fn func() error) error {
 
 	lock := flock.New(lockPath)
 
-	if err := lock.Lock(); err != nil {
+	got, err := lock.TryLock()
+	if err != nil {
 		return err
+	}
+	if !got {
+		// Another process is already provisioning this resource. Emit a
+		// progress line so the user knows why the command is stalling,
+		// then block until the peer releases.
+		fmt.Fprintf(
+			os.Stderr,
+			"waiting on lock for %s (another process is provisioning this resource)...\n",
+			target,
+		)
+		if err := lock.Lock(); err != nil {
+			return err
+		}
 	}
 	defer func() {
 		_ = lock.Unlock()

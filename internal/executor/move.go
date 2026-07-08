@@ -39,7 +39,10 @@ func move(source, destination string) error {
 
 	// The copy is safely in place; remove the original.
 	if err := os.RemoveAll(source); err != nil {
-		return err
+		return fmt.Errorf(
+			"moved to shared storage at %s but failed to remove source %s (the next `wrk link` will discard it): %w",
+			destination, source, err,
+		)
 	}
 
 	return nil

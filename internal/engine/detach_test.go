@@ -209,3 +209,88 @@ func TestRegistryPathLivesUnderMetadataDir(t *testing.T) {
 		t.Fatalf("registryPath = %q, want %q", got, want)
 	}
 }
+
+// TestSaveRegistryIsAtomic covers D3: saveRegistry writes via a tmp
+// file and rename, so a pre-existing stray `<path>.tmp` from a
+// previous crash is overwritten and never resurfaces as garbage.
+// Verifies (a) the final file contains the new content, (b) the tmp
+// file is gone after a successful save (rename consumed it).
+func TestSaveRegistryIsAtomic(t *testing.T) {
+	repo := newTestRepo(t)
+
+	path := registryPath(repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crashed prior write: garbage sitting at <path>.tmp. A
+	// correct atomic save must overwrite it and clear the way.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte("garbage-from-a-prior-crash"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := detachRegistry{
+		repo.Root: []string{"node_modules", "vendor"},
+	}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatalf("saveRegistry: %v", err)
+	}
+
+	// Final path holds the new content.
+	got := readRegistry(t, repo)
+	if diff := len(got); diff != 1 {
+		t.Fatalf("registry entry count = %d, want 1", diff)
+	}
+	entries := sortedRegistryEntry(got, repo.Root)
+	want := []string{"node_modules", "vendor"}
+	sort.Strings(want)
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %v, want %v", entries, want)
+	}
+	for i := range entries {
+		if entries[i] != want[i] {
+			t.Fatalf("entries = %v, want %v", entries, want)
+		}
+	}
+
+	// The tmp file was renamed into place, not left behind.
+	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+		t.Errorf("expected tmp file removed after rename, Lstat err=%v", err)
+	}
+}
+
+// TestSaveRegistryOverwritesPriorContent verifies the intended
+// round-trip semantics: saving twice replaces the file with the
+// second registry rather than merging or corrupting it.
+func TestSaveRegistryOverwritesPriorContent(t *testing.T) {
+	repo := newTestRepo(t)
+
+	first := detachRegistry{repo.Root: []string{"a"}}
+	if err := saveRegistry(repo, first); err != nil {
+		t.Fatalf("first saveRegistry: %v", err)
+	}
+
+	second := detachRegistry{repo.Root: []string{"b", "c"}}
+	if err := saveRegistry(repo, second); err != nil {
+		t.Fatalf("second saveRegistry: %v", err)
+	}
+
+	got := readRegistry(t, repo)
+	entries := sortedRegistryEntry(got, repo.Root)
+	want := []string{"b", "c"}
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %v, want %v", entries, want)
+	}
+	for i := range entries {
+		if entries[i] != want[i] {
+			t.Fatalf("entries = %v, want %v", entries, want)
+		}
+	}
+
+	// No orphan tmp files.
+	tmp := registryPath(repo) + ".tmp"
+	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+		t.Errorf("expected no leftover tmp file, Lstat err=%v", err)
+	}
+}
