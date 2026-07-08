@@ -41,21 +41,44 @@ func containedIn(path, root string) (bool, error) {
 	return true, nil
 }
 
-// canonicalizeExecutor is the executor's copy of the ancestor-tolerant
-// canonicalization loop used by internal/repository. Kept private and
-// duplicated to avoid a cyclic import; keep behaviour identical.
+// canonicalizeExecutor resolves symlinks along path's ANCESTORS only,
+// leaving the leaf component alone. This is the executor's containment-
+// check pass, and every mutating action (Move.Source, Symlink.Link,
+// Remove.Path, Detach.Link) may legitimately have a symlink AT the
+// leaf — Detach and Symlink exist precisely to replace such a symlink,
+// which today points into shared storage OUTSIDE the workspace. If we
+// resolved the leaf, every Detach on a fully-linked workspace would
+// false-positive.
+//
+// Ancestor symlinks are still resolved: the C4 escape guard fires when
+// a workspace-side symlink (`tools/build → /etc/build`) appears in the
+// ancestor chain of a configured resource path.
+//
+// This intentionally diverges from `internal/repository`.canonicalize,
+// which resolves the whole path. Do NOT re-sync the two — the executor
+// operates on paths whose leaf may be a symlink by design.
 func canonicalizeExecutor(path string) string {
+	base := filepath.Base(path)
+	parent := filepath.Dir(path)
+
+	// Root-ish input (`/`, `.`) — nothing to walk.
+	if parent == path {
+		return path
+	}
+
 	var suffix []string
-	current := path
+	current := parent
 	for {
 		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			return filepath.Join(append([]string{resolved}, suffix...)...)
+			parts := append([]string{resolved}, suffix...)
+			parts = append(parts, base)
+			return filepath.Join(parts...)
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
+		next := filepath.Dir(current)
+		if next == current {
 			return path
 		}
 		suffix = append([]string{filepath.Base(current)}, suffix...)
-		current = parent
+		current = next
 	}
 }

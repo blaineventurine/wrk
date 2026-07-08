@@ -118,3 +118,101 @@ func TestContainedInSiblingPath(t *testing.T) {
 		t.Fatalf("expected sibling %s to be outside root %s", sibling, root)
 	}
 }
+
+// TestContainedInEmptyInputs pins the fast-return: an empty path or
+// empty root MUST be treated as "not contained" without walking the
+// filesystem. A regression that fell through to filepath.Abs("")
+// would try to canonicalize the process CWD, which is almost never
+// what the caller intended.
+func TestContainedInEmptyInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		root string
+	}{
+		{name: "empty path", path: "", root: "/tmp"},
+		{name: "empty root", path: "/tmp/file", root: ""},
+		{name: "both empty", path: "", root: ""},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ok, err := containedIn(tc.path, tc.root)
+			if err != nil {
+				t.Errorf("containedIn(%q, %q) err = %v, want nil", tc.path, tc.root, err)
+			}
+			if ok {
+				t.Errorf("containedIn(%q, %q) = true, want false", tc.path, tc.root)
+			}
+		})
+	}
+}
+
+// TestContainedInLeafSymlinkPointsOutsideRoot pins the load-bearing
+// property that Detach and Symlink actions replace their own leaf
+// symlink — a symlink AT the leaf position must NOT be dereferenced
+// during containment, or every Detach on a fully-linked workspace
+// would false-positive against a symlink already pointing into shared
+// storage (which is by design outside the workspace root).
+//
+// Regression: before this fix, `wrk detach` with the default
+// out-of-repo storage failed with "escapes workspace root" because
+// canonicalize resolved the workspace-side symlink's target.
+func TestContainedInLeafSymlinkPointsOutsideRoot(t *testing.T) {
+	root := canonRoot(t, t.TempDir())
+	sharedStorage := canonRoot(t, t.TempDir())
+
+	// Simulate a linked resource: `<root>/.env` -> `<sharedStorage>/.env`
+	target := filepath.Join(sharedStorage, ".env")
+	if err := os.WriteFile(target, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, ".env")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := containedIn(link, root)
+	if err != nil {
+		t.Fatalf("containedIn: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected leaf-symlink %s (pointing to %s) to be contained in root %s; "+
+			"Detach must be able to operate on its own workspace-side link",
+			link, target, root)
+	}
+}
+
+// TestContainedInAncestorSymlinkEscapesEvenWhenLeafExists pins the
+// counterpart: an ancestor-level symlink escape must still be caught
+// even when the leaf itself happens to exist inside the linked-to
+// target. The old canonicalize resolved everything and caught this;
+// the new leaf-preserving canonicalize must still catch it via the
+// ancestor walk.
+func TestContainedInAncestorSymlinkEscapesEvenWhenLeafExists(t *testing.T) {
+	root := canonRoot(t, t.TempDir())
+	outside := canonRoot(t, t.TempDir())
+
+	// Ancestor symlink: `<root>/tools` -> `<outside>/tools`
+	target := filepath.Join(outside, "tools")
+	if err := os.MkdirAll(filepath.Join(target, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "tools")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leaf `build` exists inside the escaped target — this is the C4
+	// scenario. Must be rejected because the ANCESTOR `tools` escapes.
+	inside := filepath.Join(link, "build")
+
+	ok, err := containedIn(inside, root)
+	if err != nil {
+		t.Fatalf("containedIn: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected %s to escape root via ancestor symlink %s -> %s",
+			inside, link, target)
+	}
+}
