@@ -3,6 +3,8 @@ package main
 import (
 	"math"
 	"testing"
+
+	"github.com/blaineventurine/wrk/internal/engine"
 )
 
 // TestHumanSizeClamps pins the M3 defensive clamp: an input large
@@ -13,7 +15,7 @@ import (
 func TestHumanSizeClamps(t *testing.T) {
 	// math.MaxInt64 bytes is a lot more than an exabyte; without the
 	// clamp, humanSize would step exp to 6+ and index out of range.
-	got := humanSize(math.MaxInt64)
+	got := engine.HumanSize(math.MaxInt64)
 	if got == "" {
 		t.Fatalf("humanSize(MaxInt64) returned empty string")
 	}
@@ -32,11 +34,11 @@ func TestHumanSizeSpotChecks(t *testing.T) {
 	}{
 		{0, "0 B"},
 		{1023, "1023 B"},
-		{1024, "1.0 KB"},
+		{1024, "1 KB"},
 		{-1, "-"},
 	}
 	for _, c := range cases {
-		if got := humanSize(c.in); got != c.want {
+		if got := engine.HumanSize(c.in); got != c.want {
 			t.Errorf("humanSize(%d) = %q, want %q", c.in, got, c.want)
 		}
 	}

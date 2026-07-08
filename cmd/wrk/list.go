@@ -73,7 +73,7 @@ func printList(w io.Writer, rows []engine.ResourceListing, withSize bool) error 
 		}
 		fields = append(fields, r.SharedPath)
 		if withSize {
-			fields = append(fields, humanSize(r.Size))
+			fields = append(fields, engine.HumanSize(r.Size))
 		}
 
 		_, _ = fmt.Fprintln(tw, strings.Join(fields, "\t"))
@@ -91,27 +91,6 @@ func hasNonSharedListOrigin(rows []engine.ResourceListing) bool {
 	return false
 }
 
-func humanSize(n int64) string {
-	if n < 0 {
-		return "-"
-	}
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	// Clamp to the last defined suffix ('E'). humanSize is only ever fed
-	// counts of bytes on a real filesystem, so this is a defensive belt
-	// against unbounded overflow rather than a case anyone can trip.
-	if exp > 5 {
-		exp = 5
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
-}
 
 func init() {
 	rootCmd.AddCommand(listCmd)

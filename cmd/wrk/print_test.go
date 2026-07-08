@@ -405,12 +405,12 @@ func TestPrintListSizeColumnToggle(t *testing.T) {
 		if !strings.Contains(header, "SIZE") {
 			t.Errorf("SIZE column should be present when --size is on; header %q", header)
 		}
-		// humanSize(2048) → "2.0 KB", humanSize(10*1024) → "10.0 KB".
-		if !strings.Contains(out, "2.0 KB") {
-			t.Errorf("expected humanSize(2048)='2.0 KB' in output:\n%s", out)
+		// humanSize(2048) → "2 KB", humanSize(10*1024) → "10 KB".
+		if !strings.Contains(out, "2 KB") {
+			t.Errorf("expected humanSize(2048)='2 KB' in output:\n%s", out)
 		}
-		if !strings.Contains(out, "10.0 KB") {
-			t.Errorf("expected humanSize(10240)='10.0 KB' in output:\n%s", out)
+		if !strings.Contains(out, "10 KB") {
+			t.Errorf("expected humanSize(10240)='10 KB' in output:\n%s", out)
 		}
 	})
 }
