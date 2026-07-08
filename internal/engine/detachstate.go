@@ -176,3 +176,52 @@ func isDetached(reg detachRegistry, root, relPath string) bool {
 	}
 	return false
 }
+
+// pruneOrphanRegistryEntries removes detach-registry entries whose
+// workspace-root key is NOT in liveRoots. Returns the pruned roots so
+// the caller can surface them in gc plan output.
+//
+// Callers MUST pass liveRoots AFTER any ghost sweep has completed so
+// the input is authoritative. Serialized against sibling processes via
+// withRegistryLock.
+func pruneOrphanRegistryEntries(repo *repository.Repository, liveRoots []string) ([]string, error) {
+	var pruned []string
+	err := withRegistryLock(repo, func() error {
+		reg, err := loadRegistry(repo)
+		if err != nil {
+			return err
+		}
+
+		// Build live set for O(1) lookup.
+		live := make(map[string]bool)
+		for _, root := range liveRoots {
+			live[root] = true
+		}
+
+		// Collect and delete orphan entries.
+		for key := range reg {
+			if !live[key] {
+				pruned = append(pruned, key)
+				delete(reg, key)
+			}
+		}
+
+		// Save only if something was pruned.
+		if len(pruned) > 0 {
+			if err := saveRegistry(repo, reg); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Return empty slice, not nil, when nothing was pruned.
+	if len(pruned) == 0 {
+		return []string{}, nil
+	}
+	return pruned, nil
+}

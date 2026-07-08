@@ -468,3 +468,66 @@ func TestDetachDryRunDoesNotRecordIntent(t *testing.T) {
 		)
 	}
 }
+
+func TestPruneOrphanRegistryEntriesRemovesMissing(t *testing.T) {
+	repo := newTestRepo(t)
+
+	// Seed two entries: one live, one orphan.
+	if err := recordDetached(repo, []string{"a"}); err != nil {
+		t.Fatalf("recordDetached: %v", err)
+	}
+	// Simulate a second workspace by hand-crafting the registry:
+	reg, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	reg["/nonexistent/ghost/workspace"] = []string{"node_modules"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatalf("saveRegistry: %v", err)
+	}
+
+	pruned, err := pruneOrphanRegistryEntries(repo, []string{repo.Root})
+	if err != nil {
+		t.Fatalf("pruneOrphanRegistryEntries: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "/nonexistent/ghost/workspace" {
+		t.Fatalf("pruned = %v, want [/nonexistent/ghost/workspace]", pruned)
+	}
+
+	final, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry after: %v", err)
+	}
+	if _, ok := final["/nonexistent/ghost/workspace"]; ok {
+		t.Errorf("orphan key survived: %v", final)
+	}
+	if entry, ok := final[repo.Root]; !ok || len(entry) != 1 || entry[0] != "a" {
+		t.Errorf("live entry lost: got %v", final)
+	}
+}
+
+func TestPruneOrphanRegistryEntriesEmptyWhenAllLive(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := recordDetached(repo, []string{"a"}); err != nil {
+		t.Fatalf("recordDetached: %v", err)
+	}
+
+	pruned, err := pruneOrphanRegistryEntries(repo, []string{repo.Root})
+	if err != nil {
+		t.Fatalf("pruneOrphanRegistryEntries: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("pruned = %v, want empty", pruned)
+	}
+}
+
+func TestPruneOrphanRegistryEntriesEmptyRegistry(t *testing.T) {
+	repo := newTestRepo(t)
+	pruned, err := pruneOrphanRegistryEntries(repo, []string{repo.Root})
+	if err != nil {
+		t.Fatalf("pruneOrphanRegistryEntries: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("pruned = %v, want empty on missing registry file", pruned)
+	}
+}
