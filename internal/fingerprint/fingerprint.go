@@ -13,6 +13,15 @@ import (
 
 const Length = 16
 
+// Domain-separator tags written after the path separator to distinguish
+// present files from missing ones. Without this a present file whose
+// contents happen to be the byte string "MISSING" would collide with a
+// same-named missing file.
+const (
+	tagMissing byte = 0x00
+	tagPresent byte = 0x01
+)
+
 var separator = []byte{0}
 
 // Fingerprint computes a deterministic fingerprint for a collection of files.
@@ -21,7 +30,8 @@ var separator = []byte{0}
 //
 //   - repository-relative paths
 //   - file contents
-//   - whether files exist
+//   - whether files exist (distinguished from present files with any
+//     contents, including the literal bytes "MISSING")
 //
 // Absolute filesystem paths are intentionally ignored so that multiple
 // workspaces for the same repository produce identical fingerprints.
@@ -67,8 +77,7 @@ func updatePath(
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			hasher.Write([]byte("MISSING"))
-			hasher.Write(separator)
+			hasher.Write([]byte{tagMissing})
 			return nil
 		}
 
@@ -82,6 +91,8 @@ func updatePath(
 		)
 	}
 
+	hasher.Write([]byte{tagPresent})
+
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -93,8 +104,6 @@ func updatePath(
 	if _, err := io.Copy(hasher, f); err != nil {
 		return err
 	}
-
-	hasher.Write(separator)
 
 	return nil
 }

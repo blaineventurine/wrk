@@ -106,3 +106,31 @@ func TestCopyPathThenRename(t *testing.T) {
 		t.Errorf("content = %q, want %q", got, "x")
 	}
 }
+
+// TestCopyPathRefusesSymlinkSource guards the Lstat-based check: a
+// symlink at source must be refused rather than silently followed. The
+// executor's cross-device fallback would otherwise copy data from
+// anywhere on disk into the workspace.
+func TestCopyPathRefusesSymlinkSource(t *testing.T) {
+	dir := t.TempDir()
+
+	real := filepath.Join(dir, "real")
+	if err := os.WriteFile(real, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(dir, "dest")
+
+	if err := copyPath(link, destination); err == nil {
+		t.Fatal("expected copyPath to refuse symlink source")
+	}
+
+	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
+		t.Errorf("expected no destination, got err=%v", err)
+	}
+}

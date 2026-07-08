@@ -27,6 +27,10 @@ func Execute(plan planner.Plan) error {
 			}
 
 		case planner.Move:
+			if err := ensureContained(plan, action.Source); err != nil {
+				return err
+			}
+
 			if err := withLock(action.Destination, func() error {
 				// Double-check: a racing process may have already provisioned the
 				// shared resource while we were waiting for the lock.
@@ -68,11 +72,19 @@ func Execute(plan planner.Plan) error {
 				return err
 			}
 		case planner.Remove:
+			if err := ensureContained(plan, action.Path); err != nil {
+				return err
+			}
+
 			if err := safeRemove(action.Path); err != nil {
 				return err
 			}
 
 		case planner.Detach:
+			if err := ensureContained(plan, action.Link); err != nil {
+				return err
+			}
+
 			if err := detach(
 				action.Link,
 				action.Target,
@@ -81,6 +93,10 @@ func Execute(plan planner.Plan) error {
 			}
 
 		case planner.Symlink:
+			if err := ensureContained(plan, action.Link); err != nil {
+				return err
+			}
+
 			if err := os.MkdirAll(
 				filepath.Dir(action.Link),
 				0o755,
@@ -106,6 +122,31 @@ func Execute(plan planner.Plan) error {
 		}
 	}
 
+	return nil
+}
+
+// ensureContained returns nil when path resolves under plan.WorkspaceRoot
+// after following ancestor symlinks; otherwise it returns an error that
+// refuses the mutation. Skipped when WorkspaceRoot is empty (older plans
+// or unit tests that legitimately mutate outside a repository).
+func ensureContained(plan planner.Plan, path string) error {
+	if plan.WorkspaceRoot == "" {
+		return nil
+	}
+
+	ok, err := containedIn(path, plan.WorkspaceRoot)
+	if err != nil {
+		return fmt.Errorf(
+			"checking containment of %s in %s: %w",
+			path, plan.WorkspaceRoot, err,
+		)
+	}
+	if !ok {
+		return fmt.Errorf(
+			"refusing to operate on %s: escapes workspace root %s (possible symlink)",
+			path, plan.WorkspaceRoot,
+		)
+	}
 	return nil
 }
 
@@ -142,7 +183,13 @@ func runInitialize(action planner.InitializeResource) error {
 		cmd.Env = append(os.Environ(), environment(command.Env)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
+		// Hooks run while this process holds an advisory lock over the
+		// shared resource; a hook that blocks on stdin would wedge every
+		// peer racing on the same lock. Detach stdin explicitly so a hook
+		// prompting for input fails fast (EOF) instead of hanging. Users
+		// who need interactive setup should run the tool by hand outside
+		// wrk.
+		cmd.Stdin = nil
 
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf(

@@ -47,6 +47,11 @@ func (p *ResourcePlan) AddConflict(
 
 // Plan is the plan for an entire workspace.
 type Plan struct {
+	// WorkspaceRoot is the canonical repository root the plan applies to.
+	// The executor uses it to reject workspace-side actions whose path
+	// escapes the root through a symlink.
+	WorkspaceRoot string
+
 	Actions   []PlannedAction
 	Conflicts []Conflict
 }

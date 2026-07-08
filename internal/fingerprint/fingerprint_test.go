@@ -143,6 +143,39 @@ func TestMissingVsExisting(t *testing.T) {
 	}
 }
 
+// TestMissingLiteralDistinctFromMissingFile guards the domain-separator
+// tag: a present file whose contents are exactly the bytes "MISSING"
+// must fingerprint differently from a same-named missing file, and both
+// must be stable across runs.
+func TestMissingLiteralDistinctFromMissingFile(t *testing.T) {
+	rootMissing := t.TempDir()
+	rootPresent := t.TempDir()
+
+	// Same relative path in each root, so the path bytes cancel out.
+	missing := filepath.Join(rootMissing, "resource.txt")
+	present := filepath.Join(rootPresent, "resource.txt")
+
+	writeFile(t, present, "MISSING")
+
+	missingFp := fingerprintOf(t, rootMissing, missing)
+	presentFp := fingerprintOf(t, rootPresent, present)
+
+	if missingFp == presentFp {
+		t.Fatalf(
+			"fingerprint collision between missing file and file containing %q\nmissing: %s\npresent: %s",
+			"MISSING", missingFp, presentFp,
+		)
+	}
+
+	// Both fingerprints must be reproducible.
+	if again := fingerprintOf(t, rootMissing, missing); again != missingFp {
+		t.Fatalf("missing fingerprint not stable: %s vs %s", missingFp, again)
+	}
+	if again := fingerprintOf(t, rootPresent, present); again != presentFp {
+		t.Fatalf("present fingerprint not stable: %s vs %s", presentFp, again)
+	}
+}
+
 func TestOrderDoesNotMatter(t *testing.T) {
 	root := t.TempDir()
 

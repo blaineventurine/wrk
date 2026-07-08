@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 
@@ -45,10 +46,18 @@ func move(source, destination string) error {
 }
 
 // copyPath copies a file or directory from source to destination.
+//
+// Uses Lstat rather than Stat so a symlink at source is detected and
+// refused: silently following the link could copy content from outside
+// the intended tree.
 func copyPath(source, destination string) error {
-	info, err := os.Stat(source)
+	info, err := os.Lstat(source)
 	if err != nil {
 		return err
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to copy through symlink: %s", source)
 	}
 
 	if info.IsDir() {

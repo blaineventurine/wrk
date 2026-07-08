@@ -11,10 +11,15 @@ func BuildDetachPlan(
 	repo *repository.Repository,
 	options Options,
 ) (planner.Plan, error) {
-	return buildPlan(
+	plan, err := buildPlan(
 		repo,
 		options,
 		nil, // detach never modifies ignore rules
 		planner.BuildDetach,
 	)
+	if err != nil {
+		return plan, err
+	}
+	plan.WorkspaceRoot = repo.Root
+	return plan, nil
 }
