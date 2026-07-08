@@ -1,0 +1,11 @@
+- name: python
+  path: .venv
+  fingerprint:
+    - "{root}/pyproject.toml"
+    - "{root}/poetry.lock"
+  hooks:
+    initialize:
+      - run: poetry install --no-root
+        cwd: "{root}"
+        env:
+          POETRY_VIRTUALENVS_PATH: "{shared}"

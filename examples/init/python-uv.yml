@@ -1,0 +1,11 @@
+- name: python
+  path: .venv
+  fingerprint:
+    - "{root}/pyproject.toml"
+    - "{root}/uv.lock"
+  hooks:
+    initialize:
+      - run: uv sync --frozen
+        cwd: "{root}"
+        env:
+          UV_PROJECT_ENVIRONMENT: "{shared}"

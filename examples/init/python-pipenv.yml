@@ -1,0 +1,11 @@
+- name: python
+  path: .venv
+  fingerprint:
+    - "{root}/Pipfile"
+    - "{root}/Pipfile.lock"
+  hooks:
+    initialize:
+      - run: pipenv install --deploy
+        cwd: "{root}"
+        env:
+          WORKON_HOME: "{shared}"

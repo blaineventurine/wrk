@@ -1,0 +1,9 @@
+- name: node
+  path: node_modules
+  fingerprint:
+    - "{root}/package.json"
+    - "{root}/yarn.lock"
+  hooks:
+    initialize:
+      - run: yarn install --frozen-lockfile
+        cwd: "{root}"

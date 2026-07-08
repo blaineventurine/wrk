@@ -1,0 +1,12 @@
+- name: python
+  path: .venv
+  # Plain pip has no lockfile. Consider migrating to uv or poetry so
+  # wrk can fingerprint resolved dependencies, not just direct ones.
+  fingerprint:
+    - "{root}/requirements.txt"
+  hooks:
+    initialize:
+      - run: python -m venv "{shared}"
+        cwd: "{root}"
+      - run: "{shared}/bin/pip install -r {root}/requirements.txt"
+        cwd: "{root}"

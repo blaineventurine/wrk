@@ -1,0 +1,9 @@
+# Rust: sharing target/ across branches can cause subtle issues
+# (stale rlibs, incremental cache mismatches). Uncomment only if
+# you understand the tradeoffs.
+#
+# - name: cargo
+#   path: target
+#   fingerprint:
+#     - "{root}/Cargo.toml"
+#     - "{root}/Cargo.lock"

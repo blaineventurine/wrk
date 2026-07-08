@@ -1,0 +1,9 @@
+- name: node
+  path: node_modules
+  fingerprint:
+    - "{root}/package.json"
+    - "{root}/pnpm-lock.yaml"
+  hooks:
+    initialize:
+      - run: pnpm install --frozen-lockfile
+        cwd: "{root}"

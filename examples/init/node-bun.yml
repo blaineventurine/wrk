@@ -1,0 +1,9 @@
+- name: node
+  path: node_modules
+  fingerprint:
+    - "{root}/package.json"
+    - "{root}/bun.lockb"
+  hooks:
+    initialize:
+      - run: bun install --frozen-lockfile
+        cwd: "{root}"
