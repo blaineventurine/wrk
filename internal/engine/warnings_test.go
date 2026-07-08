@@ -38,6 +38,25 @@ func TestPrintWarningsWritesEachEntry(t *testing.T) {
 	}
 }
 
+// TestPrintWarningsExactFormat pins the exact wire format of a
+// warning line: `!` + two-space gutter + message + LF. The two spaces
+// match the plan-line indent so a warning aligns with the bullet
+// column and the `!` reads as a marker in that column. A regression
+// that dropped a space (or the trailing newline) would misalign every
+// piece of tooling that parses wrk output line-by-line.
+func TestPrintWarningsExactFormat(t *testing.T) {
+	cfg := &config.Config{Warnings: []string{"alpha", "beta"}}
+
+	var buf bytes.Buffer
+	printWarnings(cfg, &buf)
+
+	got := buf.String()
+	want := "!  alpha\n!  beta\n"
+	if got != want {
+		t.Fatalf("printWarnings output = %q, want %q", got, want)
+	}
+}
+
 func TestPrintWarningsIsNoopForNilOrEmpty(t *testing.T) {
 	var buf bytes.Buffer
 

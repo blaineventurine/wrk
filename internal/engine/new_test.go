@@ -240,3 +240,109 @@ func TestNewWorkspaceRunsLinkWhenPrimaryHasActions(t *testing.T) {
 		)
 	}
 }
+
+// TestNewWorkspaceCreatesAndLinks pins the whole point of `wrk new`:
+// from the primary, it creates a real sibling worktree (via
+// `git worktree add`) and then runs Link inside it so the new workspace
+// is wired up immediately. The wiring is observable as a symlink at
+// the resource path in the new workspace, pointing at the shared copy
+// the primary just provisioned.
+//
+// Requires a committed .wrk.yml so the new worktree — a checkout of
+// the branch — actually contains a config for the second Link to
+// operate on.
+func TestNewWorkspaceCreatesAndLinks(t *testing.T) {
+	primary := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, primary.Root)
+
+	// Untracked .env in the primary — the first Link inside
+	// NewWorkspace moves it to shared storage and symlinks it back.
+	writeFile(t, filepath.Join(primary.Root, ".env"), "provisioned\n")
+
+	if err := NewWorkspace(primary, "feature", Options{
+		StorageRoot: storage,
+		Stdout:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+
+	// The new worktree exists as a sibling of the primary.
+	parent := filepath.Dir(primary.Root)
+	newWs := canonPath(t, filepath.Join(parent, "feature"))
+
+	// And its .env is a symlink to the shared copy provisioned by
+	// the primary's earlier Link.
+	info, err := os.Lstat(filepath.Join(newWs, ".env"))
+	if err != nil {
+		t.Fatalf("lstat new .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("new workspace .env not a symlink; mode=%v", info.Mode())
+	}
+	link, err := os.Readlink(filepath.Join(newWs, ".env"))
+	if err != nil {
+		t.Fatalf("readlink new .env: %v", err)
+	}
+	// Shared path uses primary.RepositoryID (same repo, same ID).
+	wantShared, err := filepath.Abs(filepath.Join(storage, primary.RepositoryID, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != wantShared {
+		t.Errorf("new .env symlink = %q, want %q", link, wantShared)
+	}
+
+	// And the content read through the new workspace matches the
+	// original bytes.
+	got, err := os.ReadFile(filepath.Join(newWs, ".env"))
+	if err != nil {
+		t.Fatalf("read via symlink: %v", err)
+	}
+	if string(got) != "provisioned\n" {
+		t.Errorf("new workspace content = %q, want %q", got, "provisioned\n")
+	}
+}
+
+// TestNewWorkspaceFailsOnNestedDestination pins the nesting guard:
+// `wrk new ./inside` from the primary resolves to a path under the
+// primary's root, and ResolveDestination MUST refuse it with a message
+// that names the offending workspace so the user can fix the command.
+//
+// The path has a separator (starts with "./") so it is treated as an
+// explicit relative path — exactly the trap the guard exists to catch.
+func TestNewWorkspaceFailsOnNestedDestination(t *testing.T) {
+	primary := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources: []\n",
+	})
+
+	var out bytes.Buffer
+	err := NewWorkspace(primary, "./inside", Options{
+		StorageRoot: storageIn(t, primary.Root),
+		Stdout:      &out,
+	})
+	if err == nil {
+		t.Fatalf("NewWorkspace(./inside) succeeded; want nesting error\nstdout:\n%s", out.String())
+	}
+	if !contains(err.Error(), "inside existing workspace") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "inside existing workspace")
+	}
+
+	// No worktree should have been created.
+	if _, statErr := os.Stat(filepath.Join(primary.Root, "inside")); statErr == nil {
+		t.Errorf("nested destination was created despite the guard")
+	}
+}
+
+// contains is a tiny substring check used only by the new tests above.
+// Keeping it inline avoids reaching for `strings.Contains` in a file
+// whose existing imports are already lean.
+func contains(s, substr string) bool {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
