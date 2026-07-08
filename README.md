@@ -244,21 +244,22 @@ Shared resource exists?
 
 Resources without an `initialize` hook are expected to already exist.
 
-For example:
-
 ```yaml
 resources:
   - name: env
     path: .env
 ```
 
-`wrk` will never create `.env`. If it is missing everywhere, `wrk status`
-reports it as `absent` and `wrk link` fails with a conflict — wrk has no
-way to produce it and no reason to believe you have another source.
+`wrk` will never create `.env`. If it is missing everywhere, `wrk
+status` reports it as `absent` and `wrk link` fails with a conflict —
+wrk has no way to produce it and no reason to believe you have another
+source.
 
-If the file *is* actually provided elsewhere (a secrets manager, `direnv`,
-`1Password`, `sops`, a build-time template — anything outside wrk's scope),
-tell wrk that missing is the correct state by setting `create: false`:
+### `create: false` — provided out-of-band
+
+`create: false` tells `wrk` that a missing resource is intentional:
+the file is provided by something outside `wrk`'s scope (a secrets
+manager, `direnv`, `1Password`, `sops`, a build-time template).
 
 ```yaml
 resources:
@@ -267,10 +268,18 @@ resources:
     create: false
 ```
 
-Now the state is `expected` instead of `absent`, `wrk link` skips it
-silently, and `wrk status --exit-code` treats it as healthy. When the
-external tool eventually drops the file into place, wrk will happily
-share it across workspaces on the next `wrk link`.
+With this set:
+
+| State | Behavior |
+|-------|----------|
+| File missing everywhere | `wrk status` reports `expected` (not `absent`), `wrk link` skips it, `wrk status --exit-code` treats it as healthy. |
+| File appears in one workspace | The next `wrk link` adopts it into shared storage and every workspace links to the same copy. |
+| File already in shared storage | New workspaces get a symlink; no external tool is re-invoked. |
+
+Use `create: false` for anything `wrk` cannot produce but MUST share
+once someone else drops it into place. Leave `create` unset (defaults
+to `true`) when `wrk` is responsible for the resource — either via an
+`initialize` hook or by adopting an existing workspace copy.
 
 On the other hand:
 
@@ -494,91 +503,90 @@ wrk link --storage /path/to/storage
 Unknown placeholders (typos like `{shred}` for `{shared}`) are rejected
 at load time so a misspelled path never silently ships to disk.
 
+### `{shared}` in initialize hooks
+
+`{shared}` expands to a target path that **may not exist yet** when the
+hook runs. Tools that manage their own output directory
+(`bundle install`, `pip`, `npm ci`, ...) create it automatically:
+
+```yaml
+hooks:
+  initialize:
+    - run: bundle install
+      env:
+        BUNDLE_PATH: "{shared}"
+```
+
+If your hook writes to `{shared}` directly (e.g. shell redirects),
+create it first:
+
+```yaml
+hooks:
+  initialize:
+    - run: sh -c 'mkdir -p "{shared}" && cp source "{shared}/data"'
+```
+
+`wrk` runs the hook against a scratch path and only renames it into
+place on success, so a failed hook leaves no partial output behind.
+
 ---
 
 ## Fingerprinting
 
-Some resources depend on the state of the repository.
+### The problem it solves
 
-For example, `node_modules` depends on:
+A single `node_modules` directory can't be safely shared across two
+workspaces if one workspace's `package.json` disagrees with the
+other's. A worktree checked out at an older commit expects an older
+dependency tree; sharing the newer one silently breaks its runtime.
+
+Fingerprinting picks a per-workspace variant of the shared resource
+based on the files that determine its contents.
+
+### How it works
+
+A resource declares which files determine its contents:
 
 ```yaml
-fingerprint:
-  - "{root}/package.json"
-  - "{root}/yarn.lock"
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+      - "{root}/yarn.lock"
 ```
 
-Whenever any fingerprint input changes, `wrk` computes a new fingerprint and
-uses a different shared storage location.
-
-For example:
+`wrk` hashes those inputs into a short digest and stores each variant
+under its own subdirectory:
 
 ```
-package.json
-yarn.lock
-
-        │
-        ▼
-
-5fd1d0d610ba6c17
-
-        │
-        ▼
-
-<data directory>/wrk/
-
-    repositories/
-
-        github.com/
-
-            my-org/
-
-                monolith/
-
-                    node_modules/
-
-                        5fd1d0d610ba6c17/
+<data directory>/wrk/repositories/github.com/my-org/monolith/
+    node_modules/
+        5fd1d0d610ba6c17/   # package.json v1 + yarn.lock v1
+        8a71d8b219fd0031/   # package.json v2 + yarn.lock v2
 ```
 
-If the dependency manifests later change:
+Each workspace's `node_modules` symlink points at the variant matching
+its current fingerprint.
 
-```
-package.json
-yarn.lock
+### Variants coexist
 
-        │
-        ▼
+Two workspaces on different commits with different `package.json` files
+get two independent variants. Switching branches inside a workspace
+re-computes the fingerprint on the next `wrk link` and flips the
+symlink to the matching variant. Reverting the change reuses the
+earlier variant — the `initialize` hook does not run twice for the
+same fingerprint.
 
-8a71d8b219fd0031
+Variants are accretive: `wrk` never deletes an older variant
+automatically. This trades disk for speed and safety — jumping across
+branches, or bisecting through commits, never triggers a reinstall for
+a fingerprint you've already provisioned.
 
-        │
-        ▼
+### Un-fingerprinted resources
 
-<data directory>/wrk/
-
-    repositories/
-
-        github.com/
-
-            my-org/
-
-                monolith/
-
-                    node_modules/
-
-                        5fd1d0d610ba6c17/
-
-                        8a71d8b219fd0031/
-```
-
-Both versions can exist simultaneously.
-
-Creating a workspace on an older branch will automatically link to the
-matching dependency installation if it already exists.
-
-Resources without a `fingerprint` section always use a single shared copy.
-
-For example:
+Resources without a `fingerprint` section always use a single shared
+copy:
 
 ```yaml
 resources:
@@ -586,41 +594,25 @@ resources:
     path: .env
 ```
 
-is always stored as:
-
-```
-<data directory>/wrk/
-
-    repositories/
-
-        github.com/
-
-            my-org/
-
-                monolith/
-
-                    .env
-```
+All workspaces see the same `.env`. This is the right choice for
+files that are workspace-agnostic (secrets, editor state) but wrong
+for anything whose correct contents depend on a manifest.
 
 ### How fingerprints are computed
 
-A fingerprint is based on:
+The digest combines, for each input:
 
-- The repository-relative path of each fingerprint input.
-- The contents of each fingerprint input.
-- Whether each fingerprint input exists.
+- Its repository-relative path.
+- Its contents.
+- Whether it exists.
 
-Absolute filesystem paths are intentionally ignored.
-
-This means that different Jujutsu workspaces (or Git worktrees) for the same
-repository always compute the same fingerprint when their dependency
-manifests are identical.
+Absolute filesystem paths are intentionally ignored, so two workspaces
+of the same repository at the same commit always compute the same
+fingerprint.
 
 ### Choosing fingerprint inputs
 
 Fingerprint only the files that determine the resource's contents.
-
-Typical examples:
 
 | Resource | Fingerprint |
 |----------|-------------|
@@ -628,13 +620,64 @@ Typical examples:
 | `vendor/bundle` | `Gemfile`, `Gemfile.lock`, `.ruby-version` |
 | `.venv` | `pyproject.toml`, `poetry.lock`, `uv.lock`, `requirements.txt` |
 
-Avoid fingerprinting files that change frequently but do not affect the
+Avoid fingerprinting files that change frequently but don't affect the
 resource itself.
 
-Every fingerprint input must resolve to a path inside the repository root.
-`{root}/../secret` or `/etc/passwd` are rejected — the fingerprint's job
-is to summarize what the repository declares about its own resource, not
-arbitrary filesystem state.
+Every fingerprint input must resolve to a path inside the repository
+root. `{root}/../secret` or `/etc/passwd` are rejected.
+
+---
+
+## Working across workspaces
+
+`wrk` links a workspace resource by pointing its path at a shared
+directory in `wrk`'s data directory. What that means for edits in a
+workspace depends on whether the resource is fingerprinted.
+
+### Editing files under a linked resource
+
+A workspace's `node_modules/react/package.json` is a real file in
+`wrk`'s shared storage, reached through the symlink. Editing it — or
+running `patch-package`, adding a script to a dependency — mutates
+shared storage directly. **Every workspace pointing at that variant
+sees the change immediately.**
+
+If you need isolation for a temporary patch, run `wrk detach` first.
+That replaces the symlink with an independent copy so subsequent edits
+stay local. `wrk relink --yes` discards the copy and reconnects.
+
+### Installing a new dependency
+
+Running `yarn add left-pad` in a workspace does two things:
+
+1. Rewrites `package.json` and `yarn.lock` (real files in the
+   worktree, tracked by git/jj).
+2. Writes to `node_modules/` — which is the symlink into shared
+   storage.
+
+Step 2 mutates the shared variant. Every other workspace pinned to the
+same fingerprint now has the new dependency without asking.
+
+The next `wrk link` in this workspace notices the manifest changed and
+moves the workspace's symlink to a **new** variant — leaving the
+previous variant intact for other workspaces still on the old
+`package.json`. The new variant is populated by re-running the
+`initialize` hook.
+
+If you want the change to belong to just this workspace during
+development, `wrk detach` before installing.
+
+### Switching commits
+
+Checking out a different commit changes tracked files, including
+manifests. If a fingerprint input changed, `wrk status` marks the
+resource `stale` and `wrk link` flips the symlink to the matching
+variant — provisioning it via the hook if the variant is new, reusing
+it if not.
+
+Un-fingerprinted resources don't move: switching commits doesn't
+change their symlink target. `.env` stays the same across every
+branch of the same repo.
 
 ---
 
