@@ -9,9 +9,15 @@ import (
 )
 
 var newCmd = &cobra.Command{
-	Use:   "new <directory>",
+	Use:   "new <name-or-path>",
 	Short: "Create and provision a new workspace",
-	Args:  cobra.ExactArgs(1),
+	Long: "Create and provision a new workspace. A bare name (no path " +
+		"separator) is placed next to the current workspace, so " +
+		"`wrk new feature` from /proj/main lands at /proj/feature. " +
+		"Explicit relative paths (./foo, ../foo, foo/bar) and absolute " +
+		"paths are resolved literally. The destination must not sit " +
+		"inside any existing workspace.",
+	Args: cobra.ExactArgs(1),
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()

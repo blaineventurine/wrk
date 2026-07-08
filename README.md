@@ -83,7 +83,9 @@ repository, follow [`docs/INSTALL.md`](./docs/INSTALL.md).
 
 ## Configuration
 
-Create a `.wrk.yml` in the repository root.
+Create a `.wrk.yml` in the repository root — either by hand, or by running
+`wrk init` (see [Bootstrapping](#bootstrapping)) to generate one from the
+project files it detects (`package.json`, `Gemfile`, `pyproject.toml`, …).
 
 ```yaml
 resources:
@@ -284,6 +286,30 @@ Subsequent workspaces simply reuse the shared copy.
 
 ## Commands
 
+### Bootstrapping
+
+Generate a starter `.wrk.yml` for the current repository:
+
+```bash
+wrk init
+```
+
+`wrk init` inspects the current directory for well-known project files
+(`package.json` + lockfile, `Gemfile`, `pyproject.toml` + `uv.lock`/`poetry.lock`,
+`Pipfile.lock`, `requirements.txt`, `Cargo.toml`, `.env.example`) and writes a
+`.wrk.yml` seeded with sensible defaults for each detected layout. It refuses
+to overwrite an existing `.wrk.yml` unless you pass `--force`, and `--dry-run`
+prints the generated file to stdout without touching disk.
+
+```bash
+wrk init --dry-run       # preview only
+wrk init --force         # overwrite an existing .wrk.yml
+```
+
+With nothing detected, `wrk init` still writes a commented template so you
+can uncomment the resources you actually need. Edit the result, then run
+`wrk link` to provision.
+
 ### Provisioning
 
 Initialize or repair the current workspace:
@@ -298,11 +324,23 @@ Preview the planned actions:
 wrk link --dry-run
 ```
 
-Create and provision a new workspace:
+Create and provision a new workspace as a sibling of the current one:
 
 ```bash
-wrk new ../feature-auth
+wrk new feature-auth
 ```
+
+A bare name is placed next to the current workspace, so `wrk new feature-auth`
+from `/proj/main` lands at `/proj/feature-auth` — no need to type `../` every
+time. Explicit relative paths (`./foo`, `../foo`, `foo/bar`) and absolute paths
+are resolved literally, so long-standing habits like `wrk new ../feature-auth`
+still work.
+
+`wrk` refuses to create a new workspace inside any existing one. Nested
+worktrees confuse both Git and Jujutsu, and wrk's shared-storage links assume
+workspace roots are siblings — never parents or children of one another. The
+check runs before the underlying `git worktree add` / `jj workspace add`, so
+an illegal destination never creates an orphan branch.
 
 ### Independence and reconnection
 
@@ -389,8 +427,8 @@ wrk list --size
 Override automatic repository detection:
 
 ```bash
-wrk --vcs git new ../feature
-wrk --vcs jj  new ../feature
+wrk --vcs git new feature
+wrk --vcs jj  new feature
 ```
 
 Use a different storage location:
@@ -551,16 +589,22 @@ resource itself.
 
 ## Typical workflow
 
+Bootstrap a starter `.wrk.yml` for the repository (skip if you already have one):
+
+```bash
+wrk init
+```
+
 Initialize the primary workspace once:
 
 ```bash
 wrk link
 ```
 
-Create a new feature workspace:
+Create a new feature workspace as a sibling of the current one:
 
 ```bash
-wrk new ../feature-auth
+wrk new feature-auth
 cd ../feature-auth
 ```
 
