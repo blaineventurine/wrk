@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"github.com/blaineventurine/wrk/internal/planner"
@@ -11,10 +10,20 @@ import (
 // Detach makes the current workspace independent of shared resources by
 // replacing managed symlinks with independent local copies.
 //
-// On success (and when not a dry run), it accretes a record of which
-// resources have been detached so that `wrk status` can distinguish a
-// deliberate detach from a coincidental conflict. Subsequent detaches
-// union with the existing record; only `link`/`relink` clears it.
+// The record of what has been detached is written BEFORE the executor
+// runs the plan (intent-record semantics — see recordDetached). If the
+// plan partially executes, or the process is killed between the
+// executor's final swap and this function's return, the successfully
+// materialized files are already covered by a registry entry so
+// `wrk status` classifies them as StateDetached rather than
+// StateConflict — which would otherwise invite `wrk relink` to destroy
+// the user's independent copy.
+//
+// Union semantics tolerate planned-but-unexecuted paths: the next
+// `wrk detach` completes them; only `wrk link`/`wrk relink` clears the
+// entry. On plan failure the intent is intentionally NOT rolled back —
+// see the audit's C2/C3 findings for why partial-execution recovery
+// depends on the registry surviving.
 func Detach(
 	repo *repository.Repository,
 	options Options,
@@ -24,18 +33,16 @@ func Detach(
 		return err
 	}
 
-	if err := runPlan(plan, options); err != nil {
-		return err
+	// Dry-run must leave the registry untouched (planning is the only
+	// side effect the user asked for). runPlan below still prints the
+	// plan and returns without executing.
+	if !options.DryRun {
+		if err := recordDetached(repo, detachedPaths(repo, plan)); err != nil {
+			return err
+		}
 	}
 
-	if options.DryRun {
-		return nil
-	}
-
-	if err := recordDetached(repo, detachedPaths(repo, plan)); err != nil {
-		return fmt.Errorf("detach succeeded but failed to update detach record: %w", err)
-	}
-	return nil
+	return runPlan(plan, options)
 }
 
 // detachedPaths returns the workspace-relative paths touched by Detach

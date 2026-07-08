@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/repository"
 )
 
@@ -342,5 +345,126 @@ func TestSaveRegistryOverwritesPriorContent(t *testing.T) {
 	tmp := registryPath(repo) + ".tmp"
 	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
 		t.Errorf("expected no leftover tmp file, Lstat err=%v", err)
+	}
+}
+
+// alwaysErrWriter refuses every Write, so runPlan's printPlan step
+// returns before executor.Execute is invoked. That lets tests exercise
+// the intent-record-then-execute ordering without needing an executor
+// stub — the plan is built and printed, execution never starts, and
+// yet the registry MUST already reflect the caller's intent.
+type alwaysErrWriter struct{}
+
+func (alwaysErrWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("stdout closed")
+}
+
+// TestDetachRecordsIntentBeforeExecute pins C2+C3: recordDetached
+// happens BEFORE runPlan so a partial-execution failure (or a SIGKILL
+// between the executor's final swap and this function's return) never
+// leaves real detached files on disk without a registry entry — which
+// wrk status would misclassify as StateConflict, inviting wrk relink
+// to destroy the user's independent copy.
+//
+// Approach: run a normal Link to build the symlink, then invoke
+// Detach with a stdout that always errors. runPlan's first step is
+// printPlan(options.Stdout, plan); the failing writer makes it
+// return before executor.Execute runs. The registry MUST STILL
+// contain the workspace-relative path Detach was about to
+// materialize, even though the filesystem never changed.
+func TestDetachRecordsIntentBeforeExecute(t *testing.T) {
+	repo := newTestRepoWithHead(t, nil)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: env\n"+
+			"    path: .env\n"+
+			"  - name: cfg\n"+
+			"    path: cfg.toml\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed-env\n")
+	writeFile(t, filepath.Join(repo.Root, "cfg.toml"), "seed-cfg\n")
+
+	linkOpts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, linkOpts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Baseline: no registry entry yet.
+	if entry := readRegistry(t, repo)[repo.Root]; entry != nil {
+		t.Fatalf("baseline registry non-empty: %v", entry)
+	}
+
+	// Detach with a writer that always fails. runPlan's printPlan
+	// call returns the writer error before executor.Execute runs.
+	failOpts := Options{StorageRoot: storage, Stdout: alwaysErrWriter{}}
+	err := Detach(repo, failOpts)
+	if err == nil {
+		t.Fatal("Detach returned nil despite failing stdout; expected the write error to surface")
+	}
+
+	// The workspace-side symlinks MUST still exist — proving Execute
+	// never ran and the registry entry we're about to check reflects
+	// pure INTENT rather than an observed filesystem state.
+	for _, name := range []string{".env", "cfg.toml"} {
+		info, err := os.Lstat(filepath.Join(repo.Root, name))
+		if err != nil {
+			t.Fatalf("lstat %s: %v", name, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s is no longer a symlink; executor ran despite failing stdout (mode=%v)", name, info.Mode())
+		}
+	}
+
+	// The registry MUST contain both planned paths. Without the fix
+	// (recordDetached after runPlan) the entry would be absent
+	// because runPlan returned early.
+	got := sortedRegistryEntry(readRegistry(t, repo), repo.Root)
+	want := []string{".env", "cfg.toml"}
+	if !equalSlice(got, want) {
+		t.Fatalf(
+			"registry entry = %v, want %v — recordDetached was not called before runPlan",
+			got, want,
+		)
+	}
+}
+
+// TestDetachDryRunDoesNotRecordIntent pins the dry-run contract even
+// under the new intent-record semantics: --dry-run must not touch the
+// registry file. The existing TestDetachDryRunDoesNotWriteRegistry
+// covers the full happy path; this pinned unit-level assertion guards
+// the direct Detach(...) call so a future refactor that moved the
+// dry-run guard past recordDetached would flip red immediately.
+func TestDetachDryRunDoesNotRecordIntent(t *testing.T) {
+	repo := newTestRepoWithHead(t, nil)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+
+	linkOpts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, linkOpts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	dryOpts := Options{
+		StorageRoot: storage,
+		Stdout:      &bytes.Buffer{},
+		DryRun:      true,
+	}
+	if err := Detach(repo, dryOpts); err != nil {
+		t.Fatalf("Detach(dry-run): %v", err)
+	}
+
+	// Registry MUST remain untouched — no file on disk, no entry.
+	if _, err := os.Stat(registryPath(repo)); !os.IsNotExist(err) {
+		reg := readRegistry(t, repo)
+		t.Fatalf(
+			"dry-run wrote registry (stat err=%v, contents=%v); the DryRun guard is missing before recordDetached",
+			err, reg,
+		)
 	}
 }

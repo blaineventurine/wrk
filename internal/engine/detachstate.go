@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gofrs/flock"
+
 	"github.com/blaineventurine/wrk/internal/repository"
 )
 
@@ -68,16 +70,59 @@ func saveRegistry(repo *repository.Repository, reg detachRegistry) error {
 
 // recordDetached marks the given relative paths as detached for repo.Root.
 //
+// This is called BEFORE the executor runs the detach plan: the argument
+// is the caller's INTENT (the workspace-relative paths the plan wants to
+// materialize), not a filesystem-observed fact. Recording before execution
+// means a mid-plan failure — or a SIGKILL between the executor's final
+// swap and the caller's return — can never strand a real detached file
+// with no registry entry, which `wrk status` would misclassify as
+// StateConflict and `wrk relink` would then destroy.
+//
 // The registry is accretive: paths are unioned with any prior entry so a
-// no-op detach (nothing new to detach) never wipes existing records. Only
+// no-op detach (nothing new to detach) never wipes existing records, and
+// a partially-executed plan safely leaves the full intent recorded — the
+// next `wrk detach` completes any planned-but-unexecuted paths. Only
 // clearDetached removes an entry.
+//
+// The load-through-save cycle is guarded by an OS-level flock on
+// `<registryPath>.wrk-lock` (see withRegistryLock) so two workspaces of
+// the same repo — which share `.git/wrk/detached.json` via
+// `git --git-common-dir` — cannot race each other's atomic rename and
+// silently drop an entry.
 func recordDetached(repo *repository.Repository, relPaths []string) error {
-	reg, err := loadRegistry(repo)
-	if err != nil {
+	return withRegistryLock(repo, func() error {
+		reg, err := loadRegistry(repo)
+		if err != nil {
+			return err
+		}
+		reg.union(repo.Root, relPaths)
+		return saveRegistry(repo, reg)
+	})
+}
+
+// withRegistryLock serializes the registry's load-through-save cycle
+// across processes. Two workspaces of the same repo share
+// `.git/wrk/detached.json` via `git --git-common-dir`, so concurrent
+// `wrk detach` calls would otherwise interleave: both load, both modify,
+// both atomically rename their tmp file, and the second rename replaces
+// the first — silently dropping the first workspace's entry.
+//
+// The lock file lives next to the registry and is created lazily. Because
+// it is an OS-level flock, the kernel releases it on process exit, so no
+// stale-lock recovery is required.
+func withRegistryLock(repo *repository.Repository, fn func() error) error {
+	lockPath := registryPath(repo) + ".wrk-lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return err
 	}
-	reg.union(repo.Root, relPaths)
-	return saveRegistry(repo, reg)
+	lock := flock.New(lockPath)
+	if err := lock.Lock(); err != nil {
+		return err
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+	return fn()
 }
 
 // union merges add into the entry for root, preserving order (existing
@@ -106,16 +151,21 @@ func (r detachRegistry) union(root string, add []string) {
 }
 
 // clearDetached removes any detached record for repo.Root.
+//
+// Load-through-save is guarded by the same flock as recordDetached so a
+// concurrent record on a sibling workspace cannot be overwritten.
 func clearDetached(repo *repository.Repository) error {
-	reg, err := loadRegistry(repo)
-	if err != nil {
-		return err
-	}
-	if _, ok := reg[repo.Root]; !ok {
-		return nil
-	}
-	delete(reg, repo.Root)
-	return saveRegistry(repo, reg)
+	return withRegistryLock(repo, func() error {
+		reg, err := loadRegistry(repo)
+		if err != nil {
+			return err
+		}
+		if _, ok := reg[repo.Root]; !ok {
+			return nil
+		}
+		delete(reg, repo.Root)
+		return saveRegistry(repo, reg)
+	})
 }
 
 func isDetached(reg detachRegistry, root, relPath string) bool {
