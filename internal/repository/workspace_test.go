@@ -2,6 +2,7 @@ package repository
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +92,66 @@ func TestContainingWorkspacePrefixMatchIsNotSubdirectory(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("prefix-only match should not be inside; got %q", got)
+	}
+}
+
+// TestResolveDestinationRejectsEmpty pins S8: an empty destination
+// used to fall through resolveDestination, collapse to r.Root, and
+// then hit the "destination already exists" branch — a confusing
+// error for what is really a "you didn't name anything" mistake. The
+// upfront check now rejects it cleanly with a message that quotes the
+// bad input.
+func TestResolveDestinationRejectsEmpty(t *testing.T) {
+	r := &Repository{Root: "/proj/main"}
+	_, err := r.ResolveDestination("")
+	if err == nil {
+		t.Fatal("ResolveDestination(\"\") should error")
+	}
+	if !strings.Contains(err.Error(), "destination cannot be") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestResolveDestinationRejectsDot pins S8: "." is not a workspace
+// destination — it means "the current directory", which is the
+// existing workspace. Reject it up front instead of letting the
+// "already exists" check catch it downstream.
+func TestResolveDestinationRejectsDot(t *testing.T) {
+	r := &Repository{Root: "/proj/main"}
+	_, err := r.ResolveDestination(".")
+	if err == nil {
+		t.Fatal(`ResolveDestination(".") should error`)
+	}
+	if !strings.Contains(err.Error(), `"."`) {
+		t.Fatalf("error should quote the bad destination, got: %v", err)
+	}
+}
+
+// TestResolveDestinationRejectsDotDot pins S8: ".." would land on the
+// parent directory, which is almost certainly not what the user
+// wanted. Reject with the same message shape as "".
+func TestResolveDestinationRejectsDotDot(t *testing.T) {
+	r := &Repository{Root: "/proj/main"}
+	_, err := r.ResolveDestination("..")
+	if err == nil {
+		t.Fatal(`ResolveDestination("..") should error`)
+	}
+	if !strings.Contains(err.Error(), `".."`) {
+		t.Fatalf("error should quote the bad destination, got: %v", err)
+	}
+}
+
+// TestResolveDestinationRejectsWhitespace pins S8: `wrk new "  "`
+// should fail cleanly. strings.TrimSpace makes whitespace-only
+// destinations equivalent to the empty case, so the user does not
+// wander into a "path exists at /proj/main/  " error.
+func TestResolveDestinationRejectsWhitespace(t *testing.T) {
+	r := &Repository{Root: "/proj/main"}
+	_, err := r.ResolveDestination("  ")
+	if err == nil {
+		t.Fatal(`ResolveDestination("  ") should error`)
+	}
+	if !strings.Contains(err.Error(), "destination cannot be") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

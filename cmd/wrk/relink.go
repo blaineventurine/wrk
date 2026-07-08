@@ -1,12 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
 )
+
+// relinkYes is bound to `--yes`/`-y`. When set, relink runs without
+// asking the user to confirm the destructive action.
+var relinkYes bool
 
 var relinkCmd = &cobra.Command{
 	Use:   "relink",
@@ -15,11 +24,23 @@ var relinkCmd = &cobra.Command{
 		"`wrk detach` and reconnects this workspace to shared storage. " +
 		"Any local edits made since the detach are lost — preview first " +
 		"with --dry-run. Prefer `wrk link` if you want to keep your local " +
-		"changes.",
+		"changes.\n\n" +
+		"Because this action has no undo, `wrk relink` requires explicit " +
+		"consent when it will actually execute: pass --yes (-y) to skip " +
+		"the prompt, or answer `y` at the interactive confirmation. " +
+		"Non-interactive invocations (pipes, CI) without --yes refuse to " +
+		"run. --dry-run bypasses confirmation entirely because nothing " +
+		"is written.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
 			return err
+		}
+
+		if !dryRun {
+			if err := confirmRelink(relinkYes, os.Stdin, os.Stdout); err != nil {
+				return err
+			}
 		}
 
 		return engine.Relink(repo, engine.Options{
@@ -30,8 +51,54 @@ var relinkCmd = &cobra.Command{
 	},
 }
 
+// confirmRelink gates a destructive `wrk relink` invocation.
+//
+// Behaviour matrix (dry-run is handled by the caller — dry-run skips
+// confirmation entirely because nothing is written):
+//
+//   - yes==true                       → proceed silently.
+//   - stdin is not a TTY, yes==false  → refuse; there is no one to
+//     answer the prompt, so demand --yes explicitly.
+//   - stdin is a TTY,     yes==false  → print a warning banner and
+//     read one line from stdin; accept "y"/"yes" (any case) as
+//     consent, otherwise abort.
+//
+// The abort path returns a fresh error (not the exitCode sentinel) so
+// the top-level Execute prints it to stderr and exits 2 — this is a
+// real user-facing "no, I won't do that" message, not a silent signal.
+func confirmRelink(yes bool, in *os.File, out *os.File) error {
+	if yes {
+		return nil
+	}
+	if !isatty.IsTerminal(in.Fd()) {
+		return errors.New(
+			"refusing to run destructive relink without --yes; " +
+				"re-run with `wrk relink --yes` to confirm",
+		)
+	}
+
+	fmt.Fprintln(out,
+		"This will discard independent local copies made by "+
+			"`wrk detach` — no undo.")
+	fmt.Fprint(out, "Continue? [y/N]: ")
+
+	// bufio.ReadString returns io.EOF (and any partial line) when the
+	// pipe closes before a newline. We don't need to special-case:
+	// whatever we got (possibly empty) flows into the answer check
+	// below, and an empty or non-"y" answer aborts.
+	reader := bufio.NewReader(in)
+	line, _ := reader.ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer != "y" && answer != "yes" {
+		return errors.New("aborted")
+	}
+	return nil
+}
+
 func init() {
 	rootCmd.AddCommand(relinkCmd)
 	relinkCmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"Show planned actions without executing them")
+	relinkCmd.Flags().BoolVarP(&relinkYes, "yes", "y", false,
+		"Skip the destructive-action confirmation prompt")
 }

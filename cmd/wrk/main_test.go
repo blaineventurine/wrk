@@ -204,6 +204,74 @@ func TestInitOutsideRepoErrors(t *testing.T) {
 	}
 }
 
+// TestRelinkRefusesWithoutYesInNonTTY pins S7: `wrk relink` from a
+// non-terminal stdin (which is exactly what `runWrk` sets up — no pty)
+// refuses without --yes. The refusal happens before any planning, so
+// nothing observable is written to storage.
+//
+// Exit code 2 (via the top-level error path), stderr names --yes so
+// the user knows the escape hatch.
+func TestRelinkRefusesWithoutYesInNonTTY(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+
+	code, _, stderr := runWrk(t, repo, "relink")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (stderr: %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "--yes") {
+		t.Fatalf("stderr should mention --yes, got: %q", stderr)
+	}
+}
+
+// TestRelinkYesAndDryRunCoexist pins S7: --yes and --dry-run are not
+// mutually exclusive. --dry-run already bypasses confirmation, and
+// piling --yes on top of it MUST still be a legal invocation (exit 0,
+// no refusal) — this is how scripts probe the plan while advertising
+// that they know the command is destructive.
+func TestRelinkYesAndDryRunCoexist(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+
+	code, _, stderr := runWrk(t, repo, "relink", "--yes", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "refusing") {
+		t.Fatalf("--yes --dry-run should not trip the refusal path, got stderr:\n%s", stderr)
+	}
+}
+
+// TestRelinkDryRunBypassesConfirmation pins S7: `--dry-run` is a
+// pure preview — nothing is written, so the confirmation gate does
+// not trigger even without --yes and without a TTY. This is what
+// makes `wrk relink --dry-run` safe to wire into pre-commit or CI
+// as a "would relink change anything?" probe.
+func TestRelinkDryRunBypassesConfirmation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+
+	code, _, stderr := runWrk(t, repo, "relink", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "refusing") {
+		t.Fatalf("--dry-run should skip confirmation entirely, got stderr:\n%s", stderr)
+	}
+}
+
 // --- helpers ---
 
 func freshGitRepo(t *testing.T) string {

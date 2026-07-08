@@ -42,6 +42,17 @@ func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
 // creates nothing. It is used by `wrk new --dry-run` and by
 // CreateWorkspace itself so the two share a single source of truth.
 func (r *Repository) ResolveDestination(destination string) (string, error) {
+	// Reject sentinel destinations up front. Without this, the empty
+	// string collapses to r.Root and produces the user-hostile
+	// "destination already exists: <root>". "." and ".." are handled
+	// analogously — they resolve to the current or parent directory,
+	// which is either the current workspace itself or something wildly
+	// unrelated to what the user asked for.
+	trimmed := strings.TrimSpace(destination)
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return "", fmt.Errorf("destination cannot be %q", destination)
+	}
+
 	dest := resolveDestination(r.Root, destination)
 
 	if _, err := os.Stat(dest); err == nil {
