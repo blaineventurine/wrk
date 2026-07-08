@@ -2,22 +2,17 @@ package config
 
 // Command is a command defined in the configuration file.
 //
-// Run is tokenized with shell-like word splitting (quoting and escapes are
-// honored) and executed directly — it is NOT interpreted by a shell. This
-// means shell-only constructs do not work:
-//
-//   - Pipelines and operators: "a | b", "a && b", "a; b"
-//   - Redirections: "cmd > file"
-//   - Variable expansion: "echo $HOME"
-//   - Inline environment assignments: "FOO=bar cmd"
-//
-// To set environment variables, use the Env map instead of an inline
-// assignment. To use shell features, invoke a shell explicitly, e.g.:
+// Run is shlex-tokenized (quoting honored) and exec'd directly, NOT
+// interpreted by a shell. Shell operators (`|`, `&&`, `;`, `>`, ...)
+// are rejected by Resolve to prevent confusing "sleep: invalid time
+// interval: &&" errors. For shell semantics use an explicit shell:
 //
 //	run: sh -c "yarn install && yarn build"
 //
-// Placeholders ({root}, {parent}, {match}, {shared}) are expanded in Run,
-// Cwd, and Env values before Run is tokenized.
+// Placeholders ({root}, {parent}, {match}, {shared}) are expanded in
+// Run, Cwd, and Env values before Run is tokenized. {shared} is a
+// target path and may not exist when the hook runs; hooks writing
+// there directly should `mkdir -p` first.
 type Command struct {
 	Run string            `yaml:"run"`
 	Cwd string            `yaml:"cwd,omitempty"`
