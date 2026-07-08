@@ -105,11 +105,8 @@ func validate(cfg *Config) error {
 		LocalFilename: true,
 	}
 
-	for i, r := range cfg.Resources {
-		context := fmt.Sprintf("resource %d", i)
-		if r.Name != "" {
-			context = fmt.Sprintf("resource %q", r.Name)
-		}
+	for _, r := range cfg.Resources {
+		context := resourceContext(r)
 
 		if r.Name == "" {
 			return fmt.Errorf(
@@ -305,5 +302,28 @@ func normalize(cfg *Config) {
 		if resource.Hooks == nil {
 			resource.Hooks = make(map[string][]Command)
 		}
+		resource.sourceIndex = i
 	}
+}
+
+// resourceContext returns the "resource X" prefix for validation
+// errors, qualified by source file when known.
+func resourceContext(r Resource) string {
+	var source string
+	switch r.Origin {
+	case OriginLocal, OriginLocalOverride:
+		source = LocalFilename
+	case OriginShared:
+		source = Filename
+	}
+
+	handle := fmt.Sprintf("resource %d", r.sourceIndex+1)
+	if r.Name != "" {
+		handle = fmt.Sprintf("resource %q", r.Name)
+	}
+
+	if source == "" {
+		return handle
+	}
+	return fmt.Sprintf("%s: %s", source, handle)
 }

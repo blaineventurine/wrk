@@ -7,8 +7,10 @@ type Resource struct {
 	Fingerprint []string             `yaml:"fingerprint,omitempty"`
 	Hooks       map[string][]Command `yaml:"hooks,omitempty"`
 	Create      *bool                `yaml:"create,omitempty"`
-	// Origin is populated by Load; it is not read from YAML.
-	Origin Origin `yaml:"-"`
+	// Origin and sourceIndex are populated by Load, not from YAML.
+	// sourceIndex is the 0-based per-file position.
+	Origin      Origin `yaml:"-"`
+	sourceIndex int
 }
 
 // ShouldCreate reports whether the resource should be created if it does

@@ -928,3 +928,58 @@ resources:
 		})
 	}
 }
+
+// Validation errors name the source file plus per-file position, so
+// users can locate the offending entry.
+func TestValidateErrorQualifiesSourceFile(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: env
+    path: .env
+`)
+	writeFile(t, filepath.Join(root, LocalFilename), `
+resources:
+  - path: node_modules
+`)
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("expected validation error for unnamed local resource")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, LocalFilename) {
+		t.Errorf("error missing source-file qualifier %q: %v", LocalFilename, msg)
+	}
+	if !strings.Contains(msg, "resource 1") {
+		t.Errorf("error missing per-file index %q: %v", "resource 1", msg)
+	}
+	if !strings.Contains(msg, "name is required") {
+		t.Errorf("error missing 'name is required': %v", msg)
+	}
+}
+
+// Shared-file errors are qualified with the shared filename.
+func TestValidateErrorQualifiesSharedFile(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, Filename), `
+resources:
+  - name: env
+    path: .env
+  - path: node_modules
+`)
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, Filename) {
+		t.Errorf("error missing %q: %v", Filename, msg)
+	}
+	if !strings.Contains(msg, "resource 2") {
+		t.Errorf("error missing 'resource 2': %v", msg)
+	}
+}
