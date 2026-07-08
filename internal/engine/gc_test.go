@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/gofrs/flock"
 )
 
 // TestScanVariantsEmptyStorage: fresh repo, no wrk link ever run.
@@ -257,5 +259,138 @@ func TestPinnedVariantsDetachedWorkspaceDoesNotPin(t *testing.T) {
 	}
 	if len(pinned) != 0 {
 		t.Fatalf("pinned = %v, want empty after detach", pinned)
+	}
+}
+
+// TestCleanBookkeepingDetectFindsOrphanedLock: a lock file without any
+// sibling variant subdir must be flagged for sweep.
+func TestCleanBookkeepingDetectFindsOrphanedLock(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	// Seed a lock file with no corresponding variant.
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(resourceDir, "5fd1d0d6.wrk-lock")
+	writeFile(t, orphan, "")
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.OrphanedLocks) != 1 || result.OrphanedLocks[0] != orphan {
+		t.Fatalf("OrphanedLocks = %v, want [%q]", result.OrphanedLocks, orphan)
+	}
+}
+
+// TestCleanBookkeepingDetectSkipsHeldLock: a .wrk-provisioning whose
+// sibling .wrk-lock is currently held by another process must NOT be
+// reported — someone is actively provisioning it.
+func TestCleanBookkeepingDetectSkipsHeldLock(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prov := filepath.Join(resourceDir, "5fd1d0d6.wrk-provisioning")
+	if err := os.MkdirAll(prov, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(resourceDir, "5fd1d0d6.wrk-lock")
+	writeFile(t, lockPath, "")
+
+	// Hold the lock during the test.
+	l := flock.New(lockPath)
+	ok, err := l.TryLock()
+	if err != nil || !ok {
+		t.Fatalf("could not hold lock: ok=%v err=%v", ok, err)
+	}
+	t.Cleanup(func() { _ = l.Unlock() })
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.StaleProvisioning) != 0 {
+		t.Fatalf("StaleProvisioning = %v, want empty (lock is held)", result.StaleProvisioning)
+	}
+}
+
+// TestCleanBookkeepingDetectSweepsProvisioningWhenLockFree: a
+// .wrk-provisioning whose flock nobody holds is stale scratch and must
+// appear in the plan.
+func TestCleanBookkeepingDetectSweepsProvisioningWhenLockFree(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prov := filepath.Join(resourceDir, "5fd1d0d6.wrk-provisioning")
+	if err := os.MkdirAll(prov, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No lock file, no holder — stale.
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.StaleProvisioning) != 1 || result.StaleProvisioning[0] != prov {
+		t.Fatalf("StaleProvisioning = %v, want [%q]", result.StaleProvisioning, prov)
+	}
+}
+
+// TestCleanBookkeepingDetectFindsDeletingMarker: partial-delete markers
+// from a crashed prior gc are always safe to sweep.
+func TestCleanBookkeepingDetectFindsDeletingMarker(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	del := filepath.Join(resourceDir, "5fd1d0d6.wrk-deleting")
+	if err := os.MkdirAll(del, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.StaleDeleting) != 1 || result.StaleDeleting[0] != del {
+		t.Fatalf("StaleDeleting = %v, want [%q]", result.StaleDeleting, del)
+	}
+}
+
+// TestCleanBookkeepingDetectEmptyStorage: a repo whose storage tree
+// doesn't exist yet must return an empty plan with no error.
+func TestCleanBookkeepingDetectEmptyStorage(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.OrphanedLocks)+len(result.StaleProvisioning)+len(result.StaleDeleting) != 0 {
+		t.Fatalf("expected empty result, got %+v", result)
 	}
 }

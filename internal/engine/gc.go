@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gofrs/flock"
 
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/repository"
@@ -212,4 +215,89 @@ func isPathInside(base, target string) bool {
 		return false
 	}
 	return true
+}
+
+// bookkeepingCleanup describes stale files/dirs that gc's executor
+// should remove. All entries are absolute paths.
+type bookkeepingCleanup struct {
+	OrphanedLocks     []string // <variant>.wrk-lock files whose variant is gone
+	StaleProvisioning []string // <variant>.wrk-provisioning/ dirs whose flock is NOT held
+	StaleDeleting     []string // <variant>.wrk-deleting/ dirs left by a crashed gc
+}
+
+// cleanBookkeepingDetect walks the shared-storage tree of repo and
+// returns absolute paths of cruft the executor is allowed to remove.
+// Read-only: nothing on disk is modified. Locks are probed non-
+// blockingly and released immediately; a held lock leaves the
+// associated .wrk-provisioning out of the returned list.
+func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookkeepingCleanup, error) {
+	var result bookkeepingCleanup
+
+	root := filepath.Join(options.StorageRoot, repo.RepositoryID)
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return result, err
+	}
+
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Best-effort: a transient error on one entry shouldn't
+			// abort the sweep of the rest of the tree.
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		name := d.Name()
+
+		switch {
+		case strings.HasSuffix(name, ".wrk-provisioning"):
+			result.StaleProvisioning = appendIfStaleProvisioning(result.StaleProvisioning, path)
+			return fs.SkipDir
+
+		case strings.HasSuffix(name, ".wrk-deleting"):
+			result.StaleDeleting = append(result.StaleDeleting, path)
+			return fs.SkipDir
+
+		case strings.HasSuffix(name, ".wrk-lock"):
+			variantPath := strings.TrimSuffix(path, ".wrk-lock")
+			if _, err := os.Stat(variantPath); os.IsNotExist(err) {
+				result.OrphanedLocks = append(result.OrphanedLocks, path)
+			}
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return result, walkErr
+	}
+	return result, nil
+}
+
+// appendIfStaleProvisioning probes the sibling <variant>.wrk-lock non-
+// blockingly. A missing lock file means nobody could possibly hold it,
+// so the provisioning dir is stale. A held lock means a peer is
+// actively provisioning and we leave it alone. Any other stat/lock
+// error is treated conservatively (skip).
+func appendIfStaleProvisioning(dst []string, provPath string) []string {
+	lockPath := strings.TrimSuffix(provPath, ".wrk-provisioning") + ".wrk-lock"
+
+	if _, err := os.Stat(lockPath); err != nil {
+		if os.IsNotExist(err) {
+			return append(dst, provPath)
+		}
+		return dst
+	}
+
+	l := flock.New(lockPath)
+	ok, err := l.TryLock()
+	if err != nil || !ok {
+		return dst
+	}
+	_ = l.Unlock()
+	return append(dst, provPath)
 }
