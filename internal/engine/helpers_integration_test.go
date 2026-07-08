@@ -148,3 +148,27 @@ func storageIn(t *testing.T, repoRoot string) string {
 	}
 	return dir
 }
+
+// storageOutside returns a shared-storage path in a completely separate
+// t.TempDir() from the repo — the two trees have no ancestor in common,
+// mirroring the XDG-style location cmd/wrk picks by default in
+// production (under $XDG_STATE_HOME or ~/.local/state, always outside
+// any repository root).
+//
+// Until the leaf-symlink fix in internal/executor/contain.go, this
+// path would trip the containment guard: the executor's canonicalize
+// resolved symlinks all the way through the leaf, so a workspace-side
+// symlink like `<repo>/.env → <external-storage>/…/.env` looked like
+// an "escapes workspace root" refusal. The fix stops dereferencing
+// the leaf so Detach and Symlink actions can legitimately replace a
+// symlink already pointing into shared storage that lives outside
+// the workspace.
+//
+// The returned path is canonicalized so downstream string comparisons
+// against the exact bytes wrk writes as a symlink target (e.g.
+// os.Readlink output) stay honest on macOS, where t.TempDir() sits
+// under /var — itself a symlink into /private/var.
+func storageOutside(t *testing.T) string {
+	t.Helper()
+	return canonPath(t, t.TempDir())
+}
