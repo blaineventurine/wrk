@@ -33,14 +33,11 @@ func Execute(plan planner.Plan) error {
 			}
 
 			if err := withLock(action.Destination, func() error {
-				// Double-check: a racing process may have already provisioned
-				// the shared resource while we were waiting for the lock.
-				// Before discarding the workspace copy, verify the
-				// destination is a plausible provisioned artifact — same
-				// kind as the source, and never a symlink (shared storage
-				// stores real bytes, not indirection). A broken symlink or
-				// wrong-kind file at the destination would otherwise cause
-				// us to hand the user a link to garbage.
+				// Race: a peer may have provisioned the destination
+				// while we waited for the lock. Verify shape (same
+				// kind, no symlink) before discarding the workspace
+				// copy — a broken symlink at dest would leave the user
+				// with a link to garbage.
 				destInfo, err := os.Lstat(action.Destination)
 				if err == nil {
 					srcInfo, srcErr := os.Lstat(action.Source)
@@ -48,15 +45,10 @@ func Execute(plan planner.Plan) error {
 						return srcErr
 					}
 
-					// Idempotent-completion recovery: if a previous run
-					// succeeded at Rename(tmp, dest) but was killed before
-					// RemoveAll(source), source and destination now hold
-					// byte-identical content. Detecting that lets us
-					// silently complete the swap on the next Link instead
-					// of forcing the operator through `wrk relink` — which
-					// would discard any edits made to source between crash
-					// and recovery. (There aren't any here: the contents
-					// match, so we're safely removing a redundant copy.)
+					// Idempotent recovery: if a prior run renamed but
+					// was killed before removing source, contents
+					// match; drop the redundant source without
+					// invoking `wrk relink`.
 					same, sameErr := sameContents(action.Source, action.Destination)
 					if sameErr != nil {
 						return fmt.Errorf(
@@ -74,10 +66,9 @@ func Execute(plan planner.Plan) error {
 					); err != nil {
 						return err
 					}
-					// Winner already provisioned it. Our workspace copy is
-					// now redundant; discard it so the trailing Symlink can
-					// take its place. (Same fingerprint => equivalent
-					// contents.)
+					// Peer already provisioned. Same fingerprint =>
+					// same contents; drop our source so Symlink can
+					// take its place.
 					return os.RemoveAll(action.Source)
 				} else if !os.IsNotExist(err) {
 					return err
@@ -238,22 +229,16 @@ func environment(env map[string]string) []string {
 	return result
 }
 
-// runInitialize provisions the shared resource atomically by directing
-// the initialize hook at a sibling scratch path and only committing that
-// scratch into position after every hook command succeeds. A crashed or
-// failed hook leaves nothing at the real shared path, so
-// workspace.Inspect reports "not provisioned" and the next Link cleanly
-// re-runs the hook from scratch. Without this, a hook that partially
-// materializes `{shared}` and then fails would trick the outer
-// double-check (`Stat(shared)` succeeds) into skipping the hook forever.
+// runInitialize provisions the shared resource atomically: the hook
+// writes to <shared>.wrk-provisioning, and only on success does the
+// scratch get renamed into place. A failed hook leaves nothing at the
+// real path so the next Link re-runs cleanly.
 func runInitialize(action planner.InitializeResource) error {
 	real := action.Context.Shared
 	tmp := real + ".wrk-provisioning"
 
-	// Clear any stale scratch from a previous crashed run before we
-	// substitute {shared} → tmp. Leaving debris behind would let a hook
-	// that assumes an empty `{shared}` see partial output from the
-	// prior crash.
+	// Clear stale scratch from a prior crash before substituting
+	// {shared} → tmp.
 	if err := os.RemoveAll(tmp); err != nil {
 		return fmt.Errorf(
 			"clearing stale hook scratch %s: %w",
@@ -261,10 +246,8 @@ func runInitialize(action planner.InitializeResource) error {
 		)
 	}
 
-	// Copy the context and override Shared → tmp so every {shared}
-	// placeholder in Run, Cwd, and Env resolves against the scratch
-	// path. The action's own Context.Shared is left untouched for any
-	// caller that inspects the plan.
+	// Override {shared} → tmp in the hook's context so all placeholder
+	// expansions land in scratch. action.Context is left untouched.
 	hookCtx := action.Context
 	hookCtx.Shared = tmp
 
@@ -284,17 +267,12 @@ func runInitialize(action planner.InitializeResource) error {
 		cmd.Env = append(os.Environ(), environment(command.Env)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		// Hooks run while this process holds an advisory lock over the
-		// shared resource; a hook that blocks on stdin would wedge every
-		// peer racing on the same lock. Detach stdin explicitly so a hook
-		// prompting for input fails fast (EOF) instead of hanging. Users
-		// who need interactive setup should run the tool by hand outside
-		// wrk.
+		// Detach stdin: a hook that blocks reading it would wedge every
+		// peer racing on the lock.
 		cmd.Stdin = nil
 
 		if err := cmd.Run(); err != nil {
-			// Drop the partial scratch so the next Link sees "not
-			// provisioned" and re-runs the hook.
+			// Drop partial scratch so next Link re-runs.
 			_ = os.RemoveAll(tmp)
 			return fmt.Errorf(
 				"hook command failed: %s (in %s): %w",
@@ -305,14 +283,10 @@ func runInitialize(action planner.InitializeResource) error {
 		}
 	}
 
-	// Commit scratch → real atomically when the hook actually populated
-	// scratch. A hook that ignored the `{shared}` placeholder (or wrote
-	// somewhere else entirely) leaves tmp non-existent; that's not an
-	// error we can distinguish from "hook intentionally didn't
-	// provision", so leave `real` unmaterialized and let the next Link
-	// re-run the hook. The invariant the atomic-provision protects is
-	// "no partial output at real"; it does not require the hook to
-	// produce anything.
+	// Commit scratch → real when the hook populated it. Missing tmp
+	// (hook ignored {shared}) leaves real unmaterialized — the next
+	// Link re-runs. The atomic invariant guards against partial output
+	// at real, not against a hook that produces nothing.
 	if _, statErr := os.Lstat(tmp); statErr == nil {
 		if err := os.Rename(tmp, real); err != nil {
 			_ = os.RemoveAll(tmp)
@@ -328,9 +302,8 @@ func runInitialize(action planner.InitializeResource) error {
 	return nil
 }
 
-// safeRemove refuses to remove a path that appears to be a repository
-// root or contain repository infrastructure. This is a last-resort
-// guard; validation should catch these upstream.
+// safeRemove refuses to remove a repository root or infrastructure.
+// Last-resort guard — validation should catch these upstream.
 func safeRemove(path string) error {
 	clean := filepath.Clean(path)
 
@@ -338,8 +311,7 @@ func safeRemove(path string) error {
 		return fmt.Errorf("refusing to remove %q", path)
 	}
 
-	// A directory that contains .git or .jj is a repository root; never
-	// remove it as part of a resource action.
+	// Refuse anything containing .git or .jj (a repository root).
 	for _, marker := range []string{".git", ".jj"} {
 		if _, err := os.Stat(filepath.Join(clean, marker)); err == nil {
 			return fmt.Errorf(

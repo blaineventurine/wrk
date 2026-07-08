@@ -38,16 +38,10 @@ func backendFor(vcs VCS) (backend, error) {
 }
 
 // capture runs a command in dir and returns its trimmed stdout.
-//
-// On failure the error wraps the underlying error so callers can use
-// errors.Is/errors.As (for example, to detect *exec.ExitError or
-// exec.ErrNotFound). When the child produced stderr, the trimmed
-// stderr is appended to the message for user-visible context.
-//
-// The child inherits a sanitized environment: git-directory overrides
-// (GIT_DIR, GIT_WORK_TREE, ...) are stripped so wrk cannot be confused
-// by hooks that set them, and LC_ALL=C forces a stable locale so
-// output parsers don't have to deal with translated messages.
+// Failures wrap the underlying error (usable with errors.Is/As for
+// *exec.ExitError, exec.ErrNotFound) and append the child's stderr
+// for user context. The child gets a sanitized env (git-dir overrides
+// stripped, LC_ALL=C) so parsers see stable output.
 func capture(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -60,17 +54,11 @@ func capture(dir, name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-// passthrough runs a command in dir, wiring stdio to the process.
-//
-// stdin is wired to the parent's stdin so interactive prompts (git
-// credential helpers, jj's occasional confirmations) work. stderr from
-// the child is already visible on the user's terminal, so the wrapped
-// error only records which command failed and where.
-//
+// passthrough runs a command in dir with stdio wired to the process,
+// for user-facing commands (git worktree add, jj workspace add).
+// stdin is passed through so interactive prompts work; stderr is
+// already visible so wrapExecError only records what failed and where.
 // Unlike capture, the child inherits the parent's full environment.
-// passthrough drives user-facing commands (git worktree add, jj
-// workspace add) that the user may reasonably expect to see their
-// shell env — including git overrides — take effect.
 func passthrough(dir, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -88,10 +76,8 @@ func passthrough(dir, name string, args ...string) error {
 }
 
 // wrapExecError augments an exec error with the command, working
-// directory, and — when the underlying error is an *exec.ExitError with
-// captured stderr — the process's stderr output. The underlying error
-// is wrapped with %w so callers can errors.Is/errors.As through it
-// (for example, to distinguish exec.ErrNotFound from a non-zero exit).
+// directory, and (for *exec.ExitError with captured stderr) the
+// child's stderr. Wraps with %w for errors.Is/As.
 func wrapExecError(name string, args []string, dir string, err error) error {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
@@ -109,16 +95,10 @@ func wrapExecError(name string, args []string, dir string, err error) error {
 	)
 }
 
-// gitEnvOverrides names the environment variables that Git consults to
-// override the location of the repository, work tree, index, and object
-// database. When wrk is invoked from a Git hook or an `env`-wrapped
-// command, these can be set to point at some other repository — leaking
-// them into `git remote get-url`, `git worktree list`, etc. would
-// silently splice foreign state into wrk's decisions.
-//
-// The list is git's own headline set; more obscure overrides
-// (GIT_CONFIG_*, GIT_NAMESPACE, ...) exist but do not affect the
-// commands capture runs today.
+// gitEnvOverrides names the env vars Git consults to override the
+// repository, work tree, index, and object database locations.
+// Stripped from capture()'s child env so wrk isn't confused by hooks
+// that set them.
 var gitEnvOverrides = []string{
 	"GIT_DIR",
 	"GIT_WORK_TREE",
@@ -128,9 +108,8 @@ var gitEnvOverrides = []string{
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
 }
 
-// sanitizedEnv returns the process environment with git-directory
-// overrides stripped and LANG/LC_ALL forced to C, suitable for
-// subprocesses whose stdout wrk parses.
+// sanitizedEnv returns the process env with git-dir overrides stripped
+// and LANG/LC_ALL forced to C for stable stdout parsing.
 func sanitizedEnv() []string {
 	base := os.Environ()
 	out := make([]string, 0, len(base)+2)

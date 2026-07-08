@@ -7,19 +7,10 @@ import (
 	"strings"
 )
 
-// CreateWorkspace creates a new workspace/worktree at destination and
-// returns the repository rooted there.
-//
-// The destination is resolved by resolveDestination: bare names (no
-// path separator, not "." or "..") become siblings of the current
-// workspace root by prepending "..", so `wrk new feature` from
-// /proj/main lands at /proj/feature. Explicit relative paths and
-// absolute paths are left alone.
-//
-// The resolved destination must also not sit inside any existing
-// workspace of this repository — nested worktrees confuse both git and
-// jj, and wrk's shared-storage links assume workspace roots are
-// siblings, not parents/children of one another.
+// CreateWorkspace creates a workspace/worktree at destination and
+// returns a Repository rooted there. Bare names become siblings of
+// the current workspace; nesting inside an existing workspace is
+// refused.
 func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
 	dest, err := r.ResolveDestination(destination)
 	if err != nil {
@@ -33,21 +24,12 @@ func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
 	return Detect(dest, r.VCS())
 }
 
-// ResolveDestination applies wrk's sibling-default policy, then
-// verifies that the destination does not already exist and does not
-// sit inside any live workspace of this repository. Returns the
-// resolved absolute path.
-//
-// Read-only: this performs the same preflight as CreateWorkspace but
-// creates nothing. It is used by `wrk new --dry-run` and by
-// CreateWorkspace itself so the two share a single source of truth.
+// ResolveDestination applies the sibling-default policy and refuses
+// destinations that already exist or nest inside a live workspace.
+// Read-only; shared with CreateWorkspace so preflight is single-source.
 func (r *Repository) ResolveDestination(destination string) (string, error) {
-	// Reject sentinel destinations up front. Without this, the empty
-	// string collapses to r.Root and produces the user-hostile
-	// "destination already exists: <root>". "." and ".." are handled
-	// analogously — they resolve to the current or parent directory,
-	// which is either the current workspace itself or something wildly
-	// unrelated to what the user asked for.
+	// Empty / "." / ".." collapse to r.Root or its parent; reject them
+	// with a clearer error than "destination already exists: <root>".
 	trimmed := strings.TrimSpace(destination)
 	if trimmed == "" || trimmed == "." || trimmed == ".." {
 		return "", fmt.Errorf("destination cannot be %q", destination)
@@ -85,10 +67,9 @@ func (r *Repository) Workspaces() ([]string, error) {
 	return r.backend.workspaces(r.Root)
 }
 
-// resolveDestination applies wrk's sibling-default policy so that
-// `wrk new feature` (a bare name) lands next to the current workspace
-// instead of inside it. Anything with a path separator or a leading
-// dot is treated literally — explicit paths are the user's call.
+// resolveDestination applies the sibling-default policy: a bare name
+// becomes ../<name>; paths with a separator or leading dot pass
+// through untouched.
 func resolveDestination(root, destination string) string {
 	if filepath.IsAbs(destination) {
 		return filepath.Clean(destination)
@@ -99,10 +80,8 @@ func resolveDestination(root, destination string) string {
 	return filepath.Clean(filepath.Join(root, destination))
 }
 
-// isBareName reports whether name is a simple identifier suitable for
-// sibling-defaulting — no path separators, not the special . / ..
-// entries. Empty strings are not bare names either (callers should
-// reject them upstream, but the check keeps this helper total).
+// isBareName reports whether name is a simple identifier (no
+// separators, not "." or ".."). Empty strings are also not bare.
 func isBareName(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
@@ -110,17 +89,9 @@ func isBareName(name string) bool {
 	return !strings.ContainsAny(name, `/\`)
 }
 
-// containingWorkspace returns the first workspace root in workspaces
-// that equals or contains dest, or "" if dest sits outside every one.
-//
-// Both sides are canonicalized (symlinks resolved) before comparison
-// because VCS tooling — `git worktree list`, `jj workspace list` —
-// reports canonical paths, whereas dest is built from the caller's
-// r.Root. Since B4, findRoot canonicalizes at detection time so r.Root
-// is already canonical; the canonicalize calls below are defense-in-
-// depth for callers that hand-craft a Repository or pass a raw path.
-// Without canonicalization, filepath.Rel between the two forms wanders
-// through "../.." and false-negatives every nesting check.
+// containingWorkspace returns the first workspace root that equals
+// or contains dest, or "" if dest sits outside every one. Both sides
+// are canonicalized so a symlinked temp dir doesn't false-negative.
 func containingWorkspace(dest string, workspaces []string) (string, error) {
 	absDest, err := filepath.Abs(dest)
 	if err != nil {

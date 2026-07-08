@@ -8,13 +8,10 @@ import (
 	"strings"
 )
 
-// repositoryID derives a stable identifier shared across all workspaces of
-// the same repository.
-//
-// It prefers a parsed remote URL (for example, github.com/org/repo) so
-// that clones on different machines share storage. When no usable
-// remote exists, it falls back to a hash of the repository's common
-// metadata directory, namespaced under "local/".
+// repositoryID derives a stable identifier shared across all workspaces
+// of the same repository. Prefers a parsed remote URL (e.g.
+// github.com/org/repo) so clones on different machines share storage;
+// falls back to a hash of the common git dir under "local/".
 func repositoryID(root, gitDir string) (string, error) {
 	if url := preferredRemoteURL(root); url != "" {
 		if id := parseRemote(url); id != "" {
@@ -30,24 +27,12 @@ func repositoryID(root, gitDir string) (string, error) {
 	), nil
 }
 
-// preferredRemoteURL returns the URL of the remote wrk considers
-// canonical for identity purposes, or "" if none is usable.
+// preferredRemoteURL returns the remote wrk considers canonical for
+// identity, or "" if none is usable.
 //
-// Preference order:
-//
-//  1. "origin" — the overwhelming common case.
-//  2. "upstream" — fork-first workflows where the user's own fork is
-//     tracked under a different name (or no remote at all) and
-//     "upstream" points at the shared repository.
-//  3. The sole remote, if exactly one is configured under some other
-//     name — captures ad-hoc names ("gh", "gl", ...) where the choice
-//     is unambiguous.
-//
-// When multiple non-{origin,upstream} remotes are configured we
-// deliberately give up: picking the "wrong" one would move a
-// repository's workspace storage under a different identity on the
-// next detection, which is more disruptive than falling back to the
-// local hash.
+// Order: origin, upstream, or the sole configured remote. Multiple
+// non-{origin,upstream} remotes are ambiguous — falling back to the
+// local hash is safer than picking wrong.
 func preferredRemoteURL(root string) string {
 	for _, name := range []string{"origin", "upstream"} {
 		if url := remoteURL(root, name); url != "" {
@@ -76,26 +61,18 @@ func remoteURL(root, name string) string {
 	return strings.TrimSpace(out)
 }
 
-// parseRemote converts a Git remote URL into a host/path identifier, or ""
-// if the URL is not recognized.
+// parseRemote converts a Git remote URL into a host/path identifier,
+// or "" if unrecognized.
 //
-// The host portion is lowercased and the scheme's default port is stripped
-// (`:22` for ssh/git, `:80` for http, `:443` for https) so that
-// `https://GitHub.com/…`, `https://github.com:443/…`, and
-// `ssh://git@github.com:22/…` all converge on `github.com/…`. The path is
-// preserved verbatim — repository paths are case-sensitive on the wire and
-// forge servers reject folded variants.
-//
-// Host aliases (e.g. `ssh.github.com` vs `github.com`, or user-configured
-// SSH `Host` shortcuts) are NOT resolved: users who want those to share
-// storage must standardize their `origin` remote.
+// Host is lowercased and the scheme's default port stripped so
+// https/http/ssh variants of the same repo converge. Path is verbatim
+// (repo paths are case-sensitive on the wire). Host aliases (SSH
+// `Host` shortcuts, ssh.github.com) are NOT resolved.
 //
 // Examples:
 //
 //	git@github.com:org/repo.git         -> github.com/org/repo
-//	https://github.com/org/repo.git     -> github.com/org/repo
 //	https://GitHub.com/Org/Repo.git     -> github.com/Org/Repo
-//	ssh://git@github.com:22/org/repo    -> github.com/org/repo
 //	ssh://git@host:2222/org/repo        -> host:2222/org/repo
 func parseRemote(url string) string {
 	switch {
@@ -149,9 +126,8 @@ func parseRemote(url string) string {
 	return ""
 }
 
-// normalizeHost lowercases the host and strips the scheme's default port
-// so that the same remote written with an explicit default port matches
-// the elided form. Non-default ports are preserved (`example.com:2222`).
+// normalizeHost lowercases the host and strips the scheme's default
+// port so explicit and elided default ports match.
 func normalizeHost(scheme, host string) string {
 	host = strings.ToLower(host)
 
