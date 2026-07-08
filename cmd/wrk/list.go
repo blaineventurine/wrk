@@ -47,7 +47,7 @@ var listCmd = &cobra.Command{
 func printList(w io.Writer, rows []engine.ResourceListing, withSize bool) error {
 	showOrigin := hasNonSharedListOrigin(rows)
 
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', tabwriter.StripEscape)
 	defer func() {
 		_ = tw.Flush()
 	}()

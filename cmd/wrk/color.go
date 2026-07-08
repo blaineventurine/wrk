@@ -12,11 +12,6 @@ import (
 var noColor bool
 
 const (
-	// tabEsc is text/tabwriter.Escape (\xff). Tabwriter treats any
-	// bytes between two Escape bytes as zero-width, so wrapping ANSI
-	// escapes lets colored cells stay aligned in the output table.
-	tabEsc = "\xff"
-
 	ansiReset  = "\x1b[0m"
 	ansiRed    = "\x1b[31m"
 	ansiGreen  = "\x1b[32m"
@@ -62,14 +57,15 @@ func colorWorkspaceState(s engine.WorkspaceState) string {
 }
 
 // colorWrap wraps text with the given ANSI color code and a reset.
-// Each escape sequence is bracketed with text/tabwriter.Escape (0xff)
-// bytes so that a tabwriter measuring column widths counts only the
-// printable text and not the invisible escape bytes.
+// Callers that print inside an aligned table use `coloredCell` in
+// table.go, which pairs the wrapped string with a plain-text width so
+// column padding stays correct regardless of the invisible escape
+// bytes.
 func colorWrap(color, text string) string {
 	if color == "" {
 		return text
 	}
-	return tabEsc + color + tabEsc + text + tabEsc + ansiReset + tabEsc
+	return color + text + ansiReset
 }
 
 func stateColor(s engine.State) string {
@@ -100,11 +96,8 @@ func workspaceStateColor(s engine.WorkspaceState) string {
 	return ""
 }
 
-// dim wraps text with a dim ANSI code when color is enabled. Unlike
-// colorWrap, dim is emitted directly to stdout (never through a
-// tabwriter) so its ANSI escapes are not bracketed with tabwriter
-// zero-width sentinels — those would render as garbage bytes on the
-// terminal.
+// dim wraps text with a dim ANSI code when color is enabled. Used for
+// the `Config:` header that appears above the status table.
 func dim(text string) string {
 	if !useColor() {
 		return text

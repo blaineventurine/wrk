@@ -6,7 +6,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -44,29 +43,21 @@ var workspacesCmd = &cobra.Command{
 }
 
 func printWorkspaces(w io.Writer, summaries []engine.WorkspaceSummary) error {
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	defer func() {
-		_ = tw.Flush()
-	}()
-
-	_, _ = fmt.Fprintln(tw, "  WORKSPACE\tSTATE\tRESOURCES")
+	rows := []alignedRow{plainRow([]string{"  WORKSPACE", "STATE", "RESOURCES"})}
 
 	for _, s := range summaries {
 		marker := " "
 		if s.IsCurrent {
 			marker = "*"
 		}
-
-		_, _ = fmt.Fprintf(
-			tw, "%s %s\t%s\t%s\n",
-			marker,
-			s.Root,
-			colorWorkspaceState(s.State),
-			formatCounts(s.Counts),
-		)
+		rows = append(rows, alignedRow{
+			plainCell(marker + " " + s.Root),
+			coloredCell(colorWorkspaceState(s.State), string(s.State)),
+			plainCell(formatCounts(s.Counts)),
+		})
 	}
 
-	return nil
+	return writeAligned(w, rows)
 }
 
 // formatCounts renders per-state counts as, e.g., "2 linked, 1 detached".

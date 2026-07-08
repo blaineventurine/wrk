@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -9,11 +10,14 @@ import (
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
-// stripTabEsc removes the tabwriter.Escape (\xff) sentinels that
-// colorWrap emits around ANSI codes. The test doesn't care about the
-// sentinels themselves — those are exercised by TestColorWrap — but
-// they get in the way of substring assertions on the human-visible
-// row text.
+// stripTabEsc removes any tabwriter.Escape (\xff) sentinel bytes from
+// s. Historically colorWrap wrapped ANSI codes with these; that
+// approach was abandoned when we realized it neither hid ANSI from
+// tabwriter's width calculation NOR stripped the sentinels without
+// the StripEscape flag. Alignment now lives in writeAligned
+// (table.go). Kept as a defensive no-op so tests that call it stay
+// green regardless — if a stray 0xff ever regresses in, several tests
+// will fail loudly via the direct ContainsRune(0xff) checks.
 func stripTabEsc(s string) string {
 	return strings.ReplaceAll(s, "\xff", "")
 }
@@ -442,5 +446,120 @@ func TestPrintListOriginColumnGated(t *testing.T) {
 					hasCol, c.wantColumn, header)
 			}
 		})
+	}
+}
+
+// TestPrintStatusColoredAlignmentMatchesUncolored is the load-bearing
+// regression test for the colored-STATE-column misalignment bug.
+//
+// Historically the code passed a raw ANSI-wrapped state cell to
+// text/tabwriter. tabwriter counts ANSI escape bytes as visible width,
+// so the STATE column measured 9 characters wider on colored rows
+// than on the plain header row. On a real TTY, the header ORIGIN
+// jumped 9 columns to the right of the data ORIGIN.
+//
+// The fix bypasses tabwriter for colored tables (writeAligned in
+// table.go pairs each cell with a plain-text width). This test
+// exercises the colored path and asserts every row's non-final
+// column boundaries land at the SAME visible byte offset — the only
+// way for columns to align on a terminal that renders ANSI escapes
+// as zero-width control sequences.
+func TestPrintStatusColoredAlignmentMatchesUncolored(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	report := &engine.StatusReport{
+		Rows: []engine.ResourceStatus{
+			{Resource: "env", Path: ".env", State: engine.StateLinked, Origin: config.OriginShared},
+			{Resource: "node", Path: "node_modules", State: engine.StateNotLinked, Origin: config.OriginShared},
+			{Resource: "envrc", Path: ".envrc", State: engine.StateExpected, Origin: config.OriginLocal},
+		},
+	}
+	var buf bytes.Buffer
+	if err := printStatus(&buf, report, false); err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+
+	if strings.ContainsRune(buf.String(), 0xff) {
+		t.Fatalf("printStatus emitted a 0xff sentinel byte; those render as garbage on the terminal:\n%q", buf.String())
+	}
+
+	// Pin the expected stripped output byte-for-byte. Cells:
+	//   RESOURCE=8, PATH=12 (node_modules), STATE=10 (not-linked),
+	//   ORIGIN=6 (shared), FINGERPRINT=1 ("-").
+	// Two-space separators between columns.
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	got := ansi.ReplaceAllString(strings.TrimRight(buf.String(), "\n"), "")
+	want := strings.Join([]string{
+		"RESOURCE  PATH          STATE       ORIGIN  FINGERPRINT",
+		"env       .env          linked      shared  -",
+		"node      node_modules  not-linked  shared  -",
+		"envrc     .envrc        expected    local   -",
+	}, "\n")
+	if got != want {
+		t.Fatalf("stripped output mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestPrintWorkspacesColoredAlignmentMatchesUncolored is the workspaces
+// twin: same class of bug, same test shape. `printWorkspaces` colors
+// the STATE cell of every data row; the header STATE is plain.
+func TestPrintWorkspacesColoredAlignmentMatchesUncolored(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	summaries := []engine.WorkspaceSummary{
+		{Root: "/proj/main", State: engine.WorkspaceLinked, IsCurrent: true, Counts: map[engine.State]int{engine.StateLinked: 2}},
+		{Root: "/proj/feature", State: engine.WorkspaceUnhealthy, Counts: map[engine.State]int{engine.StateConflict: 1, engine.StateLinked: 1}},
+		{Root: "/proj/wip", State: engine.WorkspaceDetached, Counts: map[engine.State]int{engine.StateDetached: 2}},
+	}
+	var buf bytes.Buffer
+	if err := printWorkspaces(&buf, summaries); err != nil {
+		t.Fatalf("printWorkspaces: %v", err)
+	}
+
+	if strings.ContainsRune(buf.String(), 0xff) {
+		t.Fatalf("printWorkspaces emitted a 0xff sentinel byte:\n%q", buf.String())
+	}
+
+	// Verify column boundaries land at consistent visible offsets by
+	// checking that the STATE cell in every row starts at the same
+	// column position after ANSI stripping. Column 0 max cell:
+	//   "  /proj/feature" (15 chars); + 2 separator = STATE at 17.
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1+len(summaries) {
+		t.Fatalf("expected %d lines, got %d:\n%s", 1+len(summaries), len(lines), buf.String())
+	}
+
+	stateStarts := []int{}
+	stateCells := []string{"STATE", "linked", "unhealthy", "detached"}
+	for i, line := range lines {
+		plain := ansi.ReplaceAllString(line, "")
+		idx := strings.Index(plain, stateCells[i])
+		if idx < 0 {
+			t.Fatalf("row %d (%q) does not contain expected state cell %q", i, plain, stateCells[i])
+		}
+		stateStarts = append(stateStarts, idx)
+	}
+	for i := 1; i < len(stateStarts); i++ {
+		if stateStarts[i] != stateStarts[0] {
+			stripped := make([]string, len(lines))
+			for j, l := range lines {
+				stripped[j] = ansi.ReplaceAllString(l, "")
+			}
+			t.Fatalf("STATE column starts at offset %d in header but %d in row %d\n%s",
+				stateStarts[0], stateStarts[i], i, strings.Join(stripped, "\n"))
+		}
 	}
 }

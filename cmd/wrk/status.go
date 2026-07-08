@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -74,40 +73,35 @@ func printStatus(w io.Writer, report *engine.StatusReport, all bool) error {
 
 	showOrigin := hasNonSharedOrigin(report.Rows)
 
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	defer func() {
-		_ = tw.Flush()
-	}()
-
+	var headers []string
 	if all {
-		if showOrigin {
-			_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
-		} else {
-			_, _ = fmt.Fprintln(tw, "WORKSPACE\tRESOURCE\tPATH\tSTATE\tFINGERPRINT")
-		}
-	} else {
-		if showOrigin {
-			_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tORIGIN\tFINGERPRINT")
-		} else {
-			_, _ = fmt.Fprintln(tw, "RESOURCE\tPATH\tSTATE\tFINGERPRINT")
-		}
+		headers = append(headers, "WORKSPACE")
 	}
+	headers = append(headers, "RESOURCE", "PATH", "STATE")
+	if showOrigin {
+		headers = append(headers, "ORIGIN")
+	}
+	headers = append(headers, "FINGERPRINT")
 
+	rows := []alignedRow{plainRow(headers)}
 	for _, r := range report.Rows {
-		fields := []string{}
+		var cells alignedRow
 		if all {
-			fields = append(fields, r.WorkspaceRoot)
+			cells = append(cells, plainCell(r.WorkspaceRoot))
 		}
-		fields = append(fields, r.Resource, r.Path, colorState(r.State))
+		cells = append(cells,
+			plainCell(r.Resource),
+			plainCell(r.Path),
+			coloredCell(colorState(r.State), string(r.State)),
+		)
 		if showOrigin {
-			fields = append(fields, string(r.Origin))
+			cells = append(cells, plainCell(string(r.Origin)))
 		}
-		fields = append(fields, short(r.Fingerprint))
-
-		_, _ = fmt.Fprintln(tw, strings.Join(fields, "\t"))
+		cells = append(cells, plainCell(short(r.Fingerprint)))
+		rows = append(rows, cells)
 	}
 
-	return nil
+	return writeAligned(w, rows)
 }
 
 func hasNonSharedOrigin(rows []engine.ResourceStatus) bool {

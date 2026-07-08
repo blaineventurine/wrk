@@ -17,24 +17,23 @@ func TestColorWrapPlainText(t *testing.T) {
 	}
 }
 
-// TestColorWrapBracketedWithTabEscape verifies that colored output is
-// bracketed by tabwriter.Escape (\xff) bytes around each ANSI escape
-// sequence. Without those, tabwriter treats the escape bytes as
-// printable width and misaligns every downstream column.
-func TestColorWrapBracketedWithTabEscape(t *testing.T) {
+// TestColorWrapEmitsAnsiCodesAroundText verifies that a colored cell
+// carries the given ANSI code, the text unchanged, and a reset code.
+// The output MUST NOT contain any tabwriter Escape (\xff) bytes —
+// those were a previous cargo-culted attempt at alignment that
+// leaked garbage bytes onto the terminal (StripEscape flag was
+// missing) and did not fix alignment anyway because tabwriter counts
+// ANSI codes as visible width regardless of bracketing. Alignment
+// now lives in writeAligned via table.go, which pairs each cell with
+// a plain-text width.
+func TestColorWrapEmitsAnsiCodesAroundText(t *testing.T) {
 	got := colorWrap(ansiGreen, "linked")
-	want := "\xff" + ansiGreen + "\xff" + "linked" + "\xff" + ansiReset + "\xff"
+	want := ansiGreen + "linked" + ansiReset
 	if got != want {
-		t.Fatalf(
-			"colorWrap(green, linked)\n got=%q\nwant=%q",
-			got, want,
-		)
+		t.Fatalf("colorWrap(green, linked)\n got=%q\nwant=%q", got, want)
 	}
-
-	// Sanity: exactly four sentinel bytes should appear (open code,
-	// close code, open reset, close reset).
-	if n := strings.Count(got, "\xff"); n != 4 {
-		t.Fatalf("expected 4 tabwriter.Escape bytes, got %d in %q", n, got)
+	if strings.ContainsRune(got, 0xff) {
+		t.Fatalf("colorWrap must not emit 0xff sentinels (they render as garbage on the terminal); got %q", got)
 	}
 }
 
@@ -196,8 +195,9 @@ func TestColorStateNoColorReturnsPlainString(t *testing.T) {
 
 // TestColorStateWithColorWrapsMatchingBucket pins the on-color path:
 // with color enabled, the returned string carries the SAME ANSI code
-// that stateColor reports for that state, and it stays tabwriter-safe
-// (four \xff sentinels). This is the join between the two helpers.
+// that stateColor reports for that state, the state text is intact,
+// AND no 0xff sentinel bytes leak into the output. This is the join
+// between the two helpers.
 func TestColorStateWithColorWrapsMatchingBucket(t *testing.T) {
 	// Force color on via CLICOLOR_FORCE — test binaries have no TTY.
 	t.Setenv("NO_COLOR", "")
@@ -224,8 +224,8 @@ func TestColorStateWithColorWrapsMatchingBucket(t *testing.T) {
 		if !strings.Contains(got, string(s)) {
 			t.Errorf("colorState(%q) dropped the state text; got %q", s, got)
 		}
-		if n := strings.Count(got, "\xff"); n != 4 {
-			t.Errorf("colorState(%q) should carry 4 tabwriter sentinels, got %d in %q", s, n, got)
+		if strings.ContainsRune(got, 0xff) {
+			t.Errorf("colorState(%q) leaked 0xff sentinel bytes into %q", s, got)
 		}
 	}
 }
