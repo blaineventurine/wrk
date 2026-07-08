@@ -138,3 +138,85 @@ func TestRelinkDryRunSkipsMutation(t *testing.T) {
 			beforeEntry, afterEntry)
 	}
 }
+
+// TestRelinkNoOpWhenNothingDetached pins that Relink is safe to run
+// against an already-linked workspace where the user never called
+// Detach: the plan is empty, nothing on disk changes (symlink target
+// preserved), the registry stays empty, and no destructive warning is
+// emitted (there is nothing destructive to warn about). A regression
+// that always planned a Remove+Symlink cycle for "linked" instances
+// would silently rewrite the symlink and emit the ⚠ marker even
+// though nothing is being discarded.
+func TestRelinkNoOpWhenNothingDetached(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename, "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Snapshot: symlink identity (inode) and the target string. Relink
+	// must not touch either. Checking Lstat inode via os.SameFile
+	// catches the subtle regression where Relink always plans
+	// Remove+Symlink for a linked instance: the target string would
+	// stay the same but the inode would flip.
+	envPath := filepath.Join(repo.Root, ".env")
+	beforeInfo, err := os.Lstat(envPath)
+	if err != nil {
+		t.Fatalf("lstat pre-Relink: %v", err)
+	}
+	before, err := os.Readlink(envPath)
+	if err != nil {
+		t.Fatalf("readlink pre-Relink: %v", err)
+	}
+	// Baseline: Link's clearDetached already cleared the registry.
+	if entry := readRegistry(t, repo)[repo.Root]; entry != nil {
+		t.Fatalf("baseline registry non-empty: %v (Link should have cleared it)", entry)
+	}
+
+	// Run Relink WITHOUT a prior Detach. Everything is already linked
+	// correctly; there is no independent copy to discard.
+	var out bytes.Buffer
+	if err := Relink(repo, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("Relink no-op: %v", err)
+	}
+
+	// Symlink identity preserved: same inode (same on-disk entry, not
+	// a re-created one), still a symlink, exact same target string.
+	afterInfo, err := os.Lstat(envPath)
+	if err != nil {
+		t.Fatalf("lstat post-Relink: %v", err)
+	}
+	if afterInfo.Mode()&os.ModeSymlink == 0 {
+		t.Errorf(".env is no longer a symlink after no-op Relink; mode=%v", afterInfo.Mode())
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Errorf("symlink inode changed by no-op Relink (mode before=%v, after=%v) — plan should have been empty",
+			beforeInfo.Mode(), afterInfo.Mode())
+	}
+	after, err := os.Readlink(envPath)
+	if err != nil {
+		t.Fatalf("readlink post-Relink: %v", err)
+	}
+	if after != before {
+		t.Errorf("symlink target changed by no-op Relink: before=%q, after=%q", before, after)
+	}
+
+	// Registry stays empty — clearDetached on an empty entry is a
+	// clean no-op, not an error.
+	if entry := readRegistry(t, repo)[repo.Root]; entry != nil {
+		t.Errorf("no-op Relink populated the registry: %v", entry)
+	}
+
+	// Plan output: no destructive markers at all. `⚠` is emitted both
+	// on per-action destructive bullets and on the overall destructive
+	// warning banner; if either shows up, the printer decided the
+	// no-op plan was destructive, which it isn't.
+	if bytes.ContainsRune(out.Bytes(), '⚠') {
+		t.Errorf("no-op Relink emitted a destructive marker; plan output was:\n%s", out.String())
+	}
+}
