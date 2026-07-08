@@ -211,7 +211,14 @@ func pinnedVariantsForRoots(
 				}
 
 				for _, v := range variants {
-					if isPathInside(v.StoragePath, resolved) {
+					// EvalSymlinks canonicalizes the resolved target
+					// (e.g. `/private/var/...` on macOS); do the same to
+					// the base so isPathInside compares equivalent forms.
+					base, err := filepath.EvalSymlinks(v.StoragePath)
+					if err != nil {
+						base = v.StoragePath
+					}
+					if isPathInside(base, resolved) {
 						pinned[v.StoragePath] = true
 						break
 					}
