@@ -37,11 +37,17 @@ func move(source, destination string) error {
 		return err
 	}
 
-	// The copy is safely in place; remove the original.
+	// The copy is safely in place; remove the original. If we crash
+	// here, source and destination both hold identical bytes. The next
+	// Execute Move takes the idempotent-completion recovery path in
+	// execute.go: sameContents matches, source is removed, swap done.
+	// Message the user for the same-workspace recovery: `wrk relink`
+	// is what discards a redundant source; `wrk link` would refuse
+	// with a conflict because both sides look "provisioned".
 	if err := os.RemoveAll(source); err != nil {
 		return fmt.Errorf(
-			"moved to shared storage at %s but failed to remove source %s (the next `wrk link` will discard it): %w",
-			destination, source, err,
+			"moved to shared storage at %s but failed to remove source %s (run `wrk relink` inside the workspace to complete the swap; any edits you make to %s meanwhile will be discarded): %w",
+			destination, source, source, err,
 		)
 	}
 

@@ -105,7 +105,7 @@ func TestLocalOverrideReplacesByName(t *testing.T) {
 			"    path: node_modules\n"+
 			"    hooks:\n"+
 			"      initialize:\n"+
-			"        - run: touch {shared} {shared}.shared-hook-ran\n",
+			"        - run: touch {shared} {root}/.shared-hook-ran\n",
 	)
 	writeConfig(t, repo.Root, config.LocalFilename,
 		"resources:\n"+
@@ -113,7 +113,7 @@ func TestLocalOverrideReplacesByName(t *testing.T) {
 			"    path: node_modules\n"+
 			"    hooks:\n"+
 			"      initialize:\n"+
-			"        - run: touch {shared} {shared}.local-hook-ran\n",
+			"        - run: touch {shared} {root}/.local-hook-ran\n",
 	)
 	// No node_modules in the workspace — forces the initialize-hook
 	// branch of the plan.
@@ -125,20 +125,21 @@ func TestLocalOverrideReplacesByName(t *testing.T) {
 		t.Fatalf("Link: %v", err)
 	}
 
-	sharedBase := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	localMarker := filepath.Join(repo.Root, ".local-hook-ran")
+	sharedMarker := filepath.Join(repo.Root, ".shared-hook-ran")
 
 	// The local hook's marker MUST exist — proof that the override
 	// replaced the shared entry and its hook ran.
-	if _, err := os.Stat(sharedBase + ".local-hook-ran"); err != nil {
+	if _, err := os.Stat(localMarker); err != nil {
 		t.Errorf("local override's hook did not run: marker %s missing: %v",
-			sharedBase+".local-hook-ran", err)
+			localMarker, err)
 	}
 
 	// The shared hook's marker MUST NOT exist — proof that the shared
 	// entry was replaced (not co-executed, not surviving alongside).
-	if _, err := os.Stat(sharedBase + ".shared-hook-ran"); err == nil {
+	if _, err := os.Stat(sharedMarker); err == nil {
 		t.Errorf("shared hook ran despite local override; marker %s should not exist",
-			sharedBase+".shared-hook-ran")
+			sharedMarker)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat shared marker: %v", err)
 	}

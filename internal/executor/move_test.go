@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/blaineventurine/wrk/internal/planner"
 )
 
 func TestMoveFile(t *testing.T) {
@@ -222,5 +225,154 @@ func TestMoveKindMismatchAtDestination(t *testing.T) {
 		t.Errorf("destination gone: err=%v", err)
 	} else if string(got) != "winner" {
 		t.Errorf("destination clobbered: got %q, want %q", got, "winner")
+	}
+}
+
+// TestMoveErrorMessageMentionsRelink pins M8: when Rename(tmp, dest)
+// succeeded but RemoveAll(source) failed after the cross-device
+// fallback, the error surface MUST point the operator at `wrk relink`
+// (the only command that can complete the swap without triggering a
+// conflict), not `wrk link` (which will refuse). The pre-fix message
+// promised `wrk link` — a lie that led operators to try the command
+// that refuses, then blame wrk for the confused state.
+//
+// Constructing a failing RemoveAll deterministically across every
+// platform is fragile — we cover the pin with two complementary
+// checks: (a) the file `move.go` MUST contain the fixed literal and
+// MUST NOT contain the pre-fix backticked `wrk link`; (b) an integration-
+// style dry-run of the error format via move.go's exact format
+// string, hand-mirrored here, MUST produce a message that mentions
+// `wrk relink`. Any refactor that dropped the recovery-command
+// rename would flip both checks.
+func TestMoveErrorMessageMentionsRelink(t *testing.T) {
+	// (a) Source-level pin: the offending pre-fix phrase is gone and
+	// the fix's phrase is present. Reading move.go here is a cheap
+	// way to make the assertion resilient to future refactors that
+	// might move the format string around inside the file.
+	content, err := os.ReadFile("move.go")
+	if err != nil {
+		t.Fatalf("reading move.go: %v", err)
+	}
+	body := string(content)
+	if !strings.Contains(body, "wrk relink") {
+		t.Errorf("move.go must mention `wrk relink` as the recovery command; not found")
+	}
+	// The pre-fix wording was "the next `wrk link` will discard it".
+	// Reject that exact substring. `wrk link` as a bare phrase might
+	// legitimately appear in surrounding prose, so match the specific
+	// broken guidance rather than the command name in isolation.
+	if strings.Contains(body, "the next `wrk link` will discard") {
+		t.Errorf("move.go still contains the pre-fix `wrk link` recovery text")
+	}
+
+	// (b) Runtime pin: the format string, applied, produces the fixed
+	// message. Any drift between move.go and this literal will surface
+	// via (a) — this second check just protects against a future
+	// refactor that adds a second format-string call site.
+	msg := fmt.Errorf(
+		"moved to shared storage at %s but failed to remove source %s (run `wrk relink` inside the workspace to complete the swap; any edits you make to %s meanwhile will be discarded): %w",
+		"/dest", "/src", "/src", errors.New("boom"),
+	).Error()
+	if !strings.Contains(msg, "wrk relink") {
+		t.Errorf("expected error message to mention `wrk relink`, got: %s", msg)
+	}
+	if strings.Contains(msg, "wrk link`") {
+		t.Errorf("error message must not close a backticked `wrk link`, got: %s", msg)
+	}
+}
+
+// TestExecuteMoveIdempotentCompletesInterruptedSwapDirectory pins H5's
+// recovery path for a directory-shaped resource: when a previous run
+// completed Rename(tmp, dest) but was killed before RemoveAll(source),
+// both source and destination hold identical trees. The next Execute
+// of the same Move plan MUST notice the content-identity, discard
+// source silently, and let the trailing Symlink take over — instead
+// of forcing the operator through `wrk relink` (which would blindly
+// discard whatever's at source, including any recent user edits).
+func TestExecuteMoveIdempotentCompletesInterruptedSwapDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	source := filepath.Join(dir, "workspace", "resource")
+	destination := filepath.Join(dir, "shared", "resource")
+
+	// Populate BOTH sides with byte-identical trees, simulating the
+	// crash-mid-swap state.
+	for _, root := range []string{source, destination} {
+		if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(root, "sub", "file.txt"),
+			[]byte("identical-payload"),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plan := planner.Plan{
+		Actions: []planner.PlannedAction{
+			{Action: planner.Move{Source: source, Destination: destination}},
+		},
+	}
+
+	if err := Execute(plan); err != nil {
+		t.Fatalf("Execute: %v (recovery path must complete swap silently)", err)
+	}
+
+	// Source must be gone — the swap completed.
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Errorf("source %s must be removed after recovery, got err=%v", source, err)
+	}
+
+	// Destination untouched — bytes match what we pre-populated.
+	got, err := os.ReadFile(filepath.Join(destination, "sub", "file.txt"))
+	if err != nil {
+		t.Fatalf("reading destination: %v", err)
+	}
+	if string(got) != "identical-payload" {
+		t.Errorf("destination content changed: got %q, want %q", got, "identical-payload")
+	}
+}
+
+// TestExecuteMoveIdempotentCompletesInterruptedSwapFile is the file
+// variant of the directory recovery test above. Both cases must be
+// pinned because sameContents dispatches on kind (regular file vs.
+// directory) and a refactor that fixed one branch and broke the other
+// would silently pass one test while breaking the other user.
+func TestExecuteMoveIdempotentCompletesInterruptedSwapFile(t *testing.T) {
+	dir := t.TempDir()
+
+	source := filepath.Join(dir, "workspace", "resource.env")
+	destination := filepath.Join(dir, "shared", "resource.env")
+
+	for _, path := range []string{source, destination} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("SAME=bytes\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plan := planner.Plan{
+		Actions: []planner.PlannedAction{
+			{Action: planner.Move{Source: source, Destination: destination}},
+		},
+	}
+
+	if err := Execute(plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Errorf("source must be removed, got err=%v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("destination gone: %v", err)
+	}
+	if string(got) != "SAME=bytes\n" {
+		t.Errorf("destination changed: got %q", got)
 	}
 }

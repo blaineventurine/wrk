@@ -385,3 +385,73 @@ func TestCopyFileDestinationIsDirectoryFails(t *testing.T) {
 		t.Errorf("sentinel mutated: got %q", got)
 	}
 }
+
+// TestDetachDoesNotWipeUserFileAtScratchPath pins H3: a user's
+// unrelated file at `<link>.wrk-tmp` (or `.wrk-backup`) MUST survive a
+// detach attempt. Prior to the fix, detach unconditionally
+// `os.RemoveAll`'d both scratch paths at the top of every invocation,
+// silently obliterating anything that happened to share the exact
+// naming convention. The post-fix contract is: leave the scratch path
+// alone, let the rename fail loudly if the operator's crash-recovery
+// hasn't been done, and preserve every byte the user authored.
+func TestDetachDoesNotWipeUserFileAtScratchPath(t *testing.T) {
+	root := t.TempDir()
+
+	shared := filepath.Join(root, "shared.env")
+	writeFile(t, shared, "shared-content")
+
+	link := filepath.Join(root, ".env")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// User's own file at the scratch name detach would have wiped.
+	// The exact bytes must survive whether detach succeeds or fails.
+	userTmp := link + ".wrk-tmp"
+	const userPayload = "user-authored-do-not-touch"
+	writeFile(t, userTmp, userPayload)
+
+	// Detach may succeed or fail depending on filesystem semantics
+	// (rename-onto-existing behavior). Both are acceptable — what is
+	// NOT acceptable is a silent clobber of the user's file. Assert
+	// only on the byte-preservation invariant.
+	_ = detach(link, shared)
+
+	got, err := os.ReadFile(userTmp)
+	if err != nil {
+		t.Fatalf("user's %s vanished during detach: %v", userTmp, err)
+	}
+	if string(got) != userPayload {
+		t.Errorf("user's %s clobbered: got %q, want %q", userTmp, got, userPayload)
+	}
+}
+
+// TestDetachDoesNotWipeUserFileAtBackupPath is the sibling case for
+// `<link>.wrk-backup`. The pre-fix code called RemoveAll on both
+// scratch names in the same top-of-function block; a regression that
+// re-added either one would flip this test.
+func TestDetachDoesNotWipeUserFileAtBackupPath(t *testing.T) {
+	root := t.TempDir()
+
+	shared := filepath.Join(root, "shared.env")
+	writeFile(t, shared, "shared-content")
+
+	link := filepath.Join(root, ".env")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+
+	userBackup := link + ".wrk-backup"
+	const userPayload = "user-backup-do-not-touch"
+	writeFile(t, userBackup, userPayload)
+
+	_ = detach(link, shared)
+
+	got, err := os.ReadFile(userBackup)
+	if err != nil {
+		t.Fatalf("user's %s vanished during detach: %v", userBackup, err)
+	}
+	if string(got) != userPayload {
+		t.Errorf("user's %s clobbered: got %q, want %q", userBackup, got, userPayload)
+	}
+}

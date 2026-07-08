@@ -189,7 +189,7 @@ func TestLinkExecutesInitializeHookOnFirstRun(t *testing.T) {
 			"    path: .env\n"+
 			"    hooks:\n"+
 			"      initialize:\n"+
-			"        - run: touch {shared} {shared}.hook-ran\n",
+			"        - run: touch {shared} {root}/.env.hook-ran\n",
 	)
 	// Deliberately NO .env in the workspace — that forces the
 	// provisionShared/hook branch instead of the adopt-workspace-copy
@@ -203,7 +203,7 @@ func TestLinkExecutesInitializeHookOnFirstRun(t *testing.T) {
 	if _, err := os.Stat(sharedEnv); err != nil {
 		t.Errorf("hook did not create shared file %s: %v", sharedEnv, err)
 	}
-	marker := sharedEnv + ".hook-ran"
+	marker := filepath.Join(repo.Root, ".env.hook-ran")
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("hook marker file %s missing: %v", marker, err)
 	}

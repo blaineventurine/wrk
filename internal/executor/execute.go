@@ -47,6 +47,27 @@ func Execute(plan planner.Plan) error {
 					if srcErr != nil {
 						return srcErr
 					}
+
+					// Idempotent-completion recovery: if a previous run
+					// succeeded at Rename(tmp, dest) but was killed before
+					// RemoveAll(source), source and destination now hold
+					// byte-identical content. Detecting that lets us
+					// silently complete the swap on the next Link instead
+					// of forcing the operator through `wrk relink` — which
+					// would discard any edits made to source between crash
+					// and recovery. (There aren't any here: the contents
+					// match, so we're safely removing a redundant copy.)
+					same, sameErr := sameContents(action.Source, action.Destination)
+					if sameErr != nil {
+						return fmt.Errorf(
+							"comparing source %s and destination %s: %w",
+							action.Source, action.Destination, sameErr,
+						)
+					}
+					if same {
+						return os.RemoveAll(action.Source)
+					}
+
 					if err := checkMoveDestinationKind(
 						action.Destination, destInfo,
 						srcInfo,
@@ -217,14 +238,44 @@ func environment(env map[string]string) []string {
 	return result
 }
 
+// runInitialize provisions the shared resource atomically by directing
+// the initialize hook at a sibling scratch path and only committing that
+// scratch into position after every hook command succeeds. A crashed or
+// failed hook leaves nothing at the real shared path, so
+// workspace.Inspect reports "not provisioned" and the next Link cleanly
+// re-runs the hook from scratch. Without this, a hook that partially
+// materializes `{shared}` and then fails would trick the outer
+// double-check (`Stat(shared)` succeeds) into skipping the hook forever.
 func runInitialize(action planner.InitializeResource) error {
-	resolved, err := commands.Resolve(action.Commands, action.Context)
+	real := action.Context.Shared
+	tmp := real + ".wrk-provisioning"
+
+	// Clear any stale scratch from a previous crashed run before we
+	// substitute {shared} → tmp. Leaving debris behind would let a hook
+	// that assumes an empty `{shared}` see partial output from the
+	// prior crash.
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf(
+			"clearing stale hook scratch %s: %w",
+			tmp, err,
+		)
+	}
+
+	// Copy the context and override Shared → tmp so every {shared}
+	// placeholder in Run, Cwd, and Env resolves against the scratch
+	// path. The action's own Context.Shared is left untouched for any
+	// caller that inspects the plan.
+	hookCtx := action.Context
+	hookCtx.Shared = tmp
+
+	resolved, err := commands.Resolve(action.Commands, hookCtx)
 	if err != nil {
 		return fmt.Errorf("resolving hook commands: %w", err)
 	}
 
 	for _, command := range resolved {
 		if len(command.Args) == 0 {
+			_ = os.RemoveAll(tmp)
 			return fmt.Errorf("resolved hook command has no arguments")
 		}
 
@@ -242,6 +293,9 @@ func runInitialize(action planner.InitializeResource) error {
 		cmd.Stdin = nil
 
 		if err := cmd.Run(); err != nil {
+			// Drop the partial scratch so the next Link sees "not
+			// provisioned" and re-runs the hook.
+			_ = os.RemoveAll(tmp)
 			return fmt.Errorf(
 				"hook command failed: %s (in %s): %w",
 				strings.Join(command.Args, " "),
@@ -249,6 +303,26 @@ func runInitialize(action planner.InitializeResource) error {
 				err,
 			)
 		}
+	}
+
+	// Commit scratch → real atomically when the hook actually populated
+	// scratch. A hook that ignored the `{shared}` placeholder (or wrote
+	// somewhere else entirely) leaves tmp non-existent; that's not an
+	// error we can distinguish from "hook intentionally didn't
+	// provision", so leave `real` unmaterialized and let the next Link
+	// re-run the hook. The invariant the atomic-provision protects is
+	// "no partial output at real"; it does not require the hook to
+	// produce anything.
+	if _, statErr := os.Lstat(tmp); statErr == nil {
+		if err := os.Rename(tmp, real); err != nil {
+			_ = os.RemoveAll(tmp)
+			return fmt.Errorf(
+				"installing hook output from %s into %s: %w",
+				tmp, real, err,
+			)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return statErr
 	}
 
 	return nil

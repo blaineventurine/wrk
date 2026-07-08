@@ -1226,3 +1226,135 @@ func TestExecuteSymlinkOSSymlinkFails(t *testing.T) {
 		t.Errorf("expected no link, got err=%v", err)
 	}
 }
+
+// initResourceShared builds an InitializeResource plan whose hook writes
+// into `{shared}`. Callers control the tail of the shell command so a
+// test can force success or failure after the mkdir. This is the
+// C4-regression shape: the audit's crash scenario is exactly a hook
+// that half-populates `{shared}` and then exits nonzero.
+func initResourceShared(workspaceRoot, shared, tail string) planner.Plan {
+	return planner.Plan{
+		Actions: []planner.PlannedAction{
+			{
+				Action: planner.InitializeResource{
+					Description: "test-init",
+					Context: placeholders.Context{
+						Root:   workspaceRoot,
+						Shared: shared,
+					},
+					Commands: []config.Command{
+						{
+							Run: "sh -c 'mkdir -p {shared} && " + tail + "'",
+							Cwd: workspaceRoot,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestRunInitializeHookFailureLeavesSharedMissing pins C4: a hook that
+// half-populates `{shared}` and then exits non-zero MUST leave the
+// filesystem in a "not provisioned" state — neither the real shared
+// path nor the scratch sibling may survive. Prior to the fix, the
+// hook's partial `mkdir -p` would materialize a bare directory at
+// `shared`, and the outer double-check (`Stat(shared)` succeeds) would
+// then permanently skip the hook on every future Link, leaving the
+// workspace symlinked at broken shared.
+func TestRunInitializeHookFailureLeavesSharedMissing(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "resource")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := initResourceShared(root, shared, "exit 1")
+
+	err := Execute(plan)
+	if err == nil {
+		t.Fatal("expected Execute to surface hook failure, got nil")
+	}
+
+	if _, err := os.Lstat(shared); !os.IsNotExist(err) {
+		t.Errorf("shared %s must not exist after failing hook, got err=%v", shared, err)
+	}
+	// The atomic-provision scratch must also be gone; otherwise a
+	// stale sibling would waste disk and confuse operators inspecting
+	// the storage layout.
+	scratch := shared + ".wrk-provisioning"
+	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+		t.Errorf("scratch %s must not survive failure, got err=%v", scratch, err)
+	}
+}
+
+// TestRunInitializeHookRetryReRunsAfterFix pins the retry contract of
+// C4: after a failed hook leaves nothing at `shared`, the operator's
+// next Link with a fixed hook MUST re-run the hook (Inspect sees "not
+// provisioned") and succeed. This is what the atomic-provision buys
+// over the pre-fix "half a directory tricks the double-check" bug.
+func TestRunInitializeHookRetryReRunsAfterFix(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "resource")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// First attempt: hook fails mid-provisioning.
+	if err := Execute(initResourceShared(root, shared, "exit 1")); err == nil {
+		t.Fatal("expected first Execute to fail, got nil")
+	}
+
+	// Confirm the fix left no trace at shared.
+	if _, err := os.Lstat(shared); !os.IsNotExist(err) {
+		t.Fatalf("shared must be missing before retry, got err=%v", err)
+	}
+
+	// Second attempt: hook succeeds and drops a proof-of-execution
+	// marker inside the shared directory.
+	if err := Execute(initResourceShared(root, shared, "touch {shared}/.installed")); err != nil {
+		t.Fatalf("retry Execute: %v", err)
+	}
+
+	if _, err := os.Stat(shared); err != nil {
+		t.Errorf("shared %s must exist after successful retry, got err=%v", shared, err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, ".installed")); err != nil {
+		t.Errorf("expected retry hook to have created %s/.installed, got err=%v", shared, err)
+	}
+}
+
+// TestRunInitializePreExistingSharedNotDisturbed pins the outer
+// double-check invariant unaffected by C4: a shared resource that
+// already exists (peer completed provisioning) MUST NOT be replaced
+// nor trigger the hook. The atomic-provision fix must not accidentally
+// clobber a peer's completed work.
+func TestRunInitializePreExistingSharedNotDisturbed(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "resource")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	peer := filepath.Join(shared, "peer-content")
+	if err := os.WriteFile(peer, []byte("peer-wrote-this"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A hook that would drop a distinct marker inside `{shared}` if it
+	// ran. If the outer double-check does its job, the hook is skipped
+	// entirely and the marker is absent.
+	plan := initResourceShared(root, shared, "touch {shared}/hook-ran")
+
+	if err := Execute(plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if got, err := os.ReadFile(peer); err != nil {
+		t.Errorf("peer content vanished: %v", err)
+	} else if string(got) != "peer-wrote-this" {
+		t.Errorf("peer content clobbered: got %q, want %q", got, "peer-wrote-this")
+	}
+	if _, err := os.Stat(filepath.Join(shared, "hook-ran")); !os.IsNotExist(err) {
+		t.Errorf("hook must have been skipped, got err=%v", err)
+	}
+}

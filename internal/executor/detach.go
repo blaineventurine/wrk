@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,9 +11,35 @@ func detach(link, target string) error {
 	tmp := link + ".wrk-tmp"
 	backup := link + ".wrk-backup"
 
-	// Clean up anything left behind by a previous failed run.
-	_ = os.RemoveAll(tmp)
-	_ = os.RemoveAll(backup)
+	// Pre-flight: refuse to touch a scratch path that already holds
+	// something on disk. An unconditional RemoveAll here would silently
+	// obliterate a user-authored `.wrk-tmp`/`.wrk-backup` sitting next
+	// to the resource; copyPath below would then overwrite the tmp
+	// contents before the operator noticed. On the happy path detach
+	// creates and consumes both scratch paths inside this function's
+	// own window — they never survive a successful run. If a prior
+	// invocation crashed mid-swap and left them behind, aborting here
+	// is the correct signal to the operator; recovery is manual (or
+	// via a future `wrk gc`).
+	//
+	// The gitignore templates ship the `.wrk-tmp` / `.wrk-backup`
+	// patterns so a stale artifact is at least invisible to VCS.
+	if _, err := os.Lstat(tmp); err == nil {
+		return fmt.Errorf(
+			"refusing to detach %s: scratch path %s already exists (crashed prior detach or user data?); remove it and retry",
+			link, tmp,
+		)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Lstat(backup); err == nil {
+		return fmt.Errorf(
+			"refusing to detach %s: backup path %s already exists (crashed prior detach or user data?); remove it and retry",
+			link, backup,
+		)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 
 	if err := copyPath(target, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
