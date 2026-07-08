@@ -2,6 +2,7 @@ package commands
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/config"
@@ -201,5 +202,44 @@ func TestInputCommandsNotModified(t *testing.T) {
 			command.Env["ROOT"],
 			"{root}",
 		)
+	}
+}
+
+// Resolve rejects `run:` strings that tokenize into unquoted shell
+// operators (`&&`, `|`, `>`, ...). Direct exec would pass them as
+// literal args to the first binary, producing confusing errors like
+// "sleep: invalid time interval: &&". The user needs `sh -c "..."`.
+func TestResolveRejectsShellOperators(t *testing.T) {
+	cases := []string{
+		"sleep 3 && mkdir -p /tmp/x",
+		"cat a.txt | grep foo",
+		"echo done > /tmp/marker",
+		"echo x ; echo y",
+		"cmd 2>&1",
+		"a || b",
+	}
+	for _, run := range cases {
+		t.Run(run, func(t *testing.T) {
+			_, err := Resolve([]config.Command{{Run: run}}, context())
+			if err == nil {
+				t.Fatalf("Resolve(%q) succeeded; want shell-operator rejection", run)
+			}
+			if !strings.Contains(err.Error(), "sh -c") {
+				t.Errorf("error %q missing 'sh -c' hint", err.Error())
+			}
+		})
+	}
+}
+
+// Wrapping the command in `sh -c "..."` is the escape hatch. Metachars
+// inside the quoted script are not standalone args after shlex, so
+// Resolve accepts them.
+func TestResolveAcceptsShellWrapped(t *testing.T) {
+	_, err := Resolve(
+		[]config.Command{{Run: `sh -c "sleep 3 && mkdir -p /tmp/x"`}},
+		context(),
+	)
+	if err != nil {
+		t.Fatalf("sh -c wrapper should be accepted: %v", err)
 	}
 }

@@ -44,6 +44,15 @@ func Resolve(
 			)
 		}
 
+		if bad := unquotedShellOperator(args); bad != "" {
+			return nil, fmt.Errorf(
+				"invalid command %q: %q is a shell operator but hook `run:` is "+
+					"tokenized, not shell-parsed; wrap the whole command as "+
+					`sh -c "..." if you need shell semantics`,
+				command.Run, bad,
+			)
+		}
+
 		resolved = append(
 			resolved,
 			ResolvedCommand{
@@ -55,4 +64,22 @@ func Resolve(
 	}
 
 	return resolved, nil
+}
+
+// shellOperators are tokens that reach exec.Command as literal args
+// only when a user forgot that `run:` is not shell-parsed.
+var shellOperators = map[string]bool{
+	"&&": true, "||": true, "|": true, "|&": true,
+	";": true, "&": true,
+	">": true, ">>": true, "<": true, "<<": true, "<<<": true,
+	"2>": true, "2>>": true, "&>": true, "2>&1": true,
+}
+
+func unquotedShellOperator(args []string) string {
+	for _, a := range args {
+		if shellOperators[a] {
+			return a
+		}
+	}
+	return ""
 }
