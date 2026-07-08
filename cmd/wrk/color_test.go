@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/blaineventurine/wrk/internal/engine"
 )
 
 // TestColorWrapPlainText verifies that when no color code is supplied,
@@ -106,5 +108,144 @@ func TestUseColorNoColorBeatsCLICOLORForce(t *testing.T) {
 
 	if useColor() {
 		t.Fatalf("useColor() = true with NO_COLOR=1 and CLICOLOR_FORCE=1, want false")
+	}
+}
+
+// TestStateColorAllEnums pins the exact ANSI code returned for every
+// engine.State the CLI knows about, and confirms unknown states fall
+// through to an empty string (which colorWrap turns into an un-wrapped
+// pass-through — the desired failure mode).
+//
+// A drift here — a state moved between severity buckets by mistake —
+// would recolor the status table without any other signal.
+func TestStateColorAllEnums(t *testing.T) {
+	cases := []struct {
+		state engine.State
+		want  string
+	}{
+		{engine.StateLinked, ansiGreen},
+		{engine.StateExpected, ansiGreen},
+		{engine.StateDetached, ansiYellow},
+		{engine.StatePending, ansiYellow},
+		{engine.StateStale, ansiRed},
+		{engine.StateConflict, ansiRed},
+		{engine.StateNotLinked, ansiRed},
+		{engine.StateAbsent, ansiRed},
+		{engine.StateMissing, ansiRed},
+		{engine.State("bogus"), ""},
+	}
+	for _, c := range cases {
+		t.Run(string(c.state), func(t *testing.T) {
+			if got := stateColor(c.state); got != c.want {
+				t.Errorf("stateColor(%q) = %q, want %q", c.state, got, c.want)
+			}
+		})
+	}
+}
+
+// TestWorkspaceStateColorAllEnums does the same for the workspace-
+// level rollup states used by `wrk workspaces`. WorkspaceEmpty and any
+// unknown value collapse to "" so an unstyled cell appears — safer
+// than fabricating a color.
+func TestWorkspaceStateColorAllEnums(t *testing.T) {
+	cases := []struct {
+		state engine.WorkspaceState
+		want  string
+	}{
+		{engine.WorkspaceLinked, ansiGreen},
+		{engine.WorkspaceDetached, ansiYellow},
+		{engine.WorkspacePending, ansiYellow},
+		{engine.WorkspacePartial, ansiYellow},
+		{engine.WorkspaceUnhealthy, ansiRed},
+		{engine.WorkspaceEmpty, ""},
+		{engine.WorkspaceState("bogus"), ""},
+	}
+	for _, c := range cases {
+		t.Run(string(c.state), func(t *testing.T) {
+			if got := workspaceStateColor(c.state); got != c.want {
+				t.Errorf("workspaceStateColor(%q) = %q, want %q", c.state, got, c.want)
+			}
+		})
+	}
+}
+
+// TestColorStateNoColorReturnsPlainString pins the "colors off" path:
+// with useColor==false, colorState must return the raw state string
+// with no wrapping, no tabwriter escapes, no ANSI. Piped output has to
+// stay pipe-friendly.
+func TestColorStateNoColorReturnsPlainString(t *testing.T) {
+	// Force color off (no TTY in tests anyway; this pins it explicitly).
+	prev := noColor
+	noColor = true
+	defer func() { noColor = prev }()
+
+	for _, s := range []engine.State{
+		engine.StateLinked,
+		engine.StateConflict,
+		engine.State("bogus"),
+	} {
+		got := colorState(s)
+		if got != string(s) {
+			t.Errorf("colorState(%q, no-color) = %q, want %q", s, got, string(s))
+		}
+		if strings.Contains(got, "\x1b") || strings.Contains(got, "\xff") {
+			t.Errorf("colorState(%q, no-color) leaked escape bytes: %q", s, got)
+		}
+	}
+}
+
+// TestColorStateWithColorWrapsMatchingBucket pins the on-color path:
+// with color enabled, the returned string carries the SAME ANSI code
+// that stateColor reports for that state, and it stays tabwriter-safe
+// (four \xff sentinels). This is the join between the two helpers.
+func TestColorStateWithColorWrapsMatchingBucket(t *testing.T) {
+	// Force color on via CLICOLOR_FORCE — test binaries have no TTY.
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	prev := noColor
+	noColor = false
+	defer func() { noColor = prev }()
+
+	for _, s := range []engine.State{
+		engine.StateLinked,
+		engine.StateDetached,
+		engine.StateConflict,
+	} {
+		code := stateColor(s)
+		if code == "" {
+			t.Fatalf("stateColor(%q) unexpectedly empty; can't check colored path", s)
+		}
+		got := colorState(s)
+		if !strings.Contains(got, code) {
+			t.Errorf("colorState(%q) missing bucket color %q; got %q", s, code, got)
+		}
+		if !strings.Contains(got, string(s)) {
+			t.Errorf("colorState(%q) dropped the state text; got %q", s, got)
+		}
+		if n := strings.Count(got, "\xff"); n != 4 {
+			t.Errorf("colorState(%q) should carry 4 tabwriter sentinels, got %d in %q", s, n, got)
+		}
+	}
+}
+
+// TestColorWorkspaceStateNoColorPasthrough is the workspace-summary
+// twin: no-color mode returns the plain state string, no escapes.
+func TestColorWorkspaceStateNoColorPassthrough(t *testing.T) {
+	prev := noColor
+	noColor = true
+	defer func() { noColor = prev }()
+
+	for _, s := range []engine.WorkspaceState{
+		engine.WorkspaceLinked,
+		engine.WorkspacePartial,
+		engine.WorkspaceUnhealthy,
+		engine.WorkspaceEmpty,
+	} {
+		got := colorWorkspaceState(s)
+		if got != string(s) {
+			t.Errorf("colorWorkspaceState(%q, no-color) = %q, want %q", s, got, string(s))
+		}
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/blaineventurine/wrk/internal/config"
 )
 
 // wrkBinary is the compiled `wrk` binary shared by every integration
@@ -45,7 +47,20 @@ func buildWrkBinary(t *testing.T) string {
 			wrkBinaryErr = err
 			return
 		}
-		cmd := exec.Command("go", "build", "-o", out, "./cmd/wrk")
+		// Build with `-cover` when the parent test process was invoked
+		// with `go test -cover`. In that mode Go sets GOCOVERDIR to a
+		// temp directory that the subprocess inherits, and the
+		// instrumented binary writes coverage counters there — Go's test
+		// tooling then merges them into the top-level profile before
+		// exit. Without GOCOVERDIR, plain `go test ./cmd/wrk` still
+		// works because the `-cover` build flag is omitted and no
+		// warning is printed to test output.
+		buildArgs := []string{"build"}
+		if os.Getenv("GOCOVERDIR") != "" {
+			buildArgs = append(buildArgs, "-cover", "-coverpkg=./cmd/wrk")
+		}
+		buildArgs = append(buildArgs, "-o", out, "./cmd/wrk")
+		cmd := exec.Command("go", buildArgs...)
 		cmd.Dir = root
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -293,5 +308,536 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// gitCommitAll stages every path under repo (including .wrk.yml if
+// present) and creates a single commit with the given message. Used
+// for tests that call `wrk new`, which is a wrapper around
+// `git worktree add`: git needs at least one committed reference for
+// the sibling worktree machinery to have something to check out. A
+// fresh git init without commits still supports --orphan worktrees,
+// but wrk's tests want the child worktree to share the parent's
+// tracked config — a normal commit is the simplest way to get that.
+func gitCommitAll(t *testing.T, repo, message string) {
+	t.Helper()
+
+	env := []string{
+		"GIT_AUTHOR_NAME=t",
+		"GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t",
+		"GIT_COMMITTER_EMAIL=t@t",
+	}
+
+	add := exec.Command("git", "-C", repo, "add", "-A")
+	add.Env = append(os.Environ(), env...)
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	commit := exec.Command("git", "-C", repo, "commit", "-q", "-m", message)
+	commit.Env = append(os.Environ(), env...)
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+}
+
+// storagePath returns a workspace-contained storage root. The
+// executor's containment check follows symlinks up from every action
+// path, so a symlink from workspace/.env → external-storage/.env
+// resolves outside the workspace and trips the "escapes workspace
+// root" guard. Placing storage under the repo keeps every action's
+// resolved target inside the root and lets tests exercise the full
+// link → detach → relink cycle end-to-end.
+func storagePath(repo string) string {
+	return filepath.Join(repo, ".storage")
+}
+
+// TestInitWritesValidConfig pins the `wrk init` happy path: in a
+// canonical git repo with a well-known project file, `wrk init`
+// writes a `.wrk.yml` that config.Load parses without error, and the
+// stdout hint mentions the detected project kind.
+//
+// This is the whole point of `init` — the generated file has to be a
+// legal config, otherwise every downstream command breaks immediately.
+func TestInitWritesValidConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".env.example"), "")
+
+	code, stdout, stderr := runWrk(t, repo, "init")
+	if code != 0 {
+		t.Fatalf("init exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// The generated file exists, and config.Load can parse it.
+	target := filepath.Join(repo, ".wrk.yml")
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf(".wrk.yml not written: %v", err)
+	}
+	cfg, err := config.Load(repo)
+	if err != nil {
+		body, _ := os.ReadFile(target)
+		t.Fatalf("generated .wrk.yml does not round-trip through config.Load: %v\ncontent:\n%s", err, body)
+	}
+	// env.example → an "env" resource in the generated template.
+	found := false
+	for _, r := range cfg.Resources {
+		if r.Name == "env" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("generated config missing 'env' resource; got %+v", cfg.Resources)
+	}
+
+	if !strings.Contains(stdout, "env") {
+		t.Errorf("stdout should mention the 'env' detection so the user knows what shipped:\n%s", stdout)
+	}
+}
+
+// TestInitDryRunHasNoSideEffects pins the --dry-run contract: no
+// .wrk.yml is written, and the YAML preview is emitted on stdout so
+// pipes like `wrk init --dry-run | tee` still work.
+func TestInitDryRunHasNoSideEffects(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, "Gemfile"), "")
+
+	code, stdout, stderr := runWrk(t, repo, "init", "--dry-run")
+	if code != 0 {
+		t.Fatalf("init --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// Nothing on disk.
+	if _, err := os.Stat(filepath.Join(repo, ".wrk.yml")); !os.IsNotExist(err) {
+		t.Fatalf(".wrk.yml should not exist after --dry-run, got stat err=%v", err)
+	}
+
+	// The preview is on stdout; it should contain YAML-ish text for the
+	// bundler detection (Gemfile → bundler snippet).
+	if !strings.Contains(stdout, "Would write to:") {
+		t.Errorf("stdout should announce the target path preview:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "resources") {
+		t.Errorf("stdout should carry the YAML preview mentioning 'resources':\n%s", stdout)
+	}
+}
+
+// TestLinkHappyPathAndIdempotent pins that `wrk link` (a) moves the
+// workspace file into shared storage and replaces it with a symlink,
+// and (b) a second immediate `wrk link` is a no-op (no plan actions,
+// exit 0). Idempotence is what makes `wrk link` a safe pre-commit hook.
+func TestLinkHappyPathAndIdempotent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "link")
+	if code != 0 {
+		t.Fatalf("link exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// After link the workspace .env must be a symlink pointing under storage.
+	info, err := os.Lstat(filepath.Join(repo, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".env should be a symlink after link, got mode=%s", info.Mode())
+	}
+	target, err := os.Readlink(filepath.Join(repo, ".env"))
+	if err != nil {
+		t.Fatalf("readlink .env: %v", err)
+	}
+	if !strings.HasPrefix(target, storage) {
+		t.Errorf(".env should point under %q, got %q", storage, target)
+	}
+
+	// Second link: idempotent — no actions in the printed plan.
+	code2, stdout2, stderr2 := runWrk(t, repo, "--storage", storage, "link")
+	if code2 != 0 {
+		t.Fatalf("second link exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code2, stdout2, stderr2)
+	}
+	// The plan preview uses "•" for each action line. Zero bullets means
+	// zero planned mutations — a genuine no-op.
+	if strings.Contains(stdout2, "•") {
+		t.Fatalf("second link should be a no-op (no plan bullets), got:\n%s", stdout2)
+	}
+}
+
+// TestLinkConflictExitsNonZero pins the conflict path: when the
+// workspace has both a shared copy and a local real file at the same
+// path, `wrk link` refuses (exit 2) and stdout carries the word
+// "conflict" so the user knows what to fix. Silent success here would
+// clobber user work.
+func TestLinkConflictExitsNonZero(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+
+	// First link to establish shared storage.
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("initial link failed: exit=%d stderr=%s", code, stderr)
+	}
+
+	// Now replace the symlink with a competing real file to fabricate a
+	// conflict. Remove the symlink first so we can write a fresh file
+	// at the same path.
+	if err := os.Remove(filepath.Join(repo, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repo, ".env"), "LOCAL_EDIT=1\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "link")
+	if code == 0 {
+		t.Fatalf("link on conflict should not exit 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(strings.ToLower(combined), "conflict") {
+		t.Errorf("conflict message missing; combined output:\n%s", combined)
+	}
+}
+
+// TestLinkDryRunHasNoSideEffects pins that --dry-run prints the plan
+// but leaves the workspace untouched. Signal: `.env` is still a real
+// file, not a symlink, after the invocation.
+func TestLinkDryRunHasNoSideEffects(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "link", "--dry-run")
+	if code != 0 {
+		t.Fatalf("link --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// Plan was printed (non-empty bullet list).
+	if !strings.Contains(stdout, "•") {
+		t.Errorf("plan preview should carry bullet lines:\n%s", stdout)
+	}
+
+	// .env is still a real file.
+	info, err := os.Lstat(filepath.Join(repo, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".env became a symlink after --dry-run; expected no change")
+	}
+
+	// Storage subtree must not exist yet.
+	if _, err := os.Stat(storage); !os.IsNotExist(err) {
+		t.Fatalf("storage should not be created under --dry-run, got stat err=%v", err)
+	}
+}
+
+// TestNewFeatureCreatesSiblingWorktree pins the `wrk new feature`
+// happy path: given a repo with an initial commit, a sibling worktree
+// exists at `<parent>/feature` after the call, and it carries the
+// committed `.wrk.yml`. This is the whole promise of `wrk new`.
+func TestNewFeatureCreatesSiblingWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, stdout, stderr := runWrk(t, repo, "new", "feature")
+	if code != 0 {
+		t.Fatalf("new feature exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// The sibling worktree exists.
+	sibling := filepath.Join(filepath.Dir(repo), "feature")
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("sibling worktree not created at %s: %v", sibling, err)
+	}
+	// Cleanup for parallel-safety: remove the worktree so the test
+	// tempdir cleanup succeeds even though it's a git worktree.
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "-f", sibling).Run()
+		_ = os.RemoveAll(sibling)
+	})
+
+	if _, err := os.Stat(filepath.Join(sibling, ".wrk.yml")); err != nil {
+		t.Fatalf(".wrk.yml missing in the new worktree: %v", err)
+	}
+}
+
+// TestNewFeatureDryRunHasNoSideEffects pins the --dry-run contract on
+// `wrk new`: no sibling directory is created, and stdout announces the
+// destination that would be used.
+func TestNewFeatureDryRunHasNoSideEffects(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, stdout, stderr := runWrk(t, repo, "new", "feature", "--dry-run")
+	if code != 0 {
+		t.Fatalf("new --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	sibling := filepath.Join(filepath.Dir(repo), "feature")
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Fatalf("--dry-run should not create %s, got stat err=%v", sibling, err)
+	}
+	if !strings.Contains(stdout, "Would create workspace") {
+		t.Errorf("stdout should announce dry-run destination:\n%s", stdout)
+	}
+}
+
+// TestNewDotIsRejected pins S8: `wrk new .` is a user mistake — "."
+// means the current directory, which IS the current workspace. It
+// must be rejected up front with a clear error, not permitted to
+// crash the destination-exists check downstream.
+func TestNewDotIsRejected(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, _, stderr := runWrk(t, repo, "new", ".")
+	if code != 2 {
+		t.Fatalf("new . exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	if !strings.Contains(stderr, `"."`) {
+		t.Errorf("stderr should quote the bad destination for clarity, got: %q", stderr)
+	}
+}
+
+// TestDetachThenSecondDetachIdempotent is the C1 regression: `wrk
+// detach` twice in a row must leave the registry intact after the
+// second call. Prior to the fix, the second call could wipe the
+// registry entry, so `wrk status` would misclassify a previously-
+// detached resource as a conflict. This test asserts the observable
+// downstream: `wrk status` after a double detach still shows the
+// resource as "detached", not "conflict".
+func TestDetachThenSecondDetachIdempotent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("link failed: exit=%d stderr=%s", code, stderr)
+	}
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach"); code != 0 {
+		t.Fatalf("first detach failed: exit=%d stderr=%s", code, stderr)
+	}
+
+	// After first detach: .env is a real file, not a symlink.
+	info, err := os.Lstat(filepath.Join(repo, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env after detach: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".env should be a real file after detach, got symlink")
+	}
+
+	// Second detach: must succeed and preserve the detached record.
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "detach")
+	if code != 0 {
+		t.Fatalf("second detach exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// Status must still call it "detached", not "conflict".
+	scode, sstdout, sstderr := runWrk(t, repo, "--storage", storage, "status")
+	if scode != 0 {
+		t.Fatalf("status exit = %d, want 0 (stderr=%s)", scode, sstderr)
+	}
+	if !strings.Contains(sstdout, "detached") {
+		t.Errorf("status should show 'detached' after double detach; got:\n%s", sstdout)
+	}
+	if strings.Contains(sstdout, "conflict") {
+		t.Errorf("double detach must not degrade to 'conflict'; got:\n%s", sstdout)
+	}
+}
+
+// TestStatusExitCodeUnprovisionedExits1 pins U4 end-to-end: an
+// unprovisioned resource in a fresh repo is a "linkable" problem, so
+// `wrk status --exit-code` exits 1 and — critically — leaves stderr
+// empty. The status table above is the only user-visible message.
+// A regression here would either break pre-commit hooks (wrong code)
+// or spam CI logs (loud stderr).
+func TestStatusExitCodeUnprovisionedExits1(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	// A resource without a local file and without shared storage is
+	// "absent" — a canonical linkable problem.
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+
+	code, _, stderr := runWrk(t, repo, "status", "--exit-code")
+	if code != 1 {
+		t.Fatalf("--exit-code on unprovisioned should be 1, got %d (stderr=%q)", code, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("stderr should stay silent for the --exit-code signal, got:\n%s", stderr)
+	}
+}
+
+// TestListPrintsResourceTable pins the wire between the CLI, engine.List,
+// and printList: given a configured resource, `wrk list` produces a
+// table that names the RESOURCE, PATH, FINGERPRINTED, VARIANTS, and
+// SHARED PATH columns and carries a row for the resource.
+func TestListPrintsResourceTable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "list")
+	if code != 0 {
+		t.Fatalf("list exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// Header spot-check: without --size, no SIZE column.
+	header := strings.SplitN(stdout, "\n", 2)[0]
+	for _, col := range []string{"RESOURCE", "PATH", "FINGERPRINTED", "VARIANTS", "SHARED PATH"} {
+		if !strings.Contains(header, col) {
+			t.Errorf("list header missing column %q; got %q", col, header)
+		}
+	}
+	if strings.Contains(header, "SIZE") {
+		t.Errorf("SIZE column should be absent without --size; got %q", header)
+	}
+
+	// Row for env is present.
+	if !strings.Contains(stdout, "env") || !strings.Contains(stdout, ".env") {
+		t.Errorf("row for env resource missing; output:\n%s", stdout)
+	}
+}
+
+// TestWorkspacesAndWSAliasSameOutput pins that the `ws` alias is a
+// true alias — it produces exactly the same output as `workspaces` in
+// the same repo. If the alias ever drifts (different flag defaults,
+// different registration), users typing the short form get a
+// different table.
+func TestWorkspacesAndWSAliasSameOutput(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("link setup failed: exit=%d stderr=%s", code, stderr)
+	}
+
+	code1, out1, _ := runWrk(t, repo, "--storage", storage, "workspaces")
+	code2, out2, _ := runWrk(t, repo, "--storage", storage, "ws")
+
+	if code1 != 0 || code2 != 0 {
+		t.Fatalf("workspaces=%d ws=%d, both should be 0", code1, code2)
+	}
+	if out1 != out2 {
+		t.Fatalf("workspaces and ws produced different output\nworkspaces:\n%s\nws:\n%s", out1, out2)
+	}
+	// Sanity: the current workspace row is present and marked `*`.
+	if !strings.Contains(out1, repo) {
+		t.Errorf("workspaces output should carry the current repo path %q:\n%s", repo, out1)
+	}
+	if !strings.Contains(out1, "*") {
+		t.Errorf("current workspace should be marked with '*'; output:\n%s", out1)
+	}
+}
+
+// TestHelpListsAllSubcommands is a shape check on `wrk --help`: every
+// user-facing subcommand must appear in the top-level help. A missing
+// entry usually means an accidentally-unregistered command — the sort
+// of change that ships without any smoke test because the code still
+// compiles.
+func TestHelpListsAllSubcommands(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// --help doesn't need a repo, but we set cwd to a temp dir just to
+	// avoid emitting output relative to the go test cwd.
+	code, stdout, stderr := runWrk(t, t.TempDir(), "--help")
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces"} {
+		if !strings.Contains(stdout, sub) {
+			t.Errorf("--help output missing subcommand %q; full help:\n%s", sub, stdout)
+		}
+	}
+}
+
+// TestRelinkYesInNonTTYExecutes pins S7's happy path: --yes in a
+// non-TTY context (which is exactly how CI and scripted callers
+// invoke it) must proceed through the destructive path. Complements
+// TestRelinkRefusesWithoutYesInNonTTY, which pins the refusal.
+func TestRelinkYesInNonTTYExecutes(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	storage := storagePath(repo)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo, ".env"), "SECRET=1\n")
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
+		t.Fatalf("link setup failed: exit=%d stderr=%s", code, stderr)
+	}
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach"); code != 0 {
+		t.Fatalf("detach setup failed: exit=%d stderr=%s", code, stderr)
+	}
+
+	// Now relink with --yes should proceed and restore the symlink.
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "relink", "--yes")
+	if code != 0 {
+		t.Fatalf("relink --yes exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	info, err := os.Lstat(filepath.Join(repo, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env after relink: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".env should be a symlink after relink --yes, got mode=%s", info.Mode())
 	}
 }
