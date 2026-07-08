@@ -394,3 +394,208 @@ func TestCleanBookkeepingDetectEmptyStorage(t *testing.T) {
 		t.Fatalf("expected empty result, got %+v", result)
 	}
 }
+
+// TestBuildGCPlanEmptyRepo: a fresh repo with no Link ever run
+// produces a plan that HasNothing() is true for. No ghosts, no orphan
+// registry, no variants, no cruft.
+func TestBuildGCPlanEmptyRepo(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if !plan.HasNothing() {
+		t.Fatalf("empty repo should produce HasNothing plan, got %+v", plan)
+	}
+	if len(plan.KeepVariants) != 0 || len(plan.DeleteVariants) != 0 {
+		t.Errorf("KeepVariants=%v DeleteVariants=%v, want empty/empty",
+			plan.KeepVariants, plan.DeleteVariants)
+	}
+	if plan.TotalBytesFreed != 0 {
+		t.Errorf("TotalBytesFreed = %d, want 0", plan.TotalBytesFreed)
+	}
+}
+
+// TestBuildGCPlanLinkedRepoKeepsPinnedVariant: after a normal Link the
+// live workspace pins the freshly-created variant, so BuildGCPlan
+// returns it under KeepVariants with an empty DeleteVariants.
+func TestBuildGCPlanLinkedRepoKeepsPinnedVariant(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.KeepVariants) != 1 || len(plan.DeleteVariants) != 0 {
+		t.Fatalf("KeepVariants=%d DeleteVariants=%d, want 1/0",
+			len(plan.KeepVariants), len(plan.DeleteVariants))
+	}
+	if plan.TotalBytesFreed != 0 {
+		t.Errorf("TotalBytesFreed = %d, want 0", plan.TotalBytesFreed)
+	}
+	if !plan.HasNothing() {
+		t.Errorf("HasNothing = false, want true (nothing to delete)")
+	}
+}
+
+// TestBuildGCPlanTwoVariantsOneStale: re-linking after a fingerprint
+// change mints a second variant. The first is no longer pinned by any
+// workspace, so BuildGCPlan splits 1 kept / 1 deleted and reports a
+// positive TotalBytesFreed.
+func TestBuildGCPlanTwoVariantsOneStale(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n" +
+			"    hooks:\n" +
+			"      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\" && dd if=/dev/zero of=\"{shared}/blob\" bs=1024 count=1'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v1: %v", err)
+	}
+	writeFile(t, filepath.Join(repo.Root, "package.json"), `{"v":2}`)
+	_ = os.Remove(filepath.Join(repo.Root, "node_modules"))
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v2: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.KeepVariants) != 1 || len(plan.DeleteVariants) != 1 {
+		t.Fatalf("KeepVariants=%d DeleteVariants=%d, want 1/1",
+			len(plan.KeepVariants), len(plan.DeleteVariants))
+	}
+	if plan.TotalBytesFreed <= 0 {
+		t.Errorf("TotalBytesFreed = %d, want >0", plan.TotalBytesFreed)
+	}
+	if plan.HasNothing() {
+		t.Errorf("HasNothing = true, want false (one variant to delete)")
+	}
+}
+
+// TestBuildGCPlanOrphanRegistry: a registry entry for a workspace root
+// that isn't live must appear in plan.OrphanRegistry, and the on-disk
+// registry file MUST NOT be modified by the plan builder (Task 1.7's
+// executor is the one that mutates).
+func TestBuildGCPlanOrphanRegistry(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+
+	// Seed a registry entry for a workspace root that isn't live.
+	reg, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	reg["/nonexistent/ghost/workspace"] = []string{"node_modules"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatalf("saveRegistry: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storageIn(t, repo.Root)})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.OrphanRegistry) != 1 || plan.OrphanRegistry[0] != "/nonexistent/ghost/workspace" {
+		t.Fatalf("OrphanRegistry = %v, want [/nonexistent/ghost/workspace]",
+			plan.OrphanRegistry)
+	}
+	if plan.HasNothing() {
+		t.Errorf("HasNothing = true, want false (orphan registry entry to clear)")
+	}
+
+	// Confirm the plan builder did NOT save the registry.
+	after, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry after: %v", err)
+	}
+	if _, ok := after["/nonexistent/ghost/workspace"]; !ok {
+		t.Error("plan builder mutated the registry (should be read-only)")
+	}
+}
+
+// TestBuildGCPlanIsReadOnlyOnDisk pins the overall read-only contract:
+// even a plan that would delete a variant must leave the shared-storage
+// tree untouched. Only Task 1.7's executor is allowed to mutate.
+func TestBuildGCPlanIsReadOnlyOnDisk(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n" +
+			"    hooks:\n" +
+			"      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\"'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v1: %v", err)
+	}
+	writeFile(t, filepath.Join(repo.Root, "package.json"), `{"v":2}`)
+	_ = os.Remove(filepath.Join(repo.Root, "node_modules"))
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v2: %v", err)
+	}
+
+	variantsBefore, err := scanVariants(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("scanVariants before: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.DeleteVariants) == 0 {
+		t.Fatalf("expected a variant to delete, got %+v", plan)
+	}
+
+	variantsAfter, err := scanVariants(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("scanVariants after: %v", err)
+	}
+	if len(variantsAfter) != len(variantsBefore) {
+		t.Errorf("BuildGCPlan changed variants on disk: before=%d after=%d",
+			len(variantsBefore), len(variantsAfter))
+	}
+
+	// Deterministic surface: sort by StoragePath and compare.
+	sortStorage := func(vs []variant) []string {
+		s := make([]string, len(vs))
+		for i, v := range vs {
+			s[i] = v.StoragePath
+		}
+		sort.Strings(s)
+		return s
+	}
+	before := sortStorage(variantsBefore)
+	afterPaths := sortStorage(variantsAfter)
+	for i := range before {
+		if before[i] != afterPaths[i] {
+			t.Errorf("variant path drift: before=%v after=%v", before, afterPaths)
+			break
+		}
+	}
+}

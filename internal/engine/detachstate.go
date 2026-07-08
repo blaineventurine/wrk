@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/gofrs/flock"
 
@@ -224,4 +225,34 @@ func pruneOrphanRegistryEntries(repo *repository.Repository, liveRoots []string)
 		return []string{}, nil
 	}
 	return pruned, nil
+}
+
+// detectOrphanRegistryEntries returns detach-registry keys not present
+// in liveRoots. Read-only counterpart to pruneOrphanRegistryEntries:
+// the file is not modified and no lock is taken. Consumed by
+// BuildGCPlan so `wrk gc` can preview what pruneOrphanRegistryEntries
+// would remove without racing against a concurrent detach.
+//
+// Callers MUST pass liveRoots that already excludes ghosts, so the
+// returned set matches what the executor's plan will actually clear.
+// The output is sorted for deterministic plan rendering and tests.
+func detectOrphanRegistryEntries(repo *repository.Repository, liveRoots []string) ([]string, error) {
+	reg, err := loadRegistry(repo)
+	if err != nil {
+		return nil, err
+	}
+
+	live := make(map[string]bool, len(liveRoots))
+	for _, root := range liveRoots {
+		live[root] = true
+	}
+
+	orphans := make([]string, 0)
+	for key := range reg {
+		if !live[key] {
+			orphans = append(orphans, key)
+		}
+	}
+	sort.Strings(orphans)
+	return orphans, nil
 }

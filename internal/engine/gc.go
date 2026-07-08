@@ -124,18 +124,43 @@ func newVariant(resource, path, fingerprint, storagePath string) variant {
 }
 
 // pinnedVariants returns the set of variant storage paths (absolute)
-// currently symlinked from a live workspace of repo. Unreachable
-// workspace roots (Stat failure on the root itself) are treated
-// conservatively — every scanned variant is marked pinned to avoid
-// deleting data referenced from a workspace we cannot inspect. The
-// unreachable roots are returned so the plan builder can surface why
-// the sweep was conservative.
+// currently symlinked from any workspace of repo. Convenience wrapper
+// over pinnedVariantsForRoots that uses the unfiltered result of
+// repo.Workspaces(); callers that need to exclude ghosts (e.g.
+// BuildGCPlan) must call pinnedVariantsForRoots directly.
 //
-// Non-managed symlinks (targets outside any scanned variant) do not
-// appear in the pinned set.
+// See pinnedVariantsForRoots for the unreachable-workspace semantics.
 func pinnedVariants(
 	repo *repository.Repository,
 	options Options,
+) (map[string]bool, []string, error) {
+	workspaces, err := repo.Workspaces()
+	if err != nil {
+		return nil, nil, err
+	}
+	return pinnedVariantsForRoots(repo, options, workspaces)
+}
+
+// pinnedVariantsForRoots is the ghost-aware core of the pin walk. It
+// returns the set of variant storage paths (absolute) currently
+// symlinked from any workspace root in roots. Unreachable roots (Stat
+// failure on the root itself) are treated conservatively — every
+// scanned variant is marked pinned to avoid deleting data referenced
+// from a workspace we cannot inspect. The unreachable roots are
+// returned so the plan builder can surface why the sweep was
+// conservative.
+//
+// Non-managed symlinks (targets outside any scanned variant) do not
+// appear in the pinned set.
+//
+// BuildGCPlan calls this with liveRoots (Workspaces() MINUS ghosts):
+// a ghost's working dir may be gone entirely, which would otherwise
+// hit the unreachable branch and conservatively pin every variant —
+// wrong for gc, because we know that workspace is going away.
+func pinnedVariantsForRoots(
+	repo *repository.Repository,
+	options Options,
+	roots []string,
 ) (map[string]bool, []string, error) {
 	variants, err := scanVariants(repo, options)
 	if err != nil {
@@ -143,11 +168,6 @@ func pinnedVariants(
 	}
 
 	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	workspaces, err := repo.Workspaces()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -161,7 +181,7 @@ func pinnedVariants(
 		}
 	}
 
-	for _, workspaceRoot := range workspaces {
+	for _, workspaceRoot := range roots {
 		if _, err := os.Stat(workspaceRoot); err != nil {
 			unreachable = append(unreachable, workspaceRoot)
 			pinAll()
@@ -300,4 +320,158 @@ func appendIfStaleProvisioning(dst []string, provPath string) []string {
 	}
 	_ = l.Unlock()
 	return append(dst, provPath)
+}
+
+// GCPlan is the composed, read-only result of the detection sweeps
+// run by BuildGCPlan. `wrk gc` prints it for the user to confirm and
+// then hands it to the executor (Task 1.7) which performs the
+// mutations. Nothing in this struct implies work has already been
+// done — every field is a "would-do" list.
+type GCPlan struct {
+	// Ghosts lists workspace roots the VCS still remembers but whose
+	// working directory is gone. The executor will prune them.
+	Ghosts []string
+
+	// OrphanRegistry lists detach-registry keys whose workspace root
+	// is no longer live (after ghost removal). The executor will
+	// clear them.
+	OrphanRegistry []string
+
+	// KeepVariants is the set of variants currently symlinked from a
+	// live workspace and therefore preserved by the sweep.
+	KeepVariants []variant
+
+	// DeleteVariants is the set of variants no live workspace
+	// references. The executor will remove them.
+	DeleteVariants []variant
+
+	// OrphanedLocks lists .wrk-lock files whose sibling variant has
+	// already been removed and are therefore safe to sweep.
+	OrphanedLocks []string
+
+	// StaleProvisioning lists .wrk-provisioning dirs whose sibling
+	// lock is NOT held by any live process.
+	StaleProvisioning []string
+
+	// StaleDeleting lists .wrk-deleting markers left behind by a
+	// crashed prior gc; always safe to sweep.
+	StaleDeleting []string
+
+	// UnreachableWorkspaces lists workspaces the pin walk could not
+	// stat. For each, pinnedVariantsForRoots conservatively pinned
+	// every scanned variant; surfaced here so the CLI can explain
+	// why DeleteVariants may be smaller than the user expects.
+	UnreachableWorkspaces []string
+
+	// TotalBytesFreed is the sum of DeleteVariants[*].Size.
+	TotalBytesFreed int64
+}
+
+// HasNothing reports whether executing the plan would touch any state.
+// UnreachableWorkspaces and KeepVariants are informational only, so
+// they do not count. `wrk gc` uses this to skip the confirmation prompt
+// when there is nothing to do.
+func (p GCPlan) HasNothing() bool {
+	return len(p.Ghosts) == 0 &&
+		len(p.OrphanRegistry) == 0 &&
+		len(p.DeleteVariants) == 0 &&
+		len(p.OrphanedLocks) == 0 &&
+		len(p.StaleProvisioning) == 0 &&
+		len(p.StaleDeleting) == 0
+}
+
+// BuildGCPlan runs the read-only detection sweeps and composes them
+// into a single plan. Nothing on disk, in the VCS, or in the detach
+// registry is modified — the returned plan is a preview.
+//
+// Sweep order is significant:
+//
+//  1. DetectGhosts enumerates workspaces the VCS remembers but whose
+//     working directory is gone. It runs first so the remaining
+//     sweeps can filter ghosts out of "live" workspaces.
+//  2. liveRoots = repo.Workspaces() MINUS Ghosts. Every subsequent
+//     sweep that needs the live set uses this filtered slice.
+//  3. detectOrphanRegistryEntries flags registry keys whose workspace
+//     is not in liveRoots (i.e., a ghost or a truly-unknown root).
+//  4. scanVariants enumerates the on-disk variants.
+//  5. pinnedVariantsForRoots walks liveRoots (NOT Workspaces()) so
+//     variants referenced only by a ghost are not spuriously kept.
+//     A ghost's working dir is missing, which would otherwise trip
+//     the unreachable branch and pin everything. We filter it out
+//     up front to keep unreachable-workspace warnings honest.
+//  6. cleanBookkeepingDetect finds stale locks/provisioning/deleting.
+//  7. Variants split into KeepVariants (pinned or unreachable-pinned)
+//     and DeleteVariants (everything else); DeleteVariants.Size sums
+//     into TotalBytesFreed.
+func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
+	var plan GCPlan
+
+	ghosts, err := repo.DetectGhosts()
+	if err != nil {
+		return GCPlan{}, err
+	}
+	plan.Ghosts = ghosts
+
+	workspaces, err := repo.Workspaces()
+	if err != nil {
+		return GCPlan{}, err
+	}
+	liveRoots := filterOutGhosts(workspaces, ghosts)
+
+	orphans, err := detectOrphanRegistryEntries(repo, liveRoots)
+	if err != nil {
+		return GCPlan{}, err
+	}
+	plan.OrphanRegistry = orphans
+
+	variants, err := scanVariants(repo, options)
+	if err != nil {
+		return GCPlan{}, err
+	}
+
+	pinned, unreachable, err := pinnedVariantsForRoots(repo, options, liveRoots)
+	if err != nil {
+		return GCPlan{}, err
+	}
+	plan.UnreachableWorkspaces = unreachable
+
+	bookkeeping, err := cleanBookkeepingDetect(repo, options)
+	if err != nil {
+		return GCPlan{}, err
+	}
+	plan.OrphanedLocks = bookkeeping.OrphanedLocks
+	plan.StaleProvisioning = bookkeeping.StaleProvisioning
+	plan.StaleDeleting = bookkeeping.StaleDeleting
+
+	for _, v := range variants {
+		if pinned[v.StoragePath] {
+			plan.KeepVariants = append(plan.KeepVariants, v)
+			continue
+		}
+		plan.DeleteVariants = append(plan.DeleteVariants, v)
+		plan.TotalBytesFreed += v.Size
+	}
+
+	return plan, nil
+}
+
+// filterOutGhosts returns roots with any entry in ghosts removed.
+// Called only with the modest slices from repo.Workspaces() and
+// repo.DetectGhosts(), so a linear scan per ghost is fine.
+func filterOutGhosts(roots, ghosts []string) []string {
+	if len(ghosts) == 0 {
+		return roots
+	}
+	skip := make(map[string]bool, len(ghosts))
+	for _, g := range ghosts {
+		skip[g] = true
+	}
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if skip[r] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }

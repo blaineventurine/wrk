@@ -531,3 +531,82 @@ func TestPruneOrphanRegistryEntriesEmptyRegistry(t *testing.T) {
 		t.Fatalf("pruned = %v, want empty on missing registry file", pruned)
 	}
 }
+
+// TestDetectOrphanRegistryEntriesReadOnly pins the read-only contract
+// consumed by BuildGCPlan: detect returns the same orphan set that
+// pruneOrphanRegistryEntries would remove, but must never touch the
+// registry file. The mutating counterpart (prune) has its own tests
+// above; this covers the plan-preview path used by `wrk gc`.
+func TestDetectOrphanRegistryEntriesReadOnly(t *testing.T) {
+	repo := newTestRepo(t)
+
+	if err := recordDetached(repo, []string{"a"}); err != nil {
+		t.Fatalf("recordDetached: %v", err)
+	}
+	reg, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	reg["/ghost"] = []string{"x"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatalf("saveRegistry: %v", err)
+	}
+
+	orphans, err := detectOrphanRegistryEntries(repo, []string{repo.Root})
+	if err != nil {
+		t.Fatalf("detectOrphanRegistryEntries: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0] != "/ghost" {
+		t.Fatalf("orphans = %v, want [/ghost]", orphans)
+	}
+
+	// Detect must be read-only: the registry file MUST still contain
+	// the orphan key so a follow-up prune (or a re-run of detect) sees
+	// the same state.
+	after, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry after detect: %v", err)
+	}
+	if _, ok := after["/ghost"]; !ok {
+		t.Errorf("detectOrphanRegistryEntries mutated the registry: %v", after)
+	}
+	if entry, ok := after[repo.Root]; !ok || len(entry) != 1 || entry[0] != "a" {
+		t.Errorf("live entry disturbed by detect: %v", after)
+	}
+}
+
+// TestDetectOrphanRegistryEntriesSortedOutput pins the deterministic
+// order the plan builder and its tests rely on. Registry map iteration
+// is randomized; detectOrphanRegistryEntries sorts before returning so
+// the plan renders the same way twice in a row.
+func TestDetectOrphanRegistryEntriesSortedOutput(t *testing.T) {
+	repo := newTestRepo(t)
+
+	reg, err := loadRegistry(repo)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	reg["/z"] = []string{"x"}
+	reg["/a"] = []string{"y"}
+	reg["/m"] = []string{"z"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatalf("saveRegistry: %v", err)
+	}
+
+	orphans, err := detectOrphanRegistryEntries(repo, nil)
+	if err != nil {
+		t.Fatalf("detectOrphanRegistryEntries: %v", err)
+	}
+	want := []string{"/a", "/m", "/z"}
+	if !sort.StringsAreSorted(orphans) {
+		t.Errorf("orphans not sorted: %v", orphans)
+	}
+	if len(orphans) != len(want) {
+		t.Fatalf("orphans = %v, want %v", orphans, want)
+	}
+	for i, k := range want {
+		if orphans[i] != k {
+			t.Errorf("orphans[%d] = %q, want %q", i, orphans[i], k)
+		}
+	}
+}
