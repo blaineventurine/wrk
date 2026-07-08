@@ -17,6 +17,10 @@ var listSize bool
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured resources and their shared storage",
+	Long: "List every configured resource and the shared-storage location " +
+		"it links to. Read-only. Use --size to walk each shared tree and " +
+		"report on-disk usage; this is noticeably slower for large caches " +
+		"such as node_modules.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {

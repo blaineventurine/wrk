@@ -342,6 +342,16 @@ workspace roots are siblings — never parents or children of one another. The
 check runs before the underlying `git worktree add` / `jj workspace add`, so
 an illegal destination never creates an orphan branch.
 
+Preview what `wrk new` would do without creating anything:
+
+```bash
+wrk new feature-auth --dry-run
+```
+
+The primary workspace's link plan is printed, along with the resolved
+destination. Nothing is written and no `git worktree add` / `jj workspace add`
+runs — safe to try when the destination or nesting rules are unclear.
+
 ### Independence and reconnection
 
 Detach the current workspace from shared resources (creates independent
@@ -377,12 +387,18 @@ Show state across every workspace of the repository:
 wrk status --all
 ```
 
-Exit non-zero if any resource needs attention (useful in CI or pre-commit
-hooks):
+Exit non-zero if any resource is in a state that `wrk link` would fix —
+`conflict`, `stale`, `absent`, `pending`, `missing`, or `not-linked` — useful
+in CI or pre-commit hooks:
 
 ```bash
 wrk status --exit-code
 ```
+
+Exit codes are distinguishable: **1** means "resources need attention" (the
+table already told you which ones), **2** means "wrk itself couldn't run"
+(bad flags, no repository, config error). CI scripts can treat 1 as an
+expected outcome and 2 as a real failure to investigate.
 
 Show every workspace and its overall state:
 
@@ -447,6 +463,9 @@ wrk link --storage /path/to/storage
 | `{parent}` | Parent directory of the matched resource |
 | `{match}` | Matched workspace path |
 | `{shared}` | Shared storage path |
+
+Unknown placeholders (typos like `{shred}` for `{shared}`) are rejected
+at load time so a misspelled path never silently ships to disk.
 
 ---
 
@@ -584,6 +603,11 @@ Typical examples:
 
 Avoid fingerprinting files that change frequently but do not affect the
 resource itself.
+
+Every fingerprint input must resolve to a path inside the repository root.
+`{root}/../secret` or `/etc/passwd` are rejected — the fingerprint's job
+is to summarize what the repository declares about its own resource, not
+arbitrary filesystem state.
 
 ---
 

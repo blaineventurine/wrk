@@ -21,6 +21,12 @@ var statusCmd = &cobra.Command{
 	Use:     "status",
 	Aliases: []string{"st"},
 	Short:   "Show the state of managed resources (read-only)",
+	Long: "Read-only. Shows per-resource state for the current workspace " +
+		"or, with --all, every workspace. Use --exit-code to have the " +
+		"command exit non-zero (specifically: 1) when any resource is in " +
+		"a state that `wrk link` would fix — handy for pre-commit hooks " +
+		"and CI health checks. Real errors (missing repo, bad config) " +
+		"still exit 2 and are distinguishable from the --exit-code signal.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
@@ -47,7 +53,10 @@ var statusCmd = &cobra.Command{
 		}
 
 		if statusExitCode && hasProblems(report.Rows) {
-			return fmt.Errorf("one or more resources need attention")
+			// The status table above already tells the user what's wrong;
+			// signalling via a sentinel keeps stderr silent while still
+			// letting Execute distinguish this from a real error (exit 2).
+			return exitCode{code: 1}
 		}
 
 		return nil
@@ -109,15 +118,20 @@ func hasNonSharedOrigin(rows []engine.ResourceStatus) bool {
 	return false
 }
 
-// hasProblems reports whether any row is in a state that would prevent a
-// clean `wrk link`. Intentional states (detached, expected) are not
-// problems.
+// hasProblems reports whether any row is in a state that a `wrk link`
+// would fix. This covers actionable failures (conflict, stale, absent)
+// as well as the "not yet run" states a fresh checkout is in
+// (pending, missing, not-linked). Intentional states — detached,
+// expected, linked — are not problems.
 func hasProblems(rows []engine.ResourceStatus) bool {
 	for _, r := range rows {
 		switch r.State {
 		case engine.StateConflict,
 			engine.StateStale,
-			engine.StateAbsent:
+			engine.StateAbsent,
+			engine.StatePending,
+			engine.StateMissing,
+			engine.StateNotLinked:
 			return true
 		}
 	}
@@ -141,5 +155,6 @@ func init() {
 		"Show status across all workspaces")
 
 	statusCmd.Flags().BoolVar(&statusExitCode, "exit-code", false,
-		"Exit non-zero if any resource is in a problem state")
+		"Exit 1 if any resource is in a state that 'wrk link' would fix "+
+			"(real errors still exit 2)")
 }

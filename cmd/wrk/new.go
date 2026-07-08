@@ -30,6 +30,7 @@ var newCmd = &cobra.Command{
 			args[0],
 			engine.Options{
 				StorageRoot: storageRoot,
+				DryRun:      dryRun,
 				Stdout:      os.Stdout,
 			},
 		)
@@ -38,4 +39,11 @@ var newCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(newCmd)
+
+	newCmd.Flags().BoolVar(
+		&dryRun,
+		"dry-run",
+		false,
+		"Show planned actions without creating the workspace",
+	)
 }

@@ -13,8 +13,14 @@ import (
 )
 
 var workspacesCmd = &cobra.Command{
-	Use:   "workspaces",
-	Short: "List all workspaces and their overall state",
+	Use:     "workspaces",
+	Aliases: []string{"ws"},
+	Short:   "List all workspaces and their overall state",
+	Long: "Read-only. Shows every live worktree (git) or workspace (jj) " +
+		"for this repository along with its rolled-up resource state — " +
+		"linked, detached, partial, pending, or unhealthy. A `*` marks " +
+		"the current workspace. Use `wrk status --all` for the per-" +
+		"resource breakdown.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {

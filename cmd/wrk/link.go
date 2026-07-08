@@ -11,6 +11,11 @@ import (
 var linkCmd = &cobra.Command{
 	Use:   "link",
 	Short: "Initialize or repair the current workspace",
+	Long: "Create or repair the symlinks that connect this workspace to " +
+		"shared storage, and run each resource's initialize hook once per " +
+		"shared fingerprint. Idempotent: safe to re-run at any time. Never " +
+		"clobbers a local edit — a mismatch is reported as a conflict for " +
+		"you to resolve. Reversible with `wrk detach`.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {

@@ -11,6 +11,11 @@ import (
 var relinkCmd = &cobra.Command{
 	Use:   "relink",
 	Short: "Discard independent local copies and reconnect to shared storage",
+	Long: "DESTRUCTIVE. Discards the independent local copies produced by " +
+		"`wrk detach` and reconnects this workspace to shared storage. " +
+		"Any local edits made since the detach are lost — preview first " +
+		"with --dry-run. Prefer `wrk link` if you want to keep your local " +
+		"changes.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
