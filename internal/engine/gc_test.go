@@ -159,3 +159,103 @@ func TestScanVariantsIgnoresBookkeeping(t *testing.T) {
 		t.Fatalf("expected 1 variant (bookkeeping filtered), got %d", len(variants))
 	}
 }
+
+// TestPinnedVariantsSinglePinsItsVariant: primary workspace's Link'd
+// variant is pinned; no stray variants are reported.
+func TestPinnedVariantsSinglePinsItsVariant(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: env\n" +
+			"    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	pinned, unreachable, err := pinnedVariants(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("pinnedVariants: %v", err)
+	}
+	if len(unreachable) != 0 {
+		t.Errorf("unreachable = %v, want empty", unreachable)
+	}
+	if len(pinned) != 1 {
+		t.Fatalf("pinned = %v, want exactly 1", pinned)
+	}
+}
+
+// TestPinnedVariantsTwoWorkspacesTwoVariants: after re-linking to a
+// second fingerprint the primary points at v2. Two variants are on
+// disk, but only the currently-linked one is pinned.
+func TestPinnedVariantsTwoWorkspacesTwoVariants(t *testing.T) {
+	primary := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n" +
+			"    hooks:\n" +
+			"      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\"'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, primary.Root)
+
+	if err := Link(primary, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("primary Link v1: %v", err)
+	}
+
+	// Re-fingerprint by rewriting package.json and re-linking. This
+	// mints a second variant on disk while the workspace symlink now
+	// points to it.
+	writeFile(t, filepath.Join(primary.Root, "package.json"), `{"v":2}`)
+	_ = os.Remove(filepath.Join(primary.Root, "node_modules"))
+	if err := Link(primary, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("primary Link v2: %v", err)
+	}
+
+	variants, err := scanVariants(primary, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("scanVariants: %v", err)
+	}
+	if len(variants) != 2 {
+		t.Fatalf("expected 2 variants on disk, got %d", len(variants))
+	}
+
+	pinned, _, err := pinnedVariants(primary, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("pinnedVariants: %v", err)
+	}
+	if len(pinned) != 1 {
+		t.Fatalf("pinned = %v, want exactly 1 (only the currently-linked variant)", pinned)
+	}
+}
+
+// TestPinnedVariantsDetachedWorkspaceDoesNotPin: after Detach converts
+// the managed symlink into a real dir, the previous variant is no
+// longer pinned by this workspace.
+func TestPinnedVariantsDetachedWorkspaceDoesNotPin(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: env\n" +
+			"    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := Detach(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+
+	pinned, _, err := pinnedVariants(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("pinnedVariants: %v", err)
+	}
+	if len(pinned) != 0 {
+		t.Fatalf("pinned = %v, want empty after detach", pinned)
+	}
+}

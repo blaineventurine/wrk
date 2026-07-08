@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/blaineventurine/wrk/internal/config"
@@ -117,4 +118,98 @@ func newVariant(resource, path, fingerprint, storagePath string) variant {
 		v.LastUsed = info.ModTime()
 	}
 	return v
+}
+
+// pinnedVariants returns the set of variant storage paths (absolute)
+// currently symlinked from a live workspace of repo. Unreachable
+// workspace roots (Stat failure on the root itself) are treated
+// conservatively — every scanned variant is marked pinned to avoid
+// deleting data referenced from a workspace we cannot inspect. The
+// unreachable roots are returned so the plan builder can surface why
+// the sweep was conservative.
+//
+// Non-managed symlinks (targets outside any scanned variant) do not
+// appear in the pinned set.
+func pinnedVariants(
+	repo *repository.Repository,
+	options Options,
+) (map[string]bool, []string, error) {
+	variants, err := scanVariants(repo, options)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cfg, err := config.Load(repo.Root)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	workspaces, err := repo.Workspaces()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pinned := make(map[string]bool)
+	var unreachable []string
+
+	pinAll := func() {
+		for _, v := range variants {
+			pinned[v.StoragePath] = true
+		}
+	}
+
+	for _, workspaceRoot := range workspaces {
+		if _, err := os.Stat(workspaceRoot); err != nil {
+			unreachable = append(unreachable, workspaceRoot)
+			pinAll()
+			continue
+		}
+
+		for _, resource := range cfg.Resources {
+			// Use the workspace's OWN root so {root}-anchored globs and
+			// paths expand against the workspace under inspection.
+			instances, err := resolver.Resolve(workspaceRoot, resource)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for _, instance := range instances {
+				info, err := os.Lstat(instance.WorkspacePath)
+				if err != nil {
+					continue
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					continue
+				}
+
+				resolved, err := filepath.EvalSymlinks(instance.WorkspacePath)
+				if err != nil {
+					continue
+				}
+
+				for _, v := range variants {
+					if isPathInside(v.StoragePath, resolved) {
+						pinned[v.StoragePath] = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return pinned, unreachable, nil
+}
+
+// isPathInside reports whether target is base or lives inside base.
+// Both must be absolute paths; filepath.Rel keeps the check honest
+// across differing but equivalent spellings.
+func isPathInside(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
