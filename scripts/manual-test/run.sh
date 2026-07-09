@@ -58,6 +58,12 @@ cleanup() {
     echo "SCRATCH kept at: $SCRATCH"
   fi
 }
+
+# Counter files live at the top-level scratch so every group appends
+# to the same tally. Groups get a per-group SCRATCH below.
+export PASS_FILE="$SCRATCH/.pass-count"
+export FAIL_FILE="$SCRATCH/.fail-count"
+touch "$PASS_FILE" "$FAIL_FILE"
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -117,7 +123,11 @@ for group in "${groups[@]}"; do
   printf '########## group: %s ##########\n' "$name" | tee -a "$TRANSCRIPT"
 
   (
-    export SCRATCH WRK TRANSCRIPT
+    # Give each group its own sub-scratch so `$SCRATCH/A1` in one
+    # group doesn't collide with `$SCRATCH/A1` in another.
+    export SCRATCH="$SCRATCH/$name"
+    export WRK TRANSCRIPT PASS_FILE FAIL_FILE
+    mkdir -p "$SCRATCH"
     bash "$group"
   )
 done
