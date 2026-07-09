@@ -571,6 +571,56 @@ Include on-disk size of each resource (slower — walks the storage tree):
 wrk list --size
 ```
 
+#### `wrk fingerprint <resource>` — why is this resource stale?
+
+Prints the current fingerprint computed from the resource's inputs
+alongside the fingerprint currently pinned by the workspace symlink.
+When they differ, run `wrk link` to re-point the workspace at the
+current variant. Read-only.
+
+```bash
+wrk fingerprint node        # human-readable
+wrk fingerprint node --json # machine-readable
+```
+
+Example output:
+
+```
+Resource:   node (node_modules)
+Fingerprint inputs:
+  package.json              exists   234 B
+  yarn.lock                 exists   45678 B
+
+Current variant:  5fd1d0d610ba6c17
+Pinned variant:   8a71d8b219fd0031  (stale)
+
+Run `wrk link` to re-point this workspace at the current variant.
+```
+
+#### `wrk doctor` — repository health snapshot
+
+Composes config validation, ghost-workspace detection, and
+stale-bookkeeping detection into one summary. Read-only. Exits **1**
+when any issue is found so CI scripts can gate on it — **2** is
+reserved for wrk itself failing (bad flags, no repository, ...).
+
+```bash
+wrk doctor         # human-readable
+wrk doctor --json  # machine-readable
+```
+
+Example output:
+
+```
+Repository: /Users/me/repos/monolith (git)
+  Config:            valid
+  Ghost workspaces:  none
+  Bookkeeping cruft: none
+  Storage size:      1.2 GB
+
+Overall: healthy
+```
+
 ### Global options
 
 Override automatic repository detection:

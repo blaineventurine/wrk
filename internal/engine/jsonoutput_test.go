@@ -723,3 +723,292 @@ func TestListJSONNilRepoReturnsError(t *testing.T) {
 		t.Fatal("expected error for nil repo, got nil")
 	}
 }
+
+// ============================================================
+// fingerprint — JSON output
+// ============================================================
+
+// TestFingerprintJSONMarshalsEnvelope pins the top-level envelope and
+// per-input projection: schema/kind tag, resource identity, both
+// snapshots populated, and every declared input surfacing with its
+// Path/Exists/SizeBytes trio.
+func TestFingerprintJSONMarshalsEnvelope(t *testing.T) {
+	report := &FingerprintReport{
+		Resource: config.Resource{Name: "node", Path: "node_modules"},
+		Current: FingerprintSnapshot{
+			Fingerprint: "5fd1d0d610ba6c17",
+			StoragePath: "/storage/repo/node_modules/5fd1d0d610ba6c17",
+			Inputs: []FingerprintInput{
+				{Path: "package.json", Exists: true, SizeBytes: 234},
+				{Path: "yarn.lock", Exists: true, SizeBytes: 45678},
+			},
+		},
+		Pinned: FingerprintSnapshot{
+			Fingerprint: "8a71d8b219fd0031",
+			StoragePath: "/storage/repo/node_modules/8a71d8b219fd0031",
+		},
+		Changed: true,
+	}
+	data, err := MarshalFingerprintJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out struct {
+		Schema   int    `json:"schema"`
+		Kind     string `json:"kind"`
+		Resource struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"resource"`
+		Current struct {
+			Fingerprint string `json:"fingerprint"`
+			StoragePath string `json:"storagePath"`
+			Inputs      []struct {
+				Path      string `json:"path"`
+				Exists    bool   `json:"exists"`
+				SizeBytes int64  `json:"sizeBytes"`
+			} `json:"inputs"`
+		} `json:"current"`
+		Pinned struct {
+			Fingerprint string `json:"fingerprint"`
+			StoragePath string `json:"storagePath"`
+		} `json:"pinned"`
+		Changed bool `json:"changed"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, data)
+	}
+	if out.Schema != 1 || out.Kind != "fingerprint" {
+		t.Errorf("envelope wrong: schema=%d kind=%q", out.Schema, out.Kind)
+	}
+	if out.Resource.Name != "node" || out.Resource.Path != "node_modules" {
+		t.Errorf("resource wrong: %+v", out.Resource)
+	}
+	if out.Current.Fingerprint != "5fd1d0d610ba6c17" {
+		t.Errorf("current.fingerprint = %q", out.Current.Fingerprint)
+	}
+	if out.Pinned.Fingerprint != "8a71d8b219fd0031" {
+		t.Errorf("pinned.fingerprint = %q", out.Pinned.Fingerprint)
+	}
+	if out.Changed != true {
+		t.Errorf("changed = %v, want true", out.Changed)
+	}
+	if len(out.Current.Inputs) != 2 {
+		t.Fatalf("inputs = %d, want 2", len(out.Current.Inputs))
+	}
+	if out.Current.Inputs[0].Path != "package.json" {
+		t.Errorf("input[0].path = %q", out.Current.Inputs[0].Path)
+	}
+	if out.Current.Inputs[1].SizeBytes != 45678 {
+		t.Errorf("input[1].sizeBytes = %d", out.Current.Inputs[1].SizeBytes)
+	}
+}
+
+// TestFingerprintJSONOmitsEmptyPinned pins the omitempty contract on
+// pinned.fingerprint / pinned.storagePath: a workspace whose path is
+// not a symlink into shared storage has both fields empty, and the
+// JSON output MUST elide the keys entirely rather than emit `""`.
+func TestFingerprintJSONOmitsEmptyPinned(t *testing.T) {
+	report := &FingerprintReport{
+		Resource: config.Resource{Name: "node", Path: "node_modules"},
+		Current: FingerprintSnapshot{
+			Fingerprint: "5fd1d0d610ba6c17",
+			StoragePath: "/storage/repo/node_modules/5fd1d0d610ba6c17",
+		},
+		Pinned:  FingerprintSnapshot{},
+		Changed: true,
+	}
+	data, err := MarshalFingerprintJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(data, []byte(`"fingerprint": ""`)) {
+		t.Errorf("expected omitempty to elide empty fingerprint, got:\n%s", data)
+	}
+	if bytes.Contains(data, []byte(`"storagePath": ""`)) {
+		t.Errorf("expected omitempty to elide empty storagePath, got:\n%s", data)
+	}
+	// Round-trip: pinned decodes cleanly to a zero-value struct.
+	var out struct {
+		Pinned struct {
+			Fingerprint string `json:"fingerprint"`
+			StoragePath string `json:"storagePath"`
+		} `json:"pinned"`
+		Changed bool `json:"changed"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, data)
+	}
+	if out.Pinned.Fingerprint != "" || out.Pinned.StoragePath != "" {
+		t.Errorf("pinned decoded non-empty: %+v", out.Pinned)
+	}
+	if !out.Changed {
+		t.Errorf("changed = %v, want true", out.Changed)
+	}
+}
+
+// TestFingerprintJSONNilReportErrors pins the input-validation
+// contract: a nil report is a programmer bug and MUST yield an error
+// rather than silently emit a zero-value envelope.
+func TestFingerprintJSONNilReportErrors(t *testing.T) {
+	if _, err := MarshalFingerprintJSON(nil); err == nil {
+		t.Fatal("expected error for nil report")
+	}
+}
+
+// ============================================================
+// doctor — JSON output
+// ============================================================
+
+// TestDoctorJSONMarshalsEnvelope pins the top-level envelope and the
+// "no null arrays" contract: even a healthy report — one with nil
+// slices for every check — MUST marshal every string-slice field as
+// `[]` so consumers can iterate without a nil check.
+func TestDoctorJSONMarshalsEnvelope(t *testing.T) {
+	report := &DoctorReport{
+		Root:         "/repo",
+		RepositoryID: "local/abc123",
+		VCS:          "git",
+		Checks: DoctorChecks{
+			ConfigValid:      true,
+			StorageSizeBytes: 1024,
+		},
+	}
+	data, err := MarshalDoctorJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out struct {
+		Schema int    `json:"schema"`
+		Kind   string `json:"kind"`
+		Root   string `json:"root"`
+		Checks struct {
+			ConfigValid       bool     `json:"configValid"`
+			GhostWorkspaces   []string `json:"ghostWorkspaces"`
+			OrphanedLocks     []string `json:"orphanedLocks"`
+			StaleProvisioning []string `json:"staleProvisioning"`
+			StaleDeleting     []string `json:"staleDeleting"`
+			StaleForgetting   []string `json:"staleForgetting"`
+			StorageSizeBytes  int64    `json:"storageSizeBytes"`
+		} `json:"checks"`
+		Issues []string `json:"issues"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	if out.Schema != 1 || out.Kind != "doctor" {
+		t.Errorf("envelope wrong: schema=%d kind=%q", out.Schema, out.Kind)
+	}
+	if out.Root != "/repo" {
+		t.Errorf("root wrong: %q", out.Root)
+	}
+	if !out.Checks.ConfigValid {
+		t.Error("ConfigValid: got false, want true")
+	}
+	if out.Checks.StorageSizeBytes != 1024 {
+		t.Errorf("StorageSizeBytes: got %d, want 1024", out.Checks.StorageSizeBytes)
+	}
+	// Never-null arrays: every slice field MUST decode to a non-nil,
+	// empty slice — not nil.
+	for name, got := range map[string][]string{
+		"GhostWorkspaces":   out.Checks.GhostWorkspaces,
+		"OrphanedLocks":     out.Checks.OrphanedLocks,
+		"StaleProvisioning": out.Checks.StaleProvisioning,
+		"StaleDeleting":     out.Checks.StaleDeleting,
+		"StaleForgetting":   out.Checks.StaleForgetting,
+		"Issues":            out.Issues,
+	} {
+		if got == nil {
+			t.Errorf("%s: nil, want []", name)
+		}
+	}
+}
+
+// TestDoctorJSONOmitsConfigErrorWhenValid pins the omitempty contract
+// on configError: a healthy config MUST NOT surface an empty
+// configError string — the key's absence is itself the signal.
+func TestDoctorJSONOmitsConfigErrorWhenValid(t *testing.T) {
+	report := &DoctorReport{Checks: DoctorChecks{ConfigValid: true}}
+	data, err := MarshalDoctorJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(data, []byte(`"configError"`)) {
+		t.Errorf("omitempty broken — configError present for valid config:\n%s", data)
+	}
+}
+
+// TestDoctorJSONIncludesConfigErrorWhenInvalid pins the inverse: a
+// broken config MUST surface the underlying error message verbatim so
+// consumers can machine-dispatch on it.
+func TestDoctorJSONIncludesConfigErrorWhenInvalid(t *testing.T) {
+	report := &DoctorReport{Checks: DoctorChecks{ConfigError: "missing field: name"}}
+	data, err := MarshalDoctorJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"configError": "missing field: name"`)) {
+		t.Errorf("configError missing:\n%s", data)
+	}
+}
+
+// TestDoctorJSONPopulatesSliceChecks pins the round-trip contract on
+// populated slices: entries added to any check MUST surface verbatim
+// in the JSON output.
+func TestDoctorJSONPopulatesSliceChecks(t *testing.T) {
+	report := &DoctorReport{
+		Checks: DoctorChecks{
+			ConfigValid:       true,
+			GhostWorkspaces:   []string{"/ghost/a", "/ghost/b"},
+			OrphanedLocks:     []string{"/lock/a"},
+			StaleProvisioning: []string{"/tmp/a"},
+			StaleDeleting:     []string{"/del/a"},
+			StaleForgetting:   []string{"/fgt/a"},
+		},
+		Issues: []string{"2 ghost workspace(s) — run `wrk gc`"},
+	}
+	data, err := MarshalDoctorJSON(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out struct {
+		Checks struct {
+			GhostWorkspaces   []string `json:"ghostWorkspaces"`
+			OrphanedLocks     []string `json:"orphanedLocks"`
+			StaleProvisioning []string `json:"staleProvisioning"`
+			StaleDeleting     []string `json:"staleDeleting"`
+			StaleForgetting   []string `json:"staleForgetting"`
+		} `json:"checks"`
+		Issues []string `json:"issues"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	if got, want := out.Checks.GhostWorkspaces, []string{"/ghost/a", "/ghost/b"}; !slicesEqual(got, want) {
+		t.Errorf("GhostWorkspaces: got %v want %v", got, want)
+	}
+	if got, want := out.Checks.OrphanedLocks, []string{"/lock/a"}; !slicesEqual(got, want) {
+		t.Errorf("OrphanedLocks: got %v want %v", got, want)
+	}
+	if got, want := out.Checks.StaleProvisioning, []string{"/tmp/a"}; !slicesEqual(got, want) {
+		t.Errorf("StaleProvisioning: got %v want %v", got, want)
+	}
+	if got, want := out.Checks.StaleDeleting, []string{"/del/a"}; !slicesEqual(got, want) {
+		t.Errorf("StaleDeleting: got %v want %v", got, want)
+	}
+	if got, want := out.Checks.StaleForgetting, []string{"/fgt/a"}; !slicesEqual(got, want) {
+		t.Errorf("StaleForgetting: got %v want %v", got, want)
+	}
+	if got, want := out.Issues, []string{"2 ghost workspace(s) — run `wrk gc`"}; !slicesEqual(got, want) {
+		t.Errorf("Issues: got %v want %v", got, want)
+	}
+}
+
+// TestDoctorJSONNilReportErrors pins the input-validation contract:
+// a nil report is a programmer bug and MUST yield an error rather
+// than silently emit a zero-value envelope.
+func TestDoctorJSONNilReportErrors(t *testing.T) {
+	if _, err := MarshalDoctorJSON(nil); err == nil {
+		t.Fatal("expected error for nil report")
+	}
+}

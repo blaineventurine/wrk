@@ -388,3 +388,176 @@ func annotateInUseBy(variants []variantJSON, workspaces []string, resourceRelati
 		variants[i].InUseBy = pins
 	}
 }
+
+// ============================================================
+// fingerprint
+// ============================================================
+
+// fingerprintInputJSON is the JSON projection of a single FingerprintInput.
+// SizeBytes is elided with `omitempty` because a missing input carries a
+// zero size that would otherwise be indistinguishable from a real empty
+// file in the output — Exists is the authoritative "was it there?" bit.
+type fingerprintInputJSON struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+}
+
+// fingerprintSnapshotJSON is the JSON projection of a FingerprintSnapshot.
+// Fingerprint and StoragePath both carry `omitempty` because a Pinned
+// side without a shared-storage symlink legitimately has neither, and
+// callers infer "workspace path is not a symlink into shared storage"
+// from their absence. Inputs is `omitempty` because Pinned never has
+// inputs — the engine only records per-input state alongside Current.
+type fingerprintSnapshotJSON struct {
+	Fingerprint string                 `json:"fingerprint,omitempty"`
+	StoragePath string                 `json:"storagePath,omitempty"`
+	Inputs      []fingerprintInputJSON `json:"inputs,omitempty"`
+}
+
+// fingerprintResourceJSON identifies the resource this analysis targets.
+// Only Name and Path surface — the raw fingerprint-input patterns live
+// under `list --json` and would just duplicate here.
+type fingerprintResourceJSON struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// fingerprintJSON is the top-level shape emitted by
+// `wrk fingerprint --json`. Changed is never `omitempty`: a "not stale"
+// result carries changed=false and consumers rely on the key being
+// present to distinguish a real analysis from an incomplete envelope.
+type fingerprintJSON struct {
+	jsonEnvelope
+	Resource fingerprintResourceJSON `json:"resource"`
+	Current  fingerprintSnapshotJSON `json:"current"`
+	Pinned   fingerprintSnapshotJSON `json:"pinned"`
+	Changed  bool                    `json:"changed"`
+}
+
+// MarshalFingerprintJSON renders a FingerprintReport as pretty-printed
+// JSON with the shared schema/kind envelope. A nil report yields a
+// marshaling error rather than a zero-value envelope — there is no
+// sensible "empty" fingerprint analysis, and silently emitting one
+// would mask a programmer bug in the caller.
+//
+// The returned bytes carry no trailing newline; callers add one if the
+// stream needs it.
+func MarshalFingerprintJSON(report *FingerprintReport) ([]byte, error) {
+	if report == nil {
+		return nil, errors.New("MarshalFingerprintJSON: nil report")
+	}
+	out := fingerprintJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "fingerprint"},
+		Resource: fingerprintResourceJSON{
+			Name: report.Resource.Name,
+			Path: report.Resource.Path,
+		},
+		Current: fingerprintSnapshotJSON{
+			Fingerprint: report.Current.Fingerprint,
+			StoragePath: report.Current.StoragePath,
+			Inputs:      inputProjection(report.Current.Inputs),
+		},
+		Pinned: fingerprintSnapshotJSON{
+			Fingerprint: report.Pinned.Fingerprint,
+			StoragePath: report.Pinned.StoragePath,
+		},
+		Changed: report.Changed,
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// inputProjection copies engine FingerprintInputs into their JSON
+// projections. Returns nil for an empty input slice so `omitempty` on
+// the snapshot's Inputs field can elide the key entirely rather than
+// emitting `"inputs": []`.
+func inputProjection(inputs []FingerprintInput) []fingerprintInputJSON {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]fingerprintInputJSON, 0, len(inputs))
+	for _, in := range inputs {
+		out = append(out, fingerprintInputJSON{
+			Path:      in.Path,
+			Exists:    in.Exists,
+			SizeBytes: in.SizeBytes,
+		})
+	}
+	return out
+}
+
+// ============================================================
+// doctor
+// ============================================================
+
+// doctorChecksJSON is the JSON projection of DoctorChecks. Every
+// string-slice field is emitted verbatim (never elided) so consumers
+// can iterate without a nil check — see nilToEmpty below. ConfigError
+// is the sole `omitempty` field: it's meaningful only when
+// ConfigValid is false, and its presence in the output is itself the
+// signal that config loading failed.
+type doctorChecksJSON struct {
+	ConfigValid       bool     `json:"configValid"`
+	ConfigError       string   `json:"configError,omitempty"`
+	GhostWorkspaces   []string `json:"ghostWorkspaces"`
+	OrphanedLocks     []string `json:"orphanedLocks"`
+	StaleProvisioning []string `json:"staleProvisioning"`
+	StaleDeleting     []string `json:"staleDeleting"`
+	StaleForgetting   []string `json:"staleForgetting"`
+	StorageSizeBytes  int64    `json:"storageSizeBytes"`
+}
+
+// doctorJSON is the top-level shape emitted by `wrk doctor --json`.
+// Issues is never `omitempty`: a healthy report carries `"issues": []`
+// and consumers rely on the key being present to distinguish a real
+// analysis from an incomplete envelope.
+type doctorJSON struct {
+	jsonEnvelope
+	Root         string           `json:"root"`
+	RepositoryID string           `json:"repositoryId"`
+	VCS          string           `json:"vcs"`
+	Checks       doctorChecksJSON `json:"checks"`
+	Issues       []string         `json:"issues"`
+}
+
+// MarshalDoctorJSON renders a DoctorReport as pretty-printed JSON with
+// the shared schema/kind envelope. A nil report yields a marshaling
+// error rather than a zero-value envelope — there is no sensible
+// "empty" health snapshot, and silently emitting one would mask a
+// programmer bug in the caller.
+//
+// The returned bytes carry no trailing newline; callers add one if the
+// stream needs it.
+func MarshalDoctorJSON(report *DoctorReport) ([]byte, error) {
+	if report == nil {
+		return nil, errors.New("MarshalDoctorJSON: nil report")
+	}
+	out := doctorJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "doctor"},
+		Root:         report.Root,
+		RepositoryID: report.RepositoryID,
+		VCS:          report.VCS,
+		Checks: doctorChecksJSON{
+			ConfigValid:       report.Checks.ConfigValid,
+			ConfigError:       report.Checks.ConfigError,
+			GhostWorkspaces:   nilToEmpty(report.Checks.GhostWorkspaces),
+			OrphanedLocks:     nilToEmpty(report.Checks.OrphanedLocks),
+			StaleProvisioning: nilToEmpty(report.Checks.StaleProvisioning),
+			StaleDeleting:     nilToEmpty(report.Checks.StaleDeleting),
+			StaleForgetting:   nilToEmpty(report.Checks.StaleForgetting),
+			StorageSizeBytes:  report.Checks.StorageSizeBytes,
+		},
+		Issues: nilToEmpty(report.Issues),
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// nilToEmpty returns an empty []string when input is nil so JSON
+// emits `[]` rather than `null`. This keeps every never-null slice
+// field in the doctor projection safe to iterate without a nil check.
+func nilToEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
