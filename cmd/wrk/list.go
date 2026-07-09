@@ -11,9 +11,13 @@ import (
 
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
-var listSize bool
+var (
+	listSize bool
+	listJSON bool
+)
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -28,14 +32,16 @@ var listCmd = &cobra.Command{
 			return err
 		}
 
-		listings, err := engine.List(
-			repo,
-			engine.Options{
-				StorageRoot: storageRoot,
-				Stdout:      os.Stdout,
-			},
-			listSize,
-		)
+		options := engine.Options{
+			StorageRoot: storageRoot,
+			Stdout:      os.Stdout,
+		}
+
+		if listJSON {
+			return printListJSON(os.Stdout, repo, options, listSize)
+		}
+
+		listings, err := engine.List(repo, options, listSize)
 		if err != nil {
 			return err
 		}
@@ -82,6 +88,22 @@ func printList(w io.Writer, rows []engine.ResourceListing, withSize bool) error 
 	return nil
 }
 
+// printListJSON writes the engine's machine-readable list JSON to w,
+// followed by a trailing newline for shell-friendliness. It is the
+// JSON equivalent of printList and never falls through to the tabular
+// path.
+func printListJSON(w io.Writer, repo *repository.Repository, options engine.Options, withSize bool) error {
+	data, err := engine.MarshalListJSON(repo, options, withSize)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	_, err = w.Write([]byte("\n"))
+	return err
+}
+
 func hasNonSharedListOrigin(rows []engine.ResourceListing) bool {
 	for _, r := range rows {
 		if r.Origin != config.OriginShared {
@@ -96,4 +118,6 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listSize, "size", false,
 		"Compute and show on-disk size of shared storage (slower)")
+	listCmd.Flags().BoolVar(&listJSON, "json", false,
+		"Emit machine-readable JSON instead of the tabular text output")
 }

@@ -15,6 +15,7 @@ import (
 var (
 	statusAll      bool
 	statusExitCode bool
+	statusJSON     bool
 )
 
 var statusCmd = &cobra.Command{
@@ -48,8 +49,14 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
-		if err := printStatus(os.Stdout, report, statusAll); err != nil {
-			return err
+		if statusJSON {
+			if err := printStatusJSON(os.Stdout, report, repo.Root); err != nil {
+				return err
+			}
+		} else {
+			if err := printStatus(os.Stdout, report, statusAll); err != nil {
+				return err
+			}
 		}
 
 		if statusExitCode && hasProblems(report.Rows) {
@@ -104,6 +111,24 @@ func printStatus(w io.Writer, report *engine.StatusReport, all bool) error {
 	return writeAligned(w, rows)
 }
 
+// printStatusJSON writes report as versioned JSON followed by a
+// trailing newline. This is the machine-readable equivalent of
+// printStatus. primaryRoot is the workspace root of the current
+// invocation — used to set IsPrimary on the emitted workspace groups
+// so consumers can distinguish "the workspace wrk is running from"
+// from other workspaces listed by --all.
+func printStatusJSON(w io.Writer, report *engine.StatusReport, primaryRoot string) error {
+	data, err := engine.MarshalStatusJSON(report, primaryRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	_, err = w.Write([]byte("\n"))
+	return err
+}
+
 func hasNonSharedOrigin(rows []engine.ResourceStatus) bool {
 	for _, r := range rows {
 		if r.Origin != config.OriginShared {
@@ -152,4 +177,7 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusExitCode, "exit-code", false,
 		"Exit 1 if any resource is in a state that 'wrk link' would fix "+
 			"(real errors still exit 2)")
+
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false,
+		"Emit machine-readable JSON instead of the tabular text output")
 }

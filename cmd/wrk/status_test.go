@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
@@ -167,4 +170,79 @@ func TestHasNonSharedOriginDetection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrintStatusJSONEmitsSchemaEnvelope confirms the JSON output
+// carries the shared envelope (schema=1, kind="status"), lists the
+// configured workspace as primary, and terminates with a newline for
+// shell-friendliness.
+func TestPrintStatusJSONEmitsSchemaEnvelope(t *testing.T) {
+	report := &engine.StatusReport{
+		Sources: []string{"/repo/.wrk.yml"},
+		Rows: []engine.ResourceStatus{{
+			WorkspaceRoot: "/repo",
+			Resource:      "node",
+			Path:          "node_modules",
+			SharedPath:    "/storage/repo/node_modules/5fd1d0d610ba6c17",
+			Fingerprint:   "5fd1d0d610ba6c17",
+			State:         engine.StateLinked,
+			Origin:        config.OriginShared,
+		}},
+	}
+	var buf bytes.Buffer
+	if err := printStatusJSON(&buf, report, "/repo"); err != nil {
+		t.Fatalf("printStatusJSON: %v", err)
+	}
+	// Trailing newline for shell-friendliness.
+	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		t.Errorf("output missing trailing newline:\n%s", buf.String())
+	}
+	var out struct {
+		Schema     int      `json:"schema"`
+		Kind       string   `json:"kind"`
+		Sources    []string `json:"sources"`
+		Workspaces []struct {
+			Root      string `json:"root"`
+			IsPrimary bool   `json:"isPrimary"`
+		} `json:"workspaces"`
+	}
+	// Trim trailing newline before parsing.
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &out); err != nil {
+		t.Fatalf("invalid JSON:\n%s\n%v", buf.String(), err)
+	}
+	if out.Schema != 1 || out.Kind != "status" {
+		t.Errorf("envelope wrong: schema=%d kind=%q", out.Schema, out.Kind)
+	}
+	if len(out.Workspaces) != 1 || !out.Workspaces[0].IsPrimary {
+		t.Errorf("expected 1 primary workspace, got %+v", out.Workspaces)
+	}
+}
+
+// TestPrintStatusJSONNilReport confirms a nil report yields a stable
+// envelope, not a panic or a JSON payload full of nulls.
+func TestPrintStatusJSONNilReport(t *testing.T) {
+	var buf bytes.Buffer
+	if err := printStatusJSON(&buf, nil, "/repo"); err != nil {
+		t.Fatalf("printStatusJSON(nil): %v", err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("null")) {
+		t.Errorf("expected [] not null in output:\n%s", buf.String())
+	}
+}
+
+// TestPrintStatusJSONPropagatesWriterError pins the failure path: a
+// downstream write error must surface to the caller so the CLI can
+// exit 2 rather than silently succeeding on a broken stdout.
+func TestPrintStatusJSONPropagatesWriterError(t *testing.T) {
+	report := &engine.StatusReport{}
+	err := printStatusJSON(&failingWriter{}, report, "/repo")
+	if err == nil {
+		t.Fatal("expected error from failing writer, got nil")
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("disk full")
 }
