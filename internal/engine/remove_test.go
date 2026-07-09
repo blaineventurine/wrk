@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -266,5 +267,105 @@ func TestBuildRemovePlanBareNameResolvesSibling(t *testing.T) {
 	}
 	if plan.Target != wantTarget {
 		t.Errorf("Target = %q, want %q (sibling of primary)", plan.Target, wantTarget)
+	}
+}
+
+// TestExecuteRemoveHappyPath: ExecuteRemove tears down a clean
+// workspace and the directory is removed from the filesystem.
+func TestExecuteRemoveHappyPath(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+
+	if err := ExecuteRemove(repo, plan, false); err != nil {
+		t.Fatalf("ExecuteRemove: %v", err)
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("feature dir survives: %v", err)
+	}
+}
+
+// TestExecuteRemoveClearsRegistryEntry: ExecuteRemove deletes the
+// target from the detach registry, even when --force is required.
+func TestExecuteRemoveClearsRegistryEntry(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	// Seed a detach entry so the executor has something to clear.
+	reg, _ := loadRegistry(repo)
+	reg[feature] = []string{"node_modules"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		// Detach entries typically produce a soft refusal; but the plan
+		// still returns; --force override is Task 2.4's job. Check by
+		// dropping the Refusal for this test setup or by passing force
+		// through here directly.
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+
+	if err := ExecuteRemove(repo, plan, true); err != nil {
+		t.Fatalf("ExecuteRemove --force: %v", err)
+	}
+
+	after, _ := loadRegistry(repo)
+	if _, ok := after[feature]; ok {
+		t.Errorf("registry entry survived: %v", after)
+	}
+}
+
+// TestExecuteRemoveIdempotentAfterExternalRemoval: ExecuteRemove
+// idempotently clears the registry entry even when the worktree was
+// already removed externally.
+func TestExecuteRemoveIdempotentAfterExternalRemoval(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	// Seed a registry entry and externally remove the worktree.
+	reg, _ := loadRegistry(repo)
+	reg[feature] = []string{"node_modules"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", repo.Root, "worktree", "remove", "--force", feature)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove: %v\n%s", err, out)
+	}
+
+	// Plan may treat this as a ghost or still find registry state; we
+	// construct the plan by hand to isolate the executor test.
+	plan := RemovePlan{Target: feature, Backend: "git"}
+	if err := ExecuteRemove(repo, plan, true); err != nil {
+		t.Fatalf("ExecuteRemove idempotent path: %v", err)
+	}
+
+	after, _ := loadRegistry(repo)
+	if _, ok := after[feature]; ok {
+		t.Errorf("registry entry survived idempotent execute: %v", after)
 	}
 }

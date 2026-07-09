@@ -296,3 +296,24 @@ func gitUncommittedCount(target string) (int, error) {
 	}
 	return strings.Count(trimmed, "\n") + 1, nil
 }
+
+// ExecuteRemove tears down plan.Target: runs the VCS remove command
+// (idempotent per backend contract) then clears any detach-registry
+// entry keyed by the target. Callers must have already applied the
+// safety gates from BuildRemovePlan / Confirm.
+func ExecuteRemove(repo *repository.Repository, plan RemovePlan, force bool) error {
+	if err := repo.RemoveWorkspace(plan.Target, force); err != nil {
+		return err
+	}
+	return withRegistryLock(repo, func() error {
+		reg, err := loadRegistry(repo)
+		if err != nil {
+			return err
+		}
+		if _, ok := reg[plan.Target]; !ok {
+			return nil
+		}
+		delete(reg, plan.Target)
+		return saveRegistry(repo, reg)
+	})
+}
