@@ -11,6 +11,7 @@ require (
 	github.com/mattn/go-isatty v0.0.22
 	github.com/otiai10/copy v1.14.1
 	github.com/spf13/cobra v1.10.2
+	pgregory.net/rapid v1.3.0
 )
 
 require (
