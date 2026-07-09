@@ -250,6 +250,11 @@ type bookkeepingCleanup struct {
 	OrphanedLocks     []string // <variant>.wrk-lock files whose variant is gone
 	StaleProvisioning []string // <variant>.wrk-provisioning/ dirs whose flock is NOT held
 	StaleDeleting     []string // <variant>.wrk-deleting/ dirs left by a crashed gc
+	// StaleForgetting is populated when a prior `wrk forget` crashed
+	// between the rename and the RemoveAll. It sits as a sibling of
+	// the repo-id subtree, not inside it, so cleanBookkeepingDetect
+	// checks for it after the tree walk.
+	StaleForgetting []string
 }
 
 // cleanBookkeepingDetect walks the shared-storage tree of repo and
@@ -260,6 +265,15 @@ type bookkeepingCleanup struct {
 func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookkeepingCleanup, error) {
 	var result bookkeepingCleanup
 
+	// Sibling check first: a `.wrk-forgetting` marker at the storage
+	// root indicates a crashed `wrk forget`. It's outside the
+	// per-repo walk below because that walk keys on repo.RepositoryID
+	// (which the marker filename encodes rather than nests under).
+	marker := filepath.Join(options.StorageRoot, repo.RepositoryID+".wrk-forgetting")
+	if _, err := os.Stat(marker); err == nil {
+		result.StaleForgetting = append(result.StaleForgetting, marker)
+	}
+
 	root := filepath.Join(options.StorageRoot, repo.RepositoryID)
 	if _, err := os.Stat(root); err != nil {
 		if os.IsNotExist(err) {
@@ -267,7 +281,6 @@ func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookk
 		}
 		return result, err
 	}
-
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Best-effort: a transient error on one entry shouldn't
@@ -364,6 +377,10 @@ type GCPlan struct {
 	// crashed prior gc; always safe to sweep.
 	StaleDeleting []string
 
+	// StaleForgetting lists <repo-id>.wrk-forgetting markers left
+	// behind by a crashed prior `wrk forget`; always safe to sweep.
+	StaleForgetting []string
+
 	// UnreachableWorkspaces lists workspaces the pin walk could not
 	// stat. For each, pinnedVariantsForRoots conservatively pinned
 	// every scanned variant; surfaced here so the CLI can explain
@@ -384,7 +401,8 @@ func (p GCPlan) HasNothing() bool {
 		len(p.DeleteVariants) == 0 &&
 		len(p.OrphanedLocks) == 0 &&
 		len(p.StaleProvisioning) == 0 &&
-		len(p.StaleDeleting) == 0
+		len(p.StaleDeleting) == 0 &&
+		len(p.StaleForgetting) == 0
 }
 
 // BuildGCPlan runs the read-only detection sweeps and composes them
@@ -449,6 +467,7 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 	plan.OrphanedLocks = bookkeeping.OrphanedLocks
 	plan.StaleProvisioning = bookkeeping.StaleProvisioning
 	plan.StaleDeleting = bookkeeping.StaleDeleting
+	plan.StaleForgetting = bookkeeping.StaleForgetting
 
 	for _, v := range variants {
 		if pinned[v.StoragePath] {

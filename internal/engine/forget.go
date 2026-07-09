@@ -147,14 +147,11 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 //     the previous crash). Recovery still clears the marker so
 //     step 1's rename has a clean target.
 //
-// NOTE: `wrk gc`'s cleanBookkeepingDetect walks INSIDE
-// <storage>/<repo-id>/, so a .wrk-forgetting marker at the
-// storage-root (sibling of <repo-id>/) is invisible to it. Recovery
-// therefore requires the user to re-run `wrk forget`; the marker
-// won't get swept by a stray `wrk gc`. If cross-command recovery
-// becomes important, teach cleanBookkeepingDetect (or a new sibling
-// sweep) to enumerate the storage root for <repo-id>.wrk-forgetting
-// entries. Tracked as a follow-up.
+// A crashed `wrk forget` between the rename and the RemoveAll leaves
+// a `<repo-id>.wrk-forgetting/` marker at the storage-root. Both the
+// idempotent-recovery branch below AND `wrk gc`'s
+// cleanBookkeepingDetect will complete the sweep on the next run,
+// so recovery is fully automatic from either command.
 func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options) error {
 	if plan.StoragePath != "" {
 		marker := plan.StoragePath + ".wrk-forgetting"

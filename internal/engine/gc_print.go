@@ -134,7 +134,7 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 	}
 
 	// Bookkeeping cleaned
-	totalBookkeeping := len(plan.OrphanedLocks) + len(plan.StaleProvisioning) + len(plan.StaleDeleting)
+	totalBookkeeping := len(plan.OrphanedLocks) + len(plan.StaleProvisioning) + len(plan.StaleDeleting) + len(plan.StaleForgetting)
 	if totalBookkeeping > 0 {
 		totalParts = append(totalParts, pluralInt(totalBookkeeping)+" bookkeeping")
 	}

@@ -378,6 +378,31 @@ func TestCleanBookkeepingDetectFindsDeletingMarker(t *testing.T) {
 	}
 }
 
+// TestCleanBookkeepingDetectFindsForgettingMarker: a crashed prior
+// `wrk forget` leaves `<repo-id>.wrk-forgetting/` as a sibling of the
+// repo-id subtree. cleanBookkeepingDetect must find it so `wrk gc`
+// can complete the sweep.
+func TestCleanBookkeepingDetectFindsForgettingMarker(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	marker := filepath.Join(storage, repo.RepositoryID+".wrk-forgetting")
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(marker, "leftover"), "stale")
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.StaleForgetting) != 1 || result.StaleForgetting[0] != marker {
+		t.Fatalf("StaleForgetting = %v, want [%q]", result.StaleForgetting, marker)
+	}
+}
+
 // TestCleanBookkeepingDetectEmptyStorage: a repo whose storage tree
 // doesn't exist yet must return an empty plan with no error.
 func TestCleanBookkeepingDetectEmptyStorage(t *testing.T) {
@@ -390,7 +415,7 @@ func TestCleanBookkeepingDetectEmptyStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if len(result.OrphanedLocks)+len(result.StaleProvisioning)+len(result.StaleDeleting) != 0 {
+	if len(result.OrphanedLocks)+len(result.StaleProvisioning)+len(result.StaleDeleting)+len(result.StaleForgetting) != 0 {
 		t.Fatalf("expected empty result, got %+v", result)
 	}
 }

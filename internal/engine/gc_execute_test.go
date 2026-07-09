@@ -202,3 +202,37 @@ func TestExecuteGCPrunesGhostAndRegistryEntry(t *testing.T) {
 		t.Errorf("orphan registry entry survived")
 	}
 }
+
+// TestExecuteGCSweepsCrashedForgetMarker: `wrk gc` sweeps a
+// <repo-id>.wrk-forgetting/ marker left by a crashed `wrk forget`.
+// The marker sits at the storage root as a sibling of the repo-id
+// subtree — verifies cleanBookkeepingDetect finds it and ExecuteGC
+// removes it.
+func TestExecuteGCSweepsCrashedForgetMarker(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	marker := filepath.Join(storage, repo.RepositoryID+".wrk-forgetting")
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(marker, "leftover"), "stale")
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.StaleForgetting) != 1 {
+		t.Fatalf("StaleForgetting = %v, want 1", plan.StaleForgetting)
+	}
+
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("forgetting marker survived gc: %v", err)
+	}
+}

@@ -36,8 +36,8 @@ import (
 //     provisioning). The delete uses rename-then-remove so a crash
 //     mid-RemoveAll leaves a .wrk-deleting marker the next gc sweeps.
 //  4. Sweep bookkeeping cruft (OrphanedLocks, StaleProvisioning,
-//     StaleDeleting). Failures here log and continue — leftover cruft
-//     is annoying but never corrupts state.
+//     StaleDeleting, StaleForgetting). Failures here log and continue
+//     — leftover cruft is annoying but never corrupts state.
 func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error {
 	var firstErr error
 	recordErr := func(err error) {
@@ -80,6 +80,7 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 	sweepBookkeeping(plan.OrphanedLocks, options)
 	sweepBookkeeping(plan.StaleProvisioning, options)
 	sweepBookkeeping(plan.StaleDeleting, options)
+	sweepBookkeeping(plan.StaleForgetting, options)
 
 	return firstErr
 }
