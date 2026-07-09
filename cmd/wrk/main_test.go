@@ -801,7 +801,7 @@ func TestHelpListsAllSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--help exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
-	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces", "gc", "remove"} {
+	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces", "gc", "remove", "forget"} {
 		if !strings.Contains(stdout, sub) {
 			t.Errorf("--help output missing subcommand %q; full help:\n%s", sub, stdout)
 		}
@@ -1454,5 +1454,143 @@ func TestMainRemoveRefusesNonTTYWithoutYes(t *testing.T) {
 	if code == 0 {
 		t.Errorf("remove without --yes on non-TTY should not exit 0\nstdout:\n%s\nstderr:\n%s",
 			stdout, stderr)
+	}
+}
+
+// gitCommonDir returns the git common directory for a repository.
+// For a regular worktree, this is .git/ (or the directory pointed to by .git file).
+// For a linked worktree, this is the commondir referenced in the .git file.
+func gitCommonDir(t *testing.T, repo string) string {
+	t.Helper()
+	
+	cmd := exec.Command("git", "-C", repo, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --git-common-dir: %v", err)
+	}
+	dir := strings.TrimSpace(string(out))
+	// Make it absolute if it's relative
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(repo, dir)
+	}
+	return dir
+}
+
+// TestMainForgetYesRemovesStorage pins the `wrk forget` happy path:
+// with --yes carrying past the non-TTY refusal, the storage subtree
+// for the repo is torn down and no longer exists on disk.
+func TestMainForgetYesRemovesStorage(t *testing.T) {
+	testDir := freshGitRepo(t)
+	writeFile(t, filepath.Join(testDir, ".wrk.yml"),
+		"resources:\n  - name: env\n    path: .env\n    hooks:\n      initialize:\n        - run: sh -c 'mkdir -p \"{shared}\" && touch \"{shared}/.env\"'\n")
+	
+	// Commit the config so link can proceed
+	gitCommitAll(t, testDir, "initial")
+	
+	// Link so there's storage to nuke.
+	storage := storagePath(testDir)
+	code, stdout, stderr := runWrk(t, testDir, "--storage", storage, "link")
+	if code != 0 {
+		t.Fatalf("link exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	
+	// Verify storage subtree exists before forget
+	storageStat, err := os.Stat(storage)
+	if err != nil {
+		t.Fatalf("stat storage before forget: %v", err)
+	}
+	if !storageStat.IsDir() {
+		t.Fatalf("storage is not a directory")
+	}
+	
+	// Run forget with --yes
+	code, out, stderr := runWrk(t, testDir, "--storage", storage, "forget", "--yes")
+	if code != 0 {
+		t.Fatalf("forget exit = %d\nstdout:\n%s\nstderr:\n%s", code, out, stderr)
+	}
+	
+	// Verify storage subtree is gone. The storage root may exist but
+	// should have no repo-specific subdirectories. Check that storage/local/
+	// (if it exists) is empty.
+	localDir := filepath.Join(storage, "local")
+	entries, statErr := os.ReadDir(localDir)
+	if statErr == nil {
+		// local/ exists; it should be empty (no repo-id subdirectories)
+		if len(entries) > 0 {
+			t.Errorf("storage/local/ still has entries after forget: %v", entries)
+		}
+	}
+	// If local/ doesn't exist at all, that's also fine
+}
+
+// TestMainForgetRefusesRegistryEntries pins the refusal path: when
+// detached-file registry entries exist for this repo, `wrk forget`
+// refuses with exit code non-zero and a message naming "detached",
+// even with --yes (unless --force is passed).
+func TestMainForgetRefusesRegistryEntries(t *testing.T) {
+	testDir := freshGitRepo(t)
+	writeFile(t, filepath.Join(testDir, ".wrk.yml"),
+		"resources:\n  - name: env\n    path: .env\n    hooks:\n      initialize:\n        - run: sh -c 'mkdir -p \"{shared}\" && touch \"{shared}/.env\"'\n")
+	
+	// Commit so link can proceed
+	gitCommitAll(t, testDir, "initial")
+	
+	// Link so there's a repo ID
+	storage := storagePath(testDir)
+	code, stdout, stderr := runWrk(t, testDir, "--storage", storage, "link")
+	if code != 0 {
+		t.Fatalf("link exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	
+	// Seed a detach registry entry so forget will refuse
+	commonDir := gitCommonDir(t, testDir)
+	regDir := filepath.Join(commonDir, "wrk")
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	
+	canon, err := filepath.EvalSymlinks(testDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	payload := fmt.Sprintf(`{%q:[".env"]}`, canon)
+	if err := os.WriteFile(filepath.Join(regDir, "detached.json"), []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	
+	// Run forget with --yes (but without --force); should refuse
+	code, _, errMsg := runWrk(t, testDir, "--storage", storage, "forget", "--yes")
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for populated registry")
+	}
+	if !strings.Contains(errMsg, "detached") {
+		t.Errorf("stderr = %q, want mention of 'detached'", errMsg)
+	}
+}
+
+// TestMainForgetRefusesNonTTYWithoutYes pins the confirmation gate: a
+// non-terminal stdin (which `runWrk` always provides — no pty) with
+// no --yes must refuse rather than silently prompt for input nobody
+// will type. Exit is non-zero.
+func TestMainForgetRefusesNonTTYWithoutYes(t *testing.T) {
+	testDir := freshGitRepo(t)
+	writeFile(t, filepath.Join(testDir, ".wrk.yml"),
+		"resources:\n  - name: env\n    path: .env\n    hooks:\n      initialize:\n        - run: sh -c 'mkdir -p \"{shared}\" && touch \"{shared}/.env\"'\n")
+	
+	// Commit so link can proceed
+	gitCommitAll(t, testDir, "initial")
+	
+	// Link so forget has something to do
+	storage := storagePath(testDir)
+	code, stdout, stderr := runWrk(t, testDir, "--storage", storage, "link")
+	if code != 0 {
+		t.Fatalf("link exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	
+	// Run forget without --yes on non-TTY; should refuse
+	code, _, _ = runWrk(t, testDir, "--storage", storage, "forget")
+	if code == 0 {
+		t.Errorf("expected non-zero exit for non-TTY without --yes")
 	}
 }
