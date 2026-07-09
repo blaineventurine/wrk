@@ -391,11 +391,16 @@ func TestParseJJInlineErrorRejectsPlainPath(t *testing.T) {
 
 // TestJJBackendRemoveWorkspace pins the happy path: seed a jj
 // secondary workspace, forget it via removeWorkspace, and check
-// that jj's own workspace list no longer surfaces its name. The
-// backend translates the target PATH into the workspace NAME jj
-// requires, so a regression that fed the path directly to
-// `workspace forget` would produce a jj-side error rather than a
-// silent success.
+// that jj's own workspace list no longer surfaces its name AND
+// that the working-copy directory is gone from disk. The backend
+// translates the target PATH into the workspace NAME jj requires,
+// so a regression that fed the path directly to `workspace forget`
+// would produce a jj-side error rather than a silent success.
+//
+// Directory removal matches the git backend's user-visible contract:
+// `jj workspace forget` alone is metadata-only, but `wrk remove`
+// promises symmetric behavior across VCS backends. See the fix in
+// removeWorkspace: forget then os.RemoveAll.
 func TestJJBackendRemoveWorkspace(t *testing.T) {
 	skipIfNoJJ(t)
 	skipIfNoGit(t)
@@ -410,15 +415,26 @@ func TestJJBackendRemoveWorkspace(t *testing.T) {
 	if err := (jjBackend{}).createWorkspace(root, feature); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
+	// Sanity: directory exists after add so a failed RemoveAll
+	// below would not be masked by a pre-fix absence.
+	if _, err := os.Stat(feature); err != nil {
+		t.Fatalf("secondary workspace missing after createWorkspace: %v", err)
+	}
 
 	if err := (jjBackend{}).removeWorkspace(root, feature, false); err != nil {
 		t.Fatalf("removeWorkspace: %v", err)
 	}
 
-	// jj retains the workspace directory on disk (workspace forget
-	// is a metadata operation) — the assertion is on the listing,
-	// not the filesystem. Any residual "feature" mention means the
-	// forget never ran.
+	// Directory MUST be gone: the backend runs os.RemoveAll after
+	// `jj workspace forget`. A regression that dropped the RemoveAll
+	// would fail this assertion, leaving the exact orphan-dir bug
+	// this fix targets.
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("secondary workspace dir survives removeWorkspace: err=%v", err)
+	}
+
+	// jj's own listing MUST no longer surface the workspace name.
+	// Any residual "feature" mention means the forget never ran.
 	cmd := exec.Command("jj", "-R", root, "workspace", "list")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -446,5 +462,69 @@ func TestJJBackendRemoveWorkspaceIdempotent(t *testing.T) {
 	nonexistent := filepath.Join(parent, "never-was")
 	if err := (jjBackend{}).removeWorkspace(root, nonexistent, false); err != nil {
 		t.Errorf("idempotent jj removeWorkspace of missing target: %v", err)
+	}
+}
+
+// TestJJBackendUncommittedCountClean pins that a fresh workspace
+// with no working-copy changes reports zero uncommitted files. A
+// probe failure at this stage would surface the underlying error.
+func TestJJBackendUncommittedCountClean(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initColocatedJJRepo(t, root)
+
+	count, err := (jjBackend{}).uncommittedCount(root)
+	if err != nil {
+		t.Fatalf("uncommittedCount: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("clean workspace count = %d, want 0", count)
+	}
+}
+
+// TestJJBackendUncommittedCountDirty pins that a workspace whose @
+// change has a modified/new file relative to its parent surfaces a
+// non-zero count. The exact value MUST be 1 for a single new file
+// so the plan builder can propagate the count into its refusal
+// message verbatim.
+func TestJJBackendUncommittedCountDirty(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initColocatedJJRepo(t, root)
+
+	if err := os.WriteFile(
+		filepath.Join(root, "file.txt"),
+		[]byte("modified"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := (jjBackend{}).uncommittedCount(root)
+	if err != nil {
+		t.Fatalf("uncommittedCount: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("dirty workspace count = %d, want 1", count)
+	}
+}
+
+// TestJJBackendUncommittedCountProbeFailure pins that pointing the
+// probe at a directory with no `.jj` surfaces the underlying error
+// instead of silently reporting 0 — otherwise a probe failure would
+// be indistinguishable from a clean workspace, and the plan builder
+// would suppress a refusal it should surface.
+func TestJJBackendUncommittedCountProbeFailure(t *testing.T) {
+	skipIfNoJJ(t)
+
+	_, err := (jjBackend{}).uncommittedCount(t.TempDir())
+	if err == nil {
+		t.Fatal("uncommittedCount on non-jj dir: want error, got nil")
 	}
 }

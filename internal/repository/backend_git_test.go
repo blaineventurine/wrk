@@ -696,3 +696,64 @@ func TestRepositoryRemoveWorkspace(t *testing.T) {
 		t.Errorf("worktree directory survives RemoveWorkspace: err=%v", err)
 	}
 }
+
+// TestGitBackendUncommittedCountClean pins that a fresh worktree
+// with no working-copy changes reports zero. A probe failure at
+// this stage would surface the underlying error rather than a bogus
+// count of 0.
+func TestGitBackendUncommittedCountClean(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initGitRepo(t, root)
+
+	count, err := (gitBackend{}).uncommittedCount(root)
+	if err != nil {
+		t.Fatalf("uncommittedCount: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("clean worktree count = %d, want 0", count)
+	}
+}
+
+// TestGitBackendUncommittedCountDirty pins that a workspace with a
+// single untracked file reports exactly 1. The exact value matters:
+// the plan builder propagates it verbatim into the refusal message.
+func TestGitBackendUncommittedCountDirty(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initGitRepo(t, root)
+
+	if err := os.WriteFile(
+		filepath.Join(root, "untracked.txt"),
+		[]byte("dirt"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := (gitBackend{}).uncommittedCount(root)
+	if err != nil {
+		t.Fatalf("uncommittedCount: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("dirty worktree count = %d, want 1", count)
+	}
+}
+
+// TestGitBackendUncommittedCountProbeFailure pins that pointing the
+// probe at a directory with no `.git` surfaces the underlying error
+// instead of silently reporting 0 — otherwise a probe failure would
+// be indistinguishable from a clean worktree and the plan builder
+// would suppress a refusal it should surface.
+func TestGitBackendUncommittedCountProbeFailure(t *testing.T) {
+	skipIfNoGit(t)
+
+	_, err := (gitBackend{}).uncommittedCount(t.TempDir())
+	if err == nil {
+		t.Fatal("uncommittedCount on non-git dir: want error, got nil")
+	}
+}

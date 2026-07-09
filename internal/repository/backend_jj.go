@@ -120,15 +120,24 @@ func (jjBackend) pruneGhosts(root string) ([]string, error) {
 }
 
 // removeWorkspace forgets the workspace whose working-copy root
-// matches target via `jj workspace forget`. jj requires the
-// workspace NAME, not its path, so we translate through the same
-// template listing detectGhosts uses; canonicalization on both
-// sides keeps macOS /private vs /var symlinks aligned. If no
-// workspace resolves to target we return nil, matching the
-// git backend's idempotent behavior. force is accepted for
-// interface parity but ignored: as of jj 0.43 `workspace forget`
-// has no --force flag and jj happily forgets a workspace whose
-// working copy is dirty or gone.
+// matches target via `jj workspace forget`, then removes the
+// directory tree on disk. jj requires the workspace NAME, not its
+// path, so we translate through the same template listing
+// detectGhosts uses; canonicalization on both sides keeps macOS
+// /private vs /var symlinks aligned. If no workspace resolves to
+// target we return nil, matching the git backend's idempotent
+// behavior. force is accepted for interface parity but ignored: as
+// of jj 0.43 `workspace forget` has no --force flag and jj happily
+// forgets a workspace whose working copy is dirty or gone.
+//
+// `jj workspace forget` is metadata-only — unlike `git worktree
+// remove` it leaves the working-copy directory on disk. Match the
+// git backend's user-visible contract by sweeping the directory
+// after the forget succeeds. Order matters: if RemoveAll fails
+// afterwards the user is left in the same "orphan directory" state
+// the pre-fix jj backend produced, which `wrk gc` cannot catch (gc
+// looks for the inverse: metadata present, directory missing), but
+// a subsequent `rm -rf` by hand is safe.
 func (jjBackend) removeWorkspace(root, target string, _ bool) error {
 	entries, err := listJJWorkspaces(root)
 	if err != nil {
@@ -144,9 +153,41 @@ func (jjBackend) removeWorkspace(root, target string, _ bool) error {
 			continue
 		}
 		// "--" guards a workspace name that begins with "-".
-		return passthrough(root, "jj", "workspace", "forget", "--", e.name)
+		if err := passthrough(root, "jj", "workspace", "forget", "--", e.name); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf(
+				"jj workspace forget succeeded but failed to remove directory %s: %w",
+				target, err,
+			)
+		}
+		return nil
 	}
 	return nil
+}
+
+// uncommittedCount runs `jj diff --summary` in target and counts the
+// non-empty lines. Each line is one file changed in the working-copy
+// commit (@) versus its parent, which is jj's rough equivalent to
+// git's uncommitted-changes signal.
+//
+// A probe failure — target missing a `.jj`, jj binary missing,
+// permission denied — returns the underlying error. Callers may
+// swallow it: a plan without an uncommitted-changes signal is still
+// useful, and the executor sees the same failure at commit time.
+func (jjBackend) uncommittedCount(target string) (int, error) {
+	out, err := capture(target, "jj", "diff", "--summary")
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // jjWorkspaceEntry pairs a workspace name with the path jj reported

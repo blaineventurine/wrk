@@ -242,6 +242,41 @@ func TestBuildRemovePlanUncommittedChangesRefuse(t *testing.T) {
 	}
 }
 
+// TestBuildRemovePlanJJUncommittedChangesRefuse pins the jj branch
+// of BuildRemovePlan's uncommitted-changes probe. Before the
+// backend-agnostic dispatch through Repository.UncommittedCount,
+// this branch was git-only and jj workspaces slipped past the
+// safety gate silently. Regression: a modified file in the
+// secondary jj workspace MUST surface a non-zero count on the plan
+// AND fire the "uncommitted" refusal string.
+func TestBuildRemovePlanJJUncommittedChangesRefuse(t *testing.T) {
+	repo := newTestColocatedJJRepo(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	// Untracked file: `jj diff --summary` reports it as an added
+	// file in the @ change against its parent, one line of output.
+	if err := os.WriteFile(filepath.Join(feature, "dirty.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if plan.UncommittedChanges < 1 {
+		t.Errorf("UncommittedChanges = %d, want >= 1", plan.UncommittedChanges)
+	}
+	if plan.Refusal == "" || !strings.Contains(plan.Refusal, "uncommitted") {
+		t.Errorf("Refusal = %q, want mention of uncommitted changes", plan.Refusal)
+	}
+}
+
 // TestBuildRemovePlanBareNameResolvesSibling: a bare name is treated
 // as a sibling of the primary, matching wrk new's convention. Once
 // resolved, the same live-workspace/refusal machinery runs.

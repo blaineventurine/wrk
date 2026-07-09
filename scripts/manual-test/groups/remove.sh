@@ -171,3 +171,80 @@ else
   # wrk remove <ghost> should refuse with a wrk gc hint.
   ( cd "$D" && expect_contains "wrk gc" "$WRK remove g1feature 2>&1" )
 fi
+
+section J "wrk remove — jj colocated backend"
+
+# Skip the whole section when jj is unavailable — CI containers
+# without jj should not fail this group.
+if ! command -v jj > /dev/null 2>&1; then
+  echo "SKIP: jj not available on PATH; skipping section J" | tee -a "$TRANSCRIPT"
+else
+
+subsec "J.1: jj colocated repo — wrk remove deletes the workspace directory"
+D=$SCRATCH/J1
+mkrepo colocated "$D"
+remove_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+( cd "$D" && "$WRK" new j1feature > /dev/null 2>&1 )
+FEATURE=$SCRATCH/j1feature
+if [ ! -d "$FEATURE" ]; then
+  echo "FAIL: J.1 wrk new did not create $FEATURE" | tee -a "$TRANSCRIPT"
+  _mark_fail
+else
+  ( cd "$D" && expect_exit 0 "$WRK remove j1feature --yes" )
+  # Directory MUST be gone — the bug this fix targets left it on disk.
+  if [ -e "$FEATURE" ]; then
+    echo "FAIL: J.1 feature dir survived remove on jj backend" | tee -a "$TRANSCRIPT"
+    _mark_fail
+  else
+    echo "PASS: J.1 jj feature dir gone after remove" | tee -a "$TRANSCRIPT"
+    _mark_pass
+  fi
+  # jj must no longer list the workspace either.
+  if ( cd "$D" && jj workspace list 2>/dev/null | grep -q j1feature ); then
+    echo "FAIL: J.1 jj still lists forgotten workspace" | tee -a "$TRANSCRIPT"
+    _mark_fail
+  else
+    echo "PASS: J.1 jj workspace list no longer surfaces j1feature" | tee -a "$TRANSCRIPT"
+    _mark_pass
+  fi
+fi
+
+subsec "J.2: jj colocated repo with uncommitted changes — wrk remove refuses without --force"
+D=$SCRATCH/J2
+mkrepo colocated "$D"
+remove_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+( cd "$D" && "$WRK" new j2feature > /dev/null 2>&1 )
+FEATURE=$SCRATCH/j2feature
+if [ ! -d "$FEATURE" ]; then
+  echo "FAIL: J.2 setup failed" | tee -a "$TRANSCRIPT"
+  _mark_fail
+else
+  # Untracked file — jj diff --summary emits one line for the new
+  # file in the @ change vs its parent.
+  printf 'dirty\n' > "$FEATURE/uncommitted.txt"
+
+  # Refusal path: plan surfaces "uncommitted" and the CLI exits
+  # non-zero without --force.
+  ( cd "$D" && expect_contains "uncommitted" "$WRK remove j2feature --yes 2>&1" )
+  if [ ! -d "$FEATURE" ]; then
+    echo "FAIL: J.2 refusal path still tore down the feature dir" | tee -a "$TRANSCRIPT"
+    _mark_fail
+  else
+    echo "PASS: J.2 refusal path left disk untouched" | tee -a "$TRANSCRIPT"
+    _mark_pass
+  fi
+
+  # --force overrides the refusal and the directory is finally gone.
+  ( cd "$D" && expect_exit 0 "$WRK remove j2feature --yes --force" )
+  if [ -e "$FEATURE" ]; then
+    echo "FAIL: J.2 --force did not sweep the feature dir" | tee -a "$TRANSCRIPT"
+    _mark_fail
+  else
+    echo "PASS: J.2 --force swept the feature dir" | tee -a "$TRANSCRIPT"
+    _mark_pass
+  fi
+fi
+
+fi  # jj availability guard

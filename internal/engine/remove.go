@@ -3,7 +3,6 @@ package engine
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -188,18 +187,17 @@ func BuildRemovePlan(
 	// 6. Soft-refusal probes for a live workspace.
 	var reasons []string
 
-	// 6a. Uncommitted VCS changes. Only git for now — jj probing
-	// belongs to Task 2.2 (backend). A probe failure is silently
-	// tolerated: a plan without a refusal we could not detect is
-	// still a plan, and the executor will surface real failures.
-	if repo.VCS() == repository.Git {
-		if count, err := gitUncommittedCount(target); err == nil {
-			plan.UncommittedChanges = count
-			if count > 0 {
-				reasons = append(reasons,
-					fmt.Sprintf("workspace has %d uncommitted VCS change(s)", count),
-				)
-			}
+	// 6a. Uncommitted VCS changes. Backend-agnostic: the repository
+	// package dispatches to git (status --porcelain) or jj (diff
+	// --summary). A probe failure is silently tolerated — a plan
+	// without a refusal we could not detect is still a plan, and the
+	// executor will surface real failures.
+	if count, err := repo.UncommittedCount(target); err == nil {
+		plan.UncommittedChanges = count
+		if count > 0 {
+			reasons = append(reasons,
+				fmt.Sprintf("workspace has %d uncommitted VCS change(s)", count),
+			)
 		}
 	}
 
@@ -260,41 +258,19 @@ func isBareRemoveName(name string) bool {
 // renderRemoveCommand renders the VCS command the executor will run,
 // for display in the plan and the confirmation prompt. jj's
 // `workspace forget` operates on a NAME not a path, and that name
-// lookup lives in the backend layer (Task 2.2), so we leave <name>
-// as a placeholder here rather than fabricate a lookup that would
-// duplicate backend logic.
+// lookup lives in the backend layer, so we leave <name> as a
+// placeholder here; the backend also removes the working-copy
+// directory after forget succeeds, which the rendered command
+// echoes with a trailing `rm -rf`.
 func renderRemoveCommand(vcs repository.VCS, target string) string {
 	switch vcs {
 	case repository.Git:
 		return fmt.Sprintf("git worktree remove %s", target)
 	case repository.JJ:
-		return "jj workspace forget <name>"
+		return fmt.Sprintf("jj workspace forget <name>; rm -rf %s", target)
 	default:
 		return fmt.Sprintf("(unknown backend %q)", string(vcs))
 	}
-}
-
-// gitUncommittedCount runs `git status --porcelain` in target and
-// counts the non-empty lines. Each porcelain-v1 line represents one
-// changed path (tracked-modified, staged, or untracked), which is
-// the granularity the user cares about for a data-loss confirmation.
-//
-// A probe failure — target missing a `.git`, git binary missing,
-// permission denied — returns the underlying error. Callers may
-// choose to swallow it (the plan builder does) because a plan
-// without an uncommitted-changes signal is still useful; the
-// executor sees the same failure at commit time.
-func gitUncommittedCount(target string) (int, error) {
-	cmd := exec.Command("git", "-C", target, "status", "--porcelain")
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, err
-	}
-	trimmed := strings.TrimRight(string(out), "\n")
-	if trimmed == "" {
-		return 0, nil
-	}
-	return strings.Count(trimmed, "\n") + 1, nil
 }
 
 // ExecuteRemove tears down plan.Target: runs the VCS remove command

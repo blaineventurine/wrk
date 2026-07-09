@@ -41,6 +41,27 @@ func (r *Repository) RemoveWorkspace(target string, force bool) error {
 	return r.backend.removeWorkspace(r.Root, abs, force)
 }
 
+// UncommittedCount returns the number of files with uncommitted
+// changes in target. For git this is `git status --porcelain` line
+// count (tracked-modified, staged, or untracked); for jj it is
+// `jj diff --summary` line count against the @ change's parent.
+// Read-only. A probe failure (missing metadata, VCS binary not on
+// PATH, permission denied) surfaces as the returned error; the
+// caller decides whether to swallow it — the remove-plan builder
+// does, because a plan without an uncommitted-changes signal is
+// still useful and the executor sees real failures at commit time.
+//
+// target is canonicalized with filepath.Abs — NOT EvalSymlinks —
+// so callers passing a specific path do not accidentally probe a
+// different workspace via a symlink.
+func (r *Repository) UncommittedCount(target string) (int, error) {
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return 0, err
+	}
+	return r.backend.uncommittedCount(abs)
+}
+
 // ResolveDestination applies the sibling-default policy and refuses
 // destinations that already exist or nest inside a live workspace.
 // Read-only; shared with CreateWorkspace so preflight is single-source.

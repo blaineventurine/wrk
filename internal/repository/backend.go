@@ -43,6 +43,17 @@ type backend interface {
 	// a no-op. Idempotent: if target is not currently tracked as a
 	// live workspace, returns nil.
 	removeWorkspace(root, target string, force bool) error
+
+	// uncommittedCount returns the number of files with uncommitted
+	// changes in target — for git the `git status --porcelain` line
+	// count (tracked-modified, staged, or untracked); for jj the
+	// `jj diff --summary` line count against the @ change's parent.
+	// Read-only. A probe failure (missing metadata, VCS binary not
+	// on PATH, permission denied) surfaces as the returned error;
+	// callers may swallow it because a plan without an uncommitted
+	// signal is still useful and the executor sees real failures at
+	// commit time.
+	uncommittedCount(target string) (int, error)
 }
 
 func backendFor(vcs VCS) (backend, error) {

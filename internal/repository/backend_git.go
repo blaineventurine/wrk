@@ -108,6 +108,27 @@ func (gitBackend) removeWorkspace(root, target string, force bool) error {
 	return passthrough(root, "git", args...)
 }
 
+// uncommittedCount runs `git status --porcelain` in target and counts
+// the non-empty lines. Each porcelain-v1 line represents one changed
+// path (tracked-modified, staged, or untracked), which is the
+// granularity users care about for a data-loss confirmation.
+//
+// A probe failure — target missing a `.git`, git binary missing,
+// permission denied — returns the underlying error. Callers may
+// swallow it because a plan without an uncommitted-changes signal is
+// still useful; the executor sees the same failure at commit time.
+func (gitBackend) uncommittedCount(target string) (int, error) {
+	out, err := capture(target, "git", "status", "--porcelain")
+	if err != nil {
+		return 0, err
+	}
+	trimmed := strings.TrimRight(out, "\n")
+	if trimmed == "" {
+		return 0, nil
+	}
+	return strings.Count(trimmed, "\n") + 1, nil
+}
+
 // parseWorktreePorcelain extracts the roots of live worktrees from
 // `git worktree list --porcelain` output.
 //

@@ -34,6 +34,87 @@ func isolateGitConfig(t *testing.T) {
 	t.Setenv("GIT_COMMITTER_EMAIL", "test@wrk.local")
 }
 
+// skipIfNoJJ skips the current test when the jj binary is not on PATH.
+// Callers that need jj should invoke it after skipIfNoGit — jj shells
+// out to git for colocated repos.
+func skipIfNoJJ(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj not available")
+	}
+}
+
+// isolateJJConfig points XDG_CONFIG_HOME at an empty temp dir so jj
+// does not load the caller's ~/.config/jj/config.toml. jj shells out
+// to git for colocation, so callers MUST also invoke isolateGitConfig.
+// Callers MUST NOT use t.Parallel() — t.Setenv is process-global.
+func isolateJJConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+}
+
+// newTestColocatedJJRepo returns a Repository rooted at a fresh temp
+// dir with a colocated jj+git backend, a stable initial commit, and
+// any files in tracked so secondary jj workspaces created from it
+// inherit them. Mirrors newTestRepoWithHead's contract for jj.
+//
+// tracked maps repository-relative paths to their content; every
+// entry is written into the primary and committed before jj adopts
+// the colocated setup so subsequent `jj workspace add` inherits
+// them. Pass nil to commit just a README placeholder.
+func newTestColocatedJJRepo(
+	t *testing.T,
+	tracked map[string]string,
+) *repository.Repository {
+	t.Helper()
+	skipIfNoGit(t)
+	skipIfNoJJ(t)
+	isolateGitConfig(t)
+	isolateJJConfig(t)
+
+	dir := canonPath(t, t.TempDir())
+
+	run := func(name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+	}
+
+	// git init first (colocated repos have both .git and .jj) then
+	// jj `git init --colocate` adopts the git repo. `-b main` pins
+	// the branch name so the test isn't sensitive to init.defaultBranch.
+	run("git", "init", "-q", "-b", "main")
+
+	if tracked == nil {
+		tracked = map[string]string{"README": "wrk-test\n"}
+	}
+	for rel, content := range tracked {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", "--", rel)
+	}
+	run("git", "commit", "-q", "--allow-empty", "-m", "init")
+
+	run("jj", "git", "init", "--colocate")
+
+	repo, err := repository.Detect(dir, repository.Auto)
+	if err != nil {
+		t.Fatalf("repository.Detect: %v", err)
+	}
+	if repo.VCS() != repository.JJ {
+		t.Fatalf("Detect returned VCS %q, want jj", repo.VCS())
+	}
+	return repo
+}
+
 // newTestRepoWithHead returns a Repository rooted at a fresh temp dir
 // with an initialized git backend, a stable initial commit, and any
 // files in tracked so worktrees created from it inherit them.
