@@ -801,7 +801,7 @@ func TestHelpListsAllSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--help exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
-	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces", "gc"} {
+	for _, sub := range []string{"init", "new", "link", "detach", "relink", "status", "list", "workspaces", "gc", "remove"} {
 		if !strings.Contains(stdout, sub) {
 			t.Errorf("--help output missing subcommand %q; full help:\n%s", sub, stdout)
 		}
@@ -1360,5 +1360,99 @@ func TestMainGCYesDeletesStaleVariant(t *testing.T) {
 	}
 	if _, err := os.Stat(current); err != nil {
 		t.Errorf("current variant %q should survive gc --yes: %v", current, err)
+	}
+}
+
+// setupRemoveFixture stands up a git repo committed to `main` with an
+// empty `.wrk.yml`, then invokes the built binary to create a sibling
+// worktree named "feature". Returns the primary repo root and the
+// absolute feature-workspace path, both canonicalized so downstream
+// comparisons against Workspaces() (which canonicalizes /tmp →
+// /private/tmp on macOS) stay honest.
+func setupRemoveFixture(t *testing.T) (string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+	gitCommitAll(t, repo, "init")
+
+	code, stdout, stderr := runWrk(t, repo,
+		"--storage", storagePath(repo), "new", "feature")
+	if code != 0 {
+		t.Fatalf("wrk new feature: exit = %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+
+	feature := filepath.Join(filepath.Dir(repo), "feature")
+	if canon, err := filepath.EvalSymlinks(feature); err == nil {
+		feature = canon
+	}
+
+	// Parallel-safety: even after the test tempdir cleanup, git may
+	// keep a linked-worktree gitdir under repo/.git/worktrees/feature
+	// that references the (now-deleted) sibling. Prune it here so
+	// re-running the suite in-place doesn't leave orphans behind.
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "-f", feature).Run()
+		_ = os.RemoveAll(feature)
+	})
+
+	return repo, feature
+}
+
+// TestMainRemoveYesDeletesFeature pins the `wrk remove` happy path:
+// with --yes carrying past the non-TTY refusal, the sibling feature
+// worktree is torn down and no longer present on disk.
+func TestMainRemoveYesDeletesFeature(t *testing.T) {
+	testDir, feature := setupRemoveFixture(t)
+
+	code, stdout, stderr := runWrk(t, testDir,
+		"--storage", storagePath(testDir), "remove", feature, "--yes")
+	if code != 0 {
+		t.Fatalf("remove --yes exit = %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("feature dir should be gone after remove --yes, stat err = %v", err)
+	}
+}
+
+// TestMainRemoveRefusesPrimary pins the hard-error branch: pointing
+// `wrk remove` at the primary workspace (the anchor everything else
+// hangs off) must refuse with a clear "primary" message. --yes cannot
+// override this; it is a plan-builder error, not a soft refusal.
+//
+// The command is issued from inside the feature worktree so the
+// current-workspace guard (checked BEFORE the primary guard) doesn't
+// steal the refusal — this test is specifically about the primary
+// check.
+func TestMainRemoveRefusesPrimary(t *testing.T) {
+	testDir, feature := setupRemoveFixture(t)
+
+	code, _, stderr := runWrk(t, feature,
+		"--storage", storagePath(testDir), "remove", testDir, "--yes")
+	if code == 0 {
+		t.Fatalf("remove primary should not exit 0; stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "primary") {
+		t.Errorf("stderr should mention 'primary', got: %q", stderr)
+	}
+}
+
+// TestMainRemoveRefusesNonTTYWithoutYes pins the safety gate: a
+// non-terminal stdin (which `runWrk` always provides — no pty) with
+// no --yes must refuse rather than silently prompt for input nobody
+// will type. Exit is non-zero.
+func TestMainRemoveRefusesNonTTYWithoutYes(t *testing.T) {
+	testDir, feature := setupRemoveFixture(t)
+
+	code, stdout, stderr := runWrk(t, testDir,
+		"--storage", storagePath(testDir), "remove", feature)
+	if code == 0 {
+		t.Errorf("remove without --yes on non-TTY should not exit 0\nstdout:\n%s\nstderr:\n%s",
+			stdout, stderr)
 	}
 }
