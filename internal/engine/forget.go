@@ -118,3 +118,91 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 
 	return plan, nil
 }
+
+// ExecuteForget applies plan.StoragePath removal + registry clear.
+// Assumes the caller has already applied safety gates from
+// BuildForgetPlan / Confirm (a populated Refusal MUST be resolved by
+// --force before reaching here). Idempotent: re-running on an
+// already-applied plan is a no-op.
+//
+// Crash safety uses a rename-then-delete pattern with a sibling
+// marker directory:
+//
+//  1. If <repo-id>/ exists, os.Rename it to <repo-id>.wrk-forgetting/.
+//     Rename is atomic on POSIX filesystems: on either side of the
+//     syscall the storage tree is a single valid directory.
+//  2. os.RemoveAll(<repo-id>.wrk-forgetting/). A crash mid-RemoveAll
+//     leaves the marker on disk; the next ExecuteForget's recovery
+//     branch below finishes the sweep.
+//  3. Under withRegistryLock, clear every detach-registry entry.
+//     Writing {} matches clearDetached's convention (loadRegistry
+//     round-trips {} back to an empty map).
+//
+// The idempotent-recovery branch that runs BEFORE step 1 finishes a
+// prior crash's RemoveAll. A prior crash leaves either:
+//   - marker present, primary path absent → recovery RemoveAll's the
+//     marker, then step 1 sees no primary path and skips to registry.
+//   - marker present, primary path present → user re-created the
+//     primary somehow (unlikely; only via a manual mkdir race with
+//     the previous crash). Recovery still clears the marker so
+//     step 1's rename has a clean target.
+//
+// NOTE: `wrk gc`'s cleanBookkeepingDetect walks INSIDE
+// <storage>/<repo-id>/, so a .wrk-forgetting marker at the
+// storage-root (sibling of <repo-id>/) is invisible to it. Recovery
+// therefore requires the user to re-run `wrk forget`; the marker
+// won't get swept by a stray `wrk gc`. If cross-command recovery
+// becomes important, teach cleanBookkeepingDetect (or a new sibling
+// sweep) to enumerate the storage root for <repo-id>.wrk-forgetting
+// entries. Tracked as a follow-up.
+func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options) error {
+	if plan.StoragePath != "" {
+		marker := plan.StoragePath + ".wrk-forgetting"
+
+		// Idempotent recovery: a prior crash between rename and
+		// RemoveAll left the marker on disk. Finish the delete before
+		// the fresh rename so step 1 has a clean target.
+		if _, err := os.Stat(marker); err == nil {
+			if err := os.RemoveAll(marker); err != nil {
+				return fmt.Errorf("clearing forgetting marker: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		// Fresh rename-then-remove. Missing storage is not an error:
+		// forget on a repo that was never Linked, or that was already
+		// forgotten, still clears the registry.
+		if _, err := os.Stat(plan.StoragePath); err == nil {
+			if err := os.Rename(plan.StoragePath, marker); err != nil {
+				return fmt.Errorf("marking storage for removal: %w", err)
+			}
+			if err := os.RemoveAll(marker); err != nil {
+				return fmt.Errorf("removing marked storage: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	// Registry clear under the same flock that serializes detach /
+	// clearDetached, so a concurrent `wrk detach` on a sibling
+	// workspace cannot silently re-populate the registry between our
+	// load and save.
+	return withRegistryLock(repo, func() error {
+		reg, err := loadRegistry(repo)
+		if err != nil {
+			return err
+		}
+		if len(reg) == 0 {
+			// Nothing to clear — skip the save so we do not create an
+			// empty {} file where none existed. Matches
+			// pruneOrphanRegistryEntries' behaviour.
+			return nil
+		}
+		for k := range reg {
+			delete(reg, k)
+		}
+		return saveRegistry(repo, reg)
+	})
+}

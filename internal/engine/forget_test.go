@@ -128,3 +128,172 @@ func readTreeSnapshot(t *testing.T, root string) string {
 	sort.Strings(paths)
 	return strings.Join(paths, "\n")
 }
+
+func TestExecuteForgetRemovesStorageAndClearsRegistry(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Seed a detach entry so the executor also clears it.
+	reg, _ := loadRegistry(repo)
+	reg[repo.Root] = []string{".env"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+
+	if _, err := os.Stat(plan.StoragePath); !os.IsNotExist(err) {
+		t.Errorf("storage tree survived: %v", err)
+	}
+	// The .wrk-forgetting marker MUST also be gone — a leftover would
+	// mean step 2 (RemoveAll) silently failed.
+	if _, err := os.Stat(plan.StoragePath + ".wrk-forgetting"); !os.IsNotExist(err) {
+		t.Errorf(".wrk-forgetting marker survived: %v", err)
+	}
+	after, _ := loadRegistry(repo)
+	if len(after) != 0 {
+		t.Errorf("registry not cleared: %v", after)
+	}
+	// .wrk.yml stays — forget removes shared storage, not the config.
+	if _, err := os.Stat(filepath.Join(repo.Root, ".wrk.yml")); err != nil {
+		t.Errorf(".wrk.yml missing after forget: %v", err)
+	}
+}
+
+func TestExecuteForgetIdempotentAfterCrash(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	// Seed a crashed .wrk-forgetting marker directly — simulate a
+	// prior forget that got SIGKILL'd between rename and RemoveAll.
+	storagePath := filepath.Join(storage, repo.RepositoryID)
+	marker := storagePath + ".wrk-forgetting"
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(marker, "leftover"), "stale")
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("forgetting marker survived: %v", err)
+	}
+}
+
+func TestExecuteForgetIdempotentRerun(t *testing.T) {
+	// A second ExecuteForget on the same plan MUST be a no-op —
+	// storage already gone, registry already empty.
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget first: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget second: %v", err)
+	}
+}
+
+func TestExecuteForgetEmptyStorageIsNoop(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	storage := storageIn(t, repo.Root)
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget on empty repo: %v", err)
+	}
+}
+
+func TestExecuteForgetSubsequentLinkReprovisions(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link initial: %v", err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+
+	// The Link-installed workspace symlink is now dangling — Link
+	// itself does not un-detach, so we clean up the way a real user
+	// would before re-linking.
+	_ = os.Remove(filepath.Join(repo.Root, ".env"))
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed-again\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link post-forget: %v", err)
+	}
+	sharedEnv := filepath.Join(storage, repo.RepositoryID, ".env")
+	if _, err := os.Stat(sharedEnv); err != nil {
+		t.Errorf("shared file missing post-forget re-link: %v", err)
+	}
+}
+
+func TestExecuteForgetClearsMultiWorkspaceRegistry(t *testing.T) {
+	// A registry with entries from multiple workspaces must be
+	// entirely cleared — forget is a wholesale nuke.
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	reg, _ := loadRegistry(repo)
+	reg["/tmp/ws-a"] = []string{".env"}
+	reg["/tmp/ws-b"] = []string{"cfg.toml"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	// BuildForgetPlan refuses when the registry is non-empty; the
+	// executor is called only past a --force gate, so we skip the
+	// plan builder and construct the plan directly.
+	plan := ForgetPlan{
+		RepositoryID: repo.RepositoryID,
+		StoragePath:  filepath.Join(storage, repo.RepositoryID),
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+	after, _ := loadRegistry(repo)
+	if len(after) != 0 {
+		t.Errorf("registry not fully cleared: %v", after)
+	}
+}
