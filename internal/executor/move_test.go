@@ -376,3 +376,34 @@ func TestExecuteMoveIdempotentCompletesInterruptedSwapFile(t *testing.T) {
 		t.Errorf("destination changed: got %q", got)
 	}
 }
+
+// TestMoveExportedCallsThrough pins the exported Move wrapper: it must
+// forward to the package-private move without altering the atomic-rename
+// semantics. engine.RelinkIsolate depends on this exact contract to
+// migrate a workspace's detached copy into shared storage without
+// rolling its own filesystem-move plumbing.
+func TestMoveExportedCallsThrough(t *testing.T) {
+	dir := t.TempDir()
+
+	source := filepath.Join(dir, "src.txt")
+	destination := filepath.Join(dir, "dst.txt")
+
+	if err := os.WriteFile(source, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Move(source, destination); err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Errorf("source still exists after Move: err=%v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(got) != "content" {
+		t.Errorf("destination content = %q, want %q", got, "content")
+	}
+}

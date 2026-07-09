@@ -141,8 +141,8 @@ func hasNonSharedOrigin(rows []engine.ResourceStatus) bool {
 // hasProblems reports whether any row is in a state that a `wrk link`
 // would fix. This covers actionable failures (conflict, stale, absent)
 // as well as the "not yet run" states a fresh checkout is in
-// (pending, missing, not-linked). Intentional states — detached,
-// expected, linked — are not problems.
+// (pending, missing, not-linked). Intentional resting states —
+// detached, isolated, expected, linked — are not problems.
 func hasProblems(rows []engine.ResourceStatus) bool {
 	for _, r := range rows {
 		switch r.State {

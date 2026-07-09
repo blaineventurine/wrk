@@ -90,12 +90,14 @@ func Execute(plan planner.Plan) error {
 			shared := action.Context.Shared
 
 			if err := withLock(shared, func() error {
-				// Double-check: skip the hook if the shared resource already exists
-				// (a racing process ran the hook first).
-				if _, err := os.Stat(shared); err == nil {
-					return nil
-				} else if !os.IsNotExist(err) {
-					return err
+				if !action.Force {
+					// Double-check: skip the hook if the shared resource already exists
+					// (a racing process ran the hook first).
+					if _, err := os.Stat(shared); err == nil {
+						return nil
+					} else if !os.IsNotExist(err) {
+						return err
+					}
 				}
 
 				return runInitialize(action)
@@ -233,6 +235,12 @@ func environment(env map[string]string) []string {
 // writes to <shared>.wrk-provisioning, and only on success does the
 // scratch get renamed into place. A failed hook leaves nothing at the
 // real path so the next Link re-runs cleanly.
+//
+// When `real` already exists (Force retry via `wrk run`), the old
+// variant is renamed to <shared>.wrk-deleting for the atomic swap and
+// then removed. A crash between the swap-aside and the second rename
+// leaves the .wrk-deleting marker for `wrk gc`'s cleanBookkeepingDetect
+// to sweep on the next run.
 func runInitialize(action planner.InitializeResource) error {
 	real := action.Context.Shared
 	tmp := real + ".wrk-provisioning"
@@ -272,7 +280,8 @@ func runInitialize(action planner.InitializeResource) error {
 		cmd.Stdin = nil
 
 		if err := cmd.Run(); err != nil {
-			// Drop partial scratch so next Link re-runs.
+			// Drop partial scratch so next Link re-runs. Force=true
+			// keeps `real` intact — swap-aside hasn't happened yet.
 			_ = os.RemoveAll(tmp)
 			return fmt.Errorf(
 				"hook command failed: %s (in %s): %w",
@@ -283,20 +292,64 @@ func runInitialize(action planner.InitializeResource) error {
 		}
 	}
 
-	// Commit scratch → real when the hook populated it. Missing tmp
-	// (hook ignored {shared}) leaves real unmaterialized — the next
-	// Link re-runs. The atomic invariant guards against partial output
-	// at real, not against a hook that produces nothing.
-	if _, statErr := os.Lstat(tmp); statErr == nil {
-		if err := os.Rename(tmp, real); err != nil {
+	// Nothing to commit if the hook didn't populate tmp. Force=true
+	// keeps the pre-existing `real` intact — the hook produced no
+	// replacement, so leaving the current variant alone is safer than
+	// deleting it.
+	if _, statErr := os.Lstat(tmp); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		return statErr
+	}
+
+	// Commit: for pre-existing `real` (Force path) rename it aside so
+	// the atomic swap has a clean target. A crash between the two
+	// renames leaves `<variant>.wrk-deleting` for `wrk gc`'s
+	// cleanBookkeepingDetect to sweep.
+	deleting := real + ".wrk-deleting"
+	swappedAside := false
+	if _, err := os.Lstat(real); err == nil {
+		if err := os.RemoveAll(deleting); err != nil {
 			_ = os.RemoveAll(tmp)
 			return fmt.Errorf(
-				"installing hook output from %s into %s: %w",
-				tmp, real, err,
+				"clearing stale swap-aside %s: %w",
+				deleting, err,
 			)
 		}
-	} else if !os.IsNotExist(statErr) {
-		return statErr
+		if err := os.Rename(real, deleting); err != nil {
+			_ = os.RemoveAll(tmp)
+			return fmt.Errorf(
+				"swapping old variant %s aside: %w",
+				real, err,
+			)
+		}
+		swappedAside = true
+	} else if !os.IsNotExist(err) {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+
+	if err := os.Rename(tmp, real); err != nil {
+		_ = os.RemoveAll(tmp)
+		if swappedAside {
+			// Best-effort restore so the workspace symlink is not
+			// left dangling. A failure here still leaves the
+			// .wrk-deleting sibling for gc to sweep.
+			_ = os.Rename(deleting, real)
+		}
+		return fmt.Errorf(
+			"installing hook output from %s into %s: %w",
+			tmp, real, err,
+		)
+	}
+
+	// Old variant is safely aside; delete it. RemoveAll failures are
+	// swept by `wrk gc`'s cleanBookkeepingDetect on the next run — the
+	// atomic swap has already succeeded, so surfacing the error would
+	// wrongly imply the retry failed.
+	if swappedAside {
+		_ = os.RemoveAll(deleting)
 	}
 
 	return nil

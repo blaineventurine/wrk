@@ -540,6 +540,7 @@ Every row of `wrk status` reports one of these per-resource states:
 | `linked` | The workspace path is a symlink pointing at the correct shared copy. | Nothing — this is the healthy state. |
 | `expected` | Nothing exists locally, and the resource is `create: false`. Provided out-of-band (e.g. `direnv`, a secrets manager). | Nothing — the missing file is intentional. |
 | `detached` | You ran `wrk detach`; the workspace path is now an independent local copy. Recorded on purpose. | `wrk link` to reunite with shared storage (keeping local edits requires manual merge), or `wrk relink` to discard local edits and reconnect. |
+| `isolated` | You ran `wrk relink --isolate`; the workspace path is a symlink into a per-workspace variant that no fingerprint maps to. Peer workspaces don't see its content. | To exit isolation, remove the entry from `<metadata>/wrk/isolated.json` manually (a `wrk` command is coming). |
 | `pending` | Nothing exists yet, but an `initialize` hook is configured. | `wrk link` — the hook runs, then the symlink is installed. |
 | `missing` | The shared copy exists but the workspace symlink is not in place. | `wrk link`. |
 | `not-linked` | A real local copy exists but no shared copy yet. | `wrk link` — the local copy moves into shared storage and a symlink takes its place. |
@@ -547,7 +548,7 @@ Every row of `wrk status` reports one of these per-resource states:
 | `conflict` | Both a real local copy AND a shared copy exist. `wrk link` refuses to clobber either. | Decide which one is authoritative. Delete the workspace copy and run `wrk link` to accept the shared copy, or run `wrk detach` to accept the workspace copy and keep it independent. |
 | `absent` | Nothing exists anywhere, no `initialize` hook is configured, and `create` is `true`. wrk has no way to produce it. | Provide the file, add a hook, or (if the file is provided externally) set `create: false`. |
 
-`wrk status --exit-code` treats every state except `linked`, `expected`, and `detached` as a problem — those three are stable resting states, everything else needs attention.
+`wrk status --exit-code` treats every state except `linked`, `expected`, `detached`, and `isolated` as a problem — those four are stable resting states, everything else needs attention.
 
 Workspace states are a rollup of the [resource states](#resource-states) above:
 
@@ -555,7 +556,8 @@ Workspace states are a rollup of the [resource states](#resource-states) above:
 |---|---|
 | `linked` | Every resource is `linked` or `expected`. Nothing to do. |
 | `detached` | Every resource is `detached`. |
-| `partial` | A mix of `linked` and `detached` resources — deliberate mid-state. |
+| `isolated` | Every resource is `isolated`. |
+| `partial` | A mix of `linked`, `detached`, and `isolated` resources — deliberate mid-state. |
 | `pending` | At least one resource is `pending` (waiting for its initialize hook). Otherwise healthy. |
 | `unhealthy` | At least one resource needs user action — `conflict`, `stale`, `missing`, `not-linked`, or `absent`. |
 

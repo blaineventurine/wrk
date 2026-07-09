@@ -189,3 +189,227 @@ func TestRunInitializeEmptyRunReturnsError(t *testing.T) {
 		t.Errorf("expected 'no arguments' in error, got %v", err)
 	}
 }
+
+// TestRunInitializeForceSwapsExistingVariant pins the swap-aside
+// contract for the Force path: given a pre-existing variant at
+// `real`, runInitialize atomically replaces its contents with the
+// hook's output. The old marker file must vanish, the new one must
+// appear, and neither the `.wrk-provisioning` scratch nor the
+// `.wrk-deleting` swap-aside may survive the successful run.
+//
+// Without Force the executor's outer double-check would refuse to
+// touch a pre-existing `real`, so this exercises the swap path
+// directly on runInitialize where the check is bypassed.
+func TestRunInitializeForceSwapsExistingVariant(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+
+	// Seed the "already provisioned" state with an identifying marker.
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "old-marker"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	action := planner.InitializeResource{
+		Description: "test-force",
+		Context: placeholders.Context{
+			Root:   root,
+			Shared: shared,
+		},
+		Commands: []config.Command{
+			{
+				Run: "sh -c 'mkdir -p {shared} && touch {shared}/new-marker'",
+				Cwd: root,
+			},
+		},
+		Force: true,
+	}
+
+	if err := runInitialize(action); err != nil {
+		t.Fatalf("runInitialize: %v", err)
+	}
+
+	// New marker present, old marker gone — the swap was atomic.
+	if _, err := os.Stat(filepath.Join(shared, "new-marker")); err != nil {
+		t.Errorf("new-marker missing after Force run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "old-marker")); !os.IsNotExist(err) {
+		t.Errorf("old-marker survived Force run: err=%v", err)
+	}
+
+	// Neither scratch nor swap-aside siblings may linger — a
+	// successful run cleans both.
+	if _, err := os.Lstat(shared + ".wrk-provisioning"); !os.IsNotExist(err) {
+		t.Errorf("provisioning scratch survived: err=%v", err)
+	}
+	if _, err := os.Lstat(shared + ".wrk-deleting"); !os.IsNotExist(err) {
+		t.Errorf("deleting sibling survived: err=%v", err)
+	}
+}
+
+// TestRunInitializeForceHookFailureLeavesOldVariantIntact pins the
+// rollback contract: when the Force hook exits non-zero after `real`
+// has been established, the pre-existing variant must remain intact
+// (its contents unchanged) and the surfaced error must name the
+// hook failure. The invariant is that the caller sees either the new
+// state (swap completed) OR the old state (swap rolled back), never a
+// half-populated `real`.
+//
+// Failure BEFORE the swap-aside is the important case: no `.wrk-deleting`
+// sibling has been created yet, so no rollback is needed and `real`
+// stays exactly as seeded.
+func TestRunInitializeForceHookFailureLeavesOldVariantIntact(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "old-marker"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	action := planner.InitializeResource{
+		Description: "test-force-fail",
+		Context: placeholders.Context{
+			Root:   root,
+			Shared: shared,
+		},
+		Commands: []config.Command{
+			// mkdir into scratch, then exit non-zero. runInitialize
+			// cleans the scratch and never reaches the swap.
+			{
+				Run: "sh -c 'mkdir -p {shared} && exit 7'",
+				Cwd: root,
+			},
+		},
+		Force: true,
+	}
+
+	err := runInitialize(action)
+	if err == nil {
+		t.Fatal("expected hook failure error, got nil")
+	}
+	if !strings.Contains(err.Error(), "hook command failed") {
+		t.Errorf("expected 'hook command failed', got %v", err)
+	}
+
+	// The pre-existing variant must remain intact.
+	got, readErr := os.ReadFile(filepath.Join(shared, "old-marker"))
+	if readErr != nil {
+		t.Fatalf("old-marker vanished after failed Force run: %v", readErr)
+	}
+	if string(got) != "keep" {
+		t.Errorf("old-marker contents mutated: got %q, want %q", got, "keep")
+	}
+
+	// runInitialize cleans its own scratch on hook failure. The swap
+	// hasn't happened, so no .wrk-deleting sibling either.
+	if _, err := os.Lstat(shared + ".wrk-provisioning"); !os.IsNotExist(err) {
+		t.Errorf("provisioning scratch survived hook failure: err=%v", err)
+	}
+	if _, err := os.Lstat(shared + ".wrk-deleting"); !os.IsNotExist(err) {
+		t.Errorf("deleting sibling should not exist pre-swap: err=%v", err)
+	}
+}
+
+// TestRunInitializeForceEmptyHookLeavesRealIntact pins the "hook
+// produced nothing" edge case for the Force path: a hook that runs
+// successfully but writes nothing into {shared} MUST NOT wipe the
+// pre-existing variant. The atomic invariant is stronger than
+// naïvely "always swap"; if the hook makes no scratch to install,
+// the old variant is safer than an empty one.
+func TestRunInitializeForceEmptyHookLeavesRealIntact(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "old-marker"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	action := planner.InitializeResource{
+		Description: "test-force-empty",
+		Context: placeholders.Context{
+			Root:   root,
+			Shared: shared,
+		},
+		Commands: []config.Command{
+			// `true` succeeds without touching {shared}.
+			{Run: "true", Cwd: root},
+		},
+		Force: true,
+	}
+
+	if err := runInitialize(action); err != nil {
+		t.Fatalf("runInitialize: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(shared, "old-marker"))
+	if err != nil {
+		t.Fatalf("old-marker vanished after empty Force run: %v", err)
+	}
+	if string(got) != "keep" {
+		t.Errorf("old-marker contents changed: got %q, want %q", got, "keep")
+	}
+	if _, err := os.Lstat(shared + ".wrk-deleting"); !os.IsNotExist(err) {
+		t.Errorf("deleting sibling should not exist: err=%v", err)
+	}
+}
+
+// TestExecuteInitializeResourceForceReplacesExistingVariant pins the
+// full Execute path with Force=true: a plan whose sole action carries
+// Force=true against a shared path that already exists MUST re-run
+// the hook (the outer double-check is bypassed) and swap the variant
+// contents in place.
+//
+// Contrast with TestRunInitializePreExistingSharedNotDisturbed, which
+// pins the exact same setup with Force=false: the hook is skipped
+// and the peer's content is preserved.
+func TestExecuteInitializeResourceForceReplacesExistingVariant(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "resource")
+
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "peer-content"), []byte("peer-wrote-this"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := planner.Plan{
+		Actions: []planner.PlannedAction{
+			{
+				Action: planner.InitializeResource{
+					Description: "test-force-execute",
+					Context: placeholders.Context{
+						Root:   root,
+						Shared: shared,
+					},
+					Commands: []config.Command{
+						{
+							Run: "sh -c 'mkdir -p {shared} && touch {shared}/hook-ran'",
+							Cwd: root,
+						},
+					},
+					Force: true,
+				},
+			},
+		},
+	}
+
+	if err := Execute(plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(shared, "hook-ran")); err != nil {
+		t.Errorf("hook did not re-run under Force: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "peer-content")); !os.IsNotExist(err) {
+		t.Errorf("peer-content survived Force: err=%v", err)
+	}
+}

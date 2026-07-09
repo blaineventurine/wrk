@@ -54,6 +54,18 @@ func move(source, destination string) error {
 	return nil
 }
 
+// Move relocates source to destination. It first attempts an atomic
+// rename; on cross-device failure it falls back to a staged copy so
+// a partial copy never replaces the source.
+//
+// Exported wrapper around move; used by engine.RelinkIsolate to
+// migrate a workspace's detached copy into shared storage. Prefer
+// this over hand-rolling filesystem moves — the cross-device path is
+// tested and the failure semantics are load-bearing.
+func Move(source, destination string) error {
+	return move(source, destination)
+}
+
 // copyPath copies a file or directory from source to destination.
 //
 // Uses Lstat rather than Stat so a symlink at source is detected and

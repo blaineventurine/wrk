@@ -227,6 +227,22 @@ func pinnedVariantsForRoots(
 		}
 	}
 
+	// Pin isolation targets too. The per-resource symlink walk above
+	// already catches an isolated variant whose workspace symlink
+	// resolves to it, but the isolation registry is the authoritative
+	// pin: if a user temporarily removes the workspace symlink (say,
+	// to inspect state) or a partial isolate left the filesystem out
+	// of sync, the registry still tells us the variant is claimed.
+	// Losing an isolated variant to gc would silently destroy a
+	// workspace's private state — belt-and-suspenders here is cheap.
+	targets, err := isolationTargets(repo)
+	if err != nil {
+		return pinned, unreachable, err
+	}
+	for _, t := range targets {
+		pinned[t] = true
+	}
+
 	return pinned, unreachable, nil
 }
 

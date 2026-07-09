@@ -96,3 +96,115 @@ func TestRelinkFlagsYesRegistered(t *testing.T) {
 		t.Fatal("--yes and -y must be the same flag (bound to relinkYes)")
 	}
 }
+
+// TestRelinkIsolateFlagRegistered pins that --isolate is wired on
+// relinkCmd. If this drifts, the whole Task 3.5 CLI surface silently
+// disappears — `wrk relink --isolate` would fail as "unknown flag"
+// after already having survived through review.
+func TestRelinkIsolateFlagRegistered(t *testing.T) {
+	if relinkCmd.Flags().Lookup("isolate") == nil {
+		t.Fatal("--isolate flag not registered on relinkCmd")
+	}
+}
+
+// TestRelinkArgsRejectsPositionalWithoutIsolate pins the positional-
+// args guard: `wrk relink node` without --isolate is a typo, not a
+// scoped relink, and MUST be rejected before RunE ever touches the
+// engine. The relinkIsolate package-global is snapshot/restored to
+// avoid test-order dependence on other tests that flip the flag.
+func TestRelinkArgsRejectsPositionalWithoutIsolate(t *testing.T) {
+	old := relinkIsolate
+	defer func() { relinkIsolate = old }()
+	relinkIsolate = false
+
+	err := relinkCmd.Args(relinkCmd, []string{"node"})
+	if err == nil {
+		t.Fatal("expected error for positional arg without --isolate")
+	}
+	if !strings.Contains(err.Error(), "--isolate") {
+		t.Fatalf("error should reference --isolate so users know the fix, got: %v", err)
+	}
+}
+
+// TestRelinkArgsAcceptsPositionalWithIsolate pins the other half of
+// the guard: with --isolate set, one or many positional resource
+// names are the whole point of the flag. Zero args are also legal
+// (means "isolate every detached resource"), so we verify all three.
+func TestRelinkArgsAcceptsPositionalWithIsolate(t *testing.T) {
+	old := relinkIsolate
+	defer func() { relinkIsolate = old }()
+	relinkIsolate = true
+
+	for _, args := range [][]string{
+		{},
+		{"node"},
+		{"node", "env"},
+	} {
+		if err := relinkCmd.Args(relinkCmd, args); err != nil {
+			t.Errorf("unexpected error for args %v with --isolate: %v", args, err)
+		}
+	}
+}
+
+// TestConfirmRelinkIsolateYesSkipsPrompt pins the --yes short-circuit:
+// the prompt path must never touch stdin (a closed pipe would panic).
+// This mirrors TestConfirmRelinkYesSkipsPrompt for the isolate flow.
+func TestConfirmRelinkIsolateYesSkipsPrompt(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pw.Close()
+	defer func() { _ = pr.Close() }()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = outR.Close() }()
+	defer func() { _ = outW.Close() }()
+
+	if err := confirmRelinkIsolate(true, pr, outW); err != nil {
+		t.Fatalf("confirmRelinkIsolate(yes=true) = %v, want nil", err)
+	}
+	_ = outW.Close()
+	written, _ := io.ReadAll(outR)
+	if len(written) != 0 {
+		t.Fatalf("--yes should produce no banner/prompt, got: %q", written)
+	}
+}
+
+// TestConfirmRelinkIsolateNonTTYRefuses pins the non-interactive
+// safety gate: a pipe stdin without --yes is a script that didn't
+// consent, so we refuse and name --yes in the error so the caller
+// knows what to add. The banner must NOT print — that would confuse
+// stderr-parsing scripts.
+func TestConfirmRelinkIsolateNonTTYRefuses(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pw.Close()
+	defer func() { _ = pr.Close() }()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = outR.Close() }()
+	defer func() { _ = outW.Close() }()
+
+	err = confirmRelinkIsolate(false, pr, outW)
+	if err == nil {
+		t.Fatal("confirmRelinkIsolate(yes=false, non-tty) should error")
+	}
+	if !strings.Contains(err.Error(), "--yes required") {
+		t.Fatalf("error should reference --yes required, got: %v", err)
+	}
+
+	_ = outW.Close()
+	written, _ := io.ReadAll(outR)
+	if len(written) != 0 {
+		t.Fatalf("non-tty refusal should not print the interactive banner, got: %q", written)
+	}
+}

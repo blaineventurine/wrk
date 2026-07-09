@@ -38,6 +38,7 @@ const (
 	StateNotLinked State = "not-linked" // real copy present, not yet shared
 	StatePending   State = "pending"    // nothing locally, no shared, hook available
 	StateStale     State = "stale"      // symlink -> wrong target
+	StateIsolated  State = "isolated"   // symlink -> per-workspace variant pinned via wrk relink --isolate
 )
 
 // Status reports the state of every configured resource for the given
@@ -53,6 +54,11 @@ func Status(
 	printWarnings(cfg, options.Stdout)
 
 	reg, err := loadRegistry(repo)
+	if err != nil {
+		return nil, err
+	}
+
+	iso, err := loadIsolation(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +83,9 @@ func Status(
 			derived := deriveState(instance, loc, state)
 			if derived == StateConflict && isDetached(reg, repo.Root, instance.RelativePath) {
 				derived = StateDetached
+			}
+			if _, isolated := isIsolated(iso, repo.Root, instance.RelativePath); isolated {
+				derived = StateIsolated
 			}
 
 			report.Rows = append(report.Rows, ResourceStatus{

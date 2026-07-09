@@ -41,8 +41,12 @@ func buildPlan(
 		}
 	}
 
-	var plan planner.Plan
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return planner.Plan{}, err
+	}
 
+	var plan planner.Plan
 	for _, resource := range cfg.Resources {
 		instances, err := resolver.Resolve(repo.Root, resource)
 		if err != nil {
@@ -50,6 +54,15 @@ func buildPlan(
 		}
 
 		for _, instance := range instances {
+			// Skip isolated resources: this workspace has explicitly
+			// pinned a private per-workspace variant via
+			// `wrk relink --isolate`. Link/relink/detach must leave
+			// it alone — repointing the symlink would silently undo
+			// the user's isolation, and detaching would clobber the
+			// isolated bytes with a workspace copy.
+			if _, isolated := isIsolated(iso, repo.Root, instance.RelativePath); isolated {
+				continue
+			}
 			loc, err := location.For(
 				options.StorageRoot,
 				repo.RepositoryID,

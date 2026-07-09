@@ -39,6 +39,13 @@ type InitializeResource struct {
 	Description string
 	Context     placeholders.Context
 	Commands    []config.Command
+	// Force reprovisions the shared variant even when it already exists.
+	// The executor renames the current variant aside, runs the hook into
+	// a fresh scratch, then swaps the scratch into place — an atomic
+	// rename-then-remove of the old variant. Callers use this for
+	// explicit retry semantics (`wrk run`); the normal Link path leaves
+	// it false so the existing shared variant is preserved.
+	Force bool
 }
 
 func (InitializeResource) isAction() {}

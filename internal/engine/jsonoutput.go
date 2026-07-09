@@ -131,7 +131,12 @@ func MarshalStatusJSON(report *StatusReport, primaryRoot string) ([]byte, error)
 //   - any pending           → "pending"
 //   - every resource is linked or expected → "linked"
 //   - every resource is detached          → "detached"
+//   - every resource is isolated          → "isolated"
 //   - otherwise             → "partial"
+//
+// `isolated` is a resting state — treated on par with linked/detached —
+// but a workspace that mixes isolated with linked/detached is "partial"
+// rather than any single resting label.
 func rollupState(states []State) string {
 	if len(states) == 0 {
 		return "empty"
@@ -139,26 +144,35 @@ func rollupState(states []State) string {
 	var hasUnhealthy, hasPending bool
 	allLinkedOrExpected := true
 	allDetached := true
+	allIsolated := true
 	for _, s := range states {
 		switch s {
 		case StateConflict, StateStale, StateMissing, StateNotLinked, StateAbsent:
 			hasUnhealthy = true
 			allLinkedOrExpected = false
 			allDetached = false
+			allIsolated = false
 		case StatePending:
 			hasPending = true
 			allLinkedOrExpected = false
 			allDetached = false
+			allIsolated = false
 		case StateLinked, StateExpected:
 			allDetached = false
+			allIsolated = false
 		case StateDetached:
 			allLinkedOrExpected = false
+			allIsolated = false
+		case StateIsolated:
+			allLinkedOrExpected = false
+			allDetached = false
 		default:
 			// Unknown states err on the side of unhealthy so the
 			// workspace never falsely rolls up as healthy.
 			hasUnhealthy = true
 			allLinkedOrExpected = false
 			allDetached = false
+			allIsolated = false
 		}
 	}
 	switch {
@@ -170,6 +184,8 @@ func rollupState(states []State) string {
 		return "linked"
 	case allDetached:
 		return "detached"
+	case allIsolated:
+		return "isolated"
 	default:
 		return "partial"
 	}
