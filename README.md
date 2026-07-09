@@ -391,6 +391,99 @@ wrk relink
 > work and reconnect to shared storage. Destructive actions are flagged in
 > the plan output with a ⚠ warning.
 
+### Cleanup
+
+Reclaim disk, tear down worktrees, or forget a repository entirely. All three
+commands print a plan first, prompt for confirmation on an interactive
+terminal, and refuse without `--yes` when stdin isn't a TTY. Add `--dry-run`
+to preview without executing.
+
+#### `wrk gc` — reclaim disk
+
+```bash
+wrk gc                # plan → confirm → execute
+wrk gc --yes          # skip the prompt (e.g. cron / CI)
+wrk gc --dry-run      # show the plan, do nothing
+```
+
+`wrk gc` runs three sweeps against the current repository:
+
+- **Ghost workspaces** — worktrees whose working directory is gone but
+  VCS metadata still references them. `wrk gc` runs `git worktree prune`
+  or `jj workspace forget` for each ghost. After this step, subsequent
+  operations see a consistent view of live workspaces.
+- **Unused fingerprint variants** — variant subdirectories under
+  `<storage>/<repo-id>/<resource>/` that aren't symlinked from any live
+  workspace. A variant is considered *in use* if a live workspace's
+  resource path resolves under it; detached workspaces don't pin their
+  previous variant. Concurrent `wrk link` operations are respected: a
+  variant whose lock is currently held is skipped with a warning.
+- **Stale bookkeeping** — orphaned `.wrk-lock` files, `.wrk-provisioning`
+  scratch dirs whose lock is free, and `.wrk-deleting` markers left by
+  a previous crashed `wrk gc`.
+
+Storage-side deletes use rename-then-remove: a variant is renamed to
+`<variant>.wrk-deleting/` before `RemoveAll` runs, so a crash mid-delete
+leaves a marker the next `wrk gc` sweeps up.
+
+#### `wrk remove <workspace>` — tear down a worktree
+
+```bash
+wrk remove feature-auth       # bare name, resolved as a sibling of the primary
+wrk remove ../feature-auth    # explicit relative path
+wrk remove /abs/path/to/wt    # absolute path
+wrk remove feature-auth --yes # skip the prompt
+```
+
+`wrk remove` combines `git worktree remove` (or `jj workspace forget`)
+with cleanup of the workspace's detach-registry entry, so `wrk status
+--all` stays consistent afterwards.
+
+Hard refusals (cannot be overridden):
+
+- The primary workspace of the repository.
+- The workspace the command is currently running from.
+
+Soft refusals (overridable with `--force`):
+
+- Uncommitted VCS changes in the target.
+- Detached files (`wrk detach` was run in the target — the independent
+  local copies would be lost).
+
+Ghost workspaces route the user to `wrk gc`:
+
+```
+$ wrk remove old-feature
+Refusing: old-feature is not a live workspace; VCS metadata and/or a
+detach registry entry still reference it. Run 'wrk gc' to sweep the ghost.
+```
+
+#### `wrk forget` — remove all wrk state for the current repo
+
+```bash
+wrk forget            # plan → confirm → execute
+wrk forget --yes      # skip the prompt
+wrk forget --dry-run  # show what would be removed
+```
+
+`wrk forget` deletes the entire `<storage>/<repo-id>/` subtree (every
+variant of every resource) and clears the detach registry for this repo.
+`.wrk.yml`, working files, and VCS metadata are left untouched.
+
+After `wrk forget`, a subsequent `wrk link` re-provisions from scratch —
+new fingerprints are computed against the current manifests, initialize
+hooks re-run, symlinks are re-created.
+
+`wrk forget` refuses without `--force` when any workspace has detached
+files, since forgetting shared storage while local copies exist would
+leave those workspaces stranded. Reconnect them first with `wrk relink
+--yes`, or pass `--force` to proceed anyway.
+
+Removal is atomic: `<storage>/<repo-id>/` is renamed to
+`<storage>/<repo-id>.wrk-forgetting/` (single rename), then removed.
+A crash between the rename and the registry clear leaves the marker;
+re-run `wrk forget` to finish the sweep.
+
 ### Introspection (read-only)
 
 Show the state of every managed resource in the current workspace:
