@@ -32,8 +32,8 @@ seed "$D"
 ( cd "$D" && "$WRK" init > /dev/null 2>&1 )
 ( cd "$D" && expect_exit 2 "$WRK init" )
 
-subsec "A.4: --force overwrites"
-( cd "$D" && expect_exit 0 "$WRK init --force" )
+subsec "A.4: --force overwrites (--yes bypasses non-TTY consent)"
+( cd "$D" && expect_exit 0 "$WRK init --force --yes" )
 
 subsec "A.5: refuses outside a repo"
 D=$SCRATCH/A5

@@ -1,14 +1,28 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
-var initForce bool
+// initForce is bound to `--force`. Present so a user with a
+// pre-existing `.wrk.yml` can regenerate it without moving the file
+// out of the way.
+//
+// initYes is bound to `--yes`/`-y`. Only meaningful under --force
+// against a repo whose `.wrk.yml` already exists: the CLI prints
+// "Overwriting: <path>" and prompts for confirmation on a TTY, and
+// --yes/--force skip the prompt (matching every other destructive
+// command).
+var (
+	initForce bool
+	initYes   bool
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -18,13 +32,48 @@ var initCmd = &cobra.Command{
 		"seeded with sensible defaults. Must be run inside a git or jj " +
 		"repository — the file is always written at the repository root, " +
 		"not the current working directory. Refuses to overwrite an " +
-		"existing file unless --force is passed.",
+		"existing file unless --force is passed.\n\n" +
+		"When --force overwrites an existing .wrk.yml the CLI prints " +
+		"'Overwriting: <path>' first and prompts for confirmation on an " +
+		"interactive terminal. Non-interactive callers must pass --yes.",
 	Args: cobra.NoArgs,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
 			return err
+		}
+
+		target := filepath.Join(repo.Root, ".wrk.yml")
+
+		// --force against an existing .wrk.yml is the ONLY destructive
+		// branch of this command (a fresh init writes a brand-new file
+		// via O_EXCL). Print the plan-shaped "Overwriting" line and
+		// gate on Confirm so the user gets the same explicit-consent
+		// UX every other destructive command provides.
+		if initForce && !dryRun {
+			if _, statErr := os.Stat(target); statErr == nil {
+				fmt.Fprintf(os.Stdout, "Overwriting existing config: %s\n\n", target)
+
+				dec, err := Confirm(ConfirmOptions{
+					Yes: initYes,
+					// initForce is a permission flag ("allow
+					// overwrite"), not a consent flag — a user who
+					// typed --force still deserves the prompt so a
+					// stray shell history entry doesn't nuke their
+					// config. --yes/-y is the consent flag.
+					Force:  false,
+					DryRun: false,
+					Stdin:  os.Stdin,
+					Stdout: os.Stdout,
+				})
+				if err != nil {
+					return err
+				}
+				if dec != Proceed {
+					return nil
+				}
+			}
 		}
 
 		return engine.Init(engine.InitOptions{
@@ -43,6 +92,11 @@ func init() {
 		&initForce,
 		"force", "f", false,
 		"Overwrite an existing .wrk.yml",
+	)
+	initCmd.Flags().BoolVarP(
+		&initYes,
+		"yes", "y", false,
+		"Skip the overwrite confirmation prompt (implies --force is safe to apply)",
 	)
 
 	initCmd.Flags().BoolVar(

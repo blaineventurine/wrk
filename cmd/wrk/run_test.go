@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +44,56 @@ func TestRunCmdRequiresExactlyOneArg(t *testing.T) {
 func TestRunCmdDryRunFlagRegistered(t *testing.T) {
 	if runCmd.Flags().Lookup("dry-run") == nil {
 		t.Fatal("--dry-run flag not registered on runCmd")
+	}
+}
+
+// TestRunFlagsYesRegistered pins the flag wiring for `wrk run --yes`
+// / `-y`. A future refactor that dropped the short form would still
+// pass every other test in this file — this one exists so that class
+// of drift is caught at build+test time.
+func TestRunFlagsYesRegistered(t *testing.T) {
+	long := runCmd.Flags().Lookup("yes")
+	if long == nil {
+		t.Fatal("--yes flag not registered on runCmd")
+	}
+	short := runCmd.Flags().ShorthandLookup("y")
+	if short == nil {
+		t.Fatal("-y shorthand not registered on runCmd")
+	}
+	if long != short {
+		t.Fatal("--yes and -y must be the same flag (bound to runYes)")
+	}
+}
+
+// TestRunFlagsForceRegistered pins `wrk run --force` — parity with
+// the other destructive commands. Run has no soft refusal today, so
+// --force behaves as a stronger --yes; the flag still exists so
+// scripts that pass --force across all destructive commands do not
+// need a special-case for run.
+func TestRunFlagsForceRegistered(t *testing.T) {
+	if runCmd.Flags().Lookup("force") == nil {
+		t.Fatal("--force flag not registered on runCmd")
+	}
+}
+
+// TestRunRefusesUnknownResourceExitsTwo pins that the RunE surfaces
+// the engine's "not configured" error to stderr with exit code 2.
+// The confirm path is never reached because BuildRunPlan errors
+// first — this test guards that the plan builder still runs before
+// Confirm asks anything.
+func TestRunRefusesUnknownResourceExitsTwo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".wrk.yml"), "resources: []\n")
+
+	code, _, stderr := runWrk(t, repo, "run", "nope", "--yes")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (stderr: %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, `"nope" not configured`) {
+		t.Fatalf("stderr should surface the engine's unknown-resource error, got: %q", stderr)
 	}
 }

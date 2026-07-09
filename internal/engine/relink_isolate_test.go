@@ -482,3 +482,54 @@ func TestRelinkIsolateIsolatedPathLayout(t *testing.T) {
 			entry.StoragePath, expectedPrefix)
 	}
 }
+// TestBuildRelinkIsolatePlanUnknownResourceErrors pins that the
+// "not configured" refusal survives the Build/Execute split — the
+// CLI's Confirm prompt must never appear for a typo'd name.
+func TestBuildRelinkIsolatePlanUnknownResourceErrors(t *testing.T) {
+	root := t.TempDir()
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename, isolateConfigYAML)
+	_ = root
+
+	_, err := BuildRelinkIsolatePlan(repo, []string{"nope"}, Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("BuildRelinkIsolatePlan(unknown): err = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), `"nope" not configured`) {
+		t.Fatalf("error should name the unknown resource, got: %v", err)
+	}
+}
+
+// TestBuildRelinkIsolatePlanNilRepoErrors pins the nil-guard on the
+// split. A nil repo would deref inside config.Load and produce a
+// confusing panic instead of a caller-actionable error.
+func TestBuildRelinkIsolatePlanNilRepoErrors(t *testing.T) {
+	_, err := BuildRelinkIsolatePlan(nil, nil, Options{Stdout: &bytes.Buffer{}})
+	if err == nil {
+		t.Fatal("BuildRelinkIsolatePlan(nil, ...): err = nil, want non-nil")
+	}
+}
+
+// TestBuildRelinkIsolatePlanNothingDetachedErrors pins that an
+// empty resourceNames slice against a workspace with no detach
+// entries is a hard error, not a no-op. Users who fired `wrk relink
+// --isolate` with nothing to isolate almost certainly meant to
+// isolate something; a silent success would hide the mistake.
+func TestBuildRelinkIsolatePlanNothingDetachedErrors(t *testing.T) {
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename, isolateConfigYAML)
+
+	_, err := BuildRelinkIsolatePlan(repo, nil, Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("BuildRelinkIsolatePlan(empty, no detached): err = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "no detached resources") {
+		t.Fatalf("error should mention no detached resources, got: %v", err)
+	}
+}

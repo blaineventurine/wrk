@@ -657,7 +657,7 @@ func TestDetachThenSecondDetachIdempotent(t *testing.T) {
 	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
 		t.Fatalf("link failed: exit=%d stderr=%s", code, stderr)
 	}
-	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach"); code != 0 {
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach", "--yes"); code != 0 {
 		t.Fatalf("first detach failed: exit=%d stderr=%s", code, stderr)
 	}
 
@@ -671,7 +671,7 @@ func TestDetachThenSecondDetachIdempotent(t *testing.T) {
 	}
 
 	// Second detach: must succeed and preserve the detached record.
-	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "detach")
+	code, stdout, stderr := runWrk(t, repo, "--storage", storage, "detach", "--yes")
 	if code != 0 {
 		t.Fatalf("second detach exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
@@ -824,7 +824,7 @@ func TestRelinkYesInNonTTYExecutes(t *testing.T) {
 	if code, _, stderr := runWrk(t, repo, "--storage", storage, "link"); code != 0 {
 		t.Fatalf("link setup failed: exit=%d stderr=%s", code, stderr)
 	}
-	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach"); code != 0 {
+	if code, _, stderr := runWrk(t, repo, "--storage", storage, "detach", "--yes"); code != 0 {
 		t.Fatalf("detach setup failed: exit=%d stderr=%s", code, stderr)
 	}
 

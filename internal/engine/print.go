@@ -30,6 +30,14 @@ func (x *writer) println(args ...any) {
 	_, x.err = fmt.Fprintln(x.w, args...)
 }
 
+// PrintPlan is the exported wrapper around printPlan for CLI callers
+// that need the same plan diagnostic block the monolithic wrappers
+// print internally. The engine keeps printPlan lowercase to discourage
+// non-CLI consumers from coupling to the exact output shape.
+func PrintPlan(w io.Writer, plan planner.Plan) error {
+	return printPlan(w, plan)
+}
+
 func printPlan(w io.Writer, plan planner.Plan) error {
 	out := &writer{w: w}
 

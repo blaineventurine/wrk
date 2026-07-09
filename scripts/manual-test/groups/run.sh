@@ -47,7 +47,7 @@ timestamp1=$(cat "$D/node_modules/timestamp.txt" 2>/dev/null || echo "")
 # date +%s%N resolution is nanoseconds, but sh built-in may fall back
 # to seconds on macOS. Sleep beyond the largest observed granularity.
 sleep 1
-( cd "$D" && expect_exit 0 "$WRK --storage $S run node" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S run node --yes" )
 timestamp2=$(cat "$D/node_modules/timestamp.txt" 2>/dev/null || echo "")
 if [ -n "$timestamp1" ] && [ -n "$timestamp2" ] && [ "$timestamp1" != "$timestamp2" ]; then
   _mark_pass

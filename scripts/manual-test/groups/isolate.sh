@@ -52,7 +52,7 @@ iso_config "$D"
 ( cd "$D" && git add -A && git commit -q -m init )
 S=$SCRATCH/storage/I1
 ( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
-( cd "$D" && expect_exit 0 "$WRK --storage $S detach" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S detach --yes" )
 ( cd "$D" && expect_exit 0 "$WRK --storage $S relink --isolate --yes" )
 # Workspace path should now be a symlink into an isolated-<hex> variant.
 target=$(readlink "$D/node_modules" 2>/dev/null || echo NONE)
@@ -72,11 +72,11 @@ iso_config "$D"
 ( cd "$D" && git add -A && git commit -q -m init )
 S=$SCRATCH/storage/I2
 ( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
-( cd "$D" && expect_exit 0 "$WRK --storage $S detach" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S detach --yes" )
 # expect_contains runs the command through eval; stdin is inherited
-# from the harness's non-TTY stdin, so the confirmRelinkIsolate
+# from the harness's non-TTY stdin, so the shared Confirm helper's
 # non-TTY refusal path fires without needing an explicit </dev/null.
-( cd "$D" && expect_contains "--yes required" "$WRK --storage $S relink --isolate" )
+( cd "$D" && expect_contains "requires --yes" "$WRK --storage $S relink --isolate" )
 
 subsec "I.3: --isolate on a linked (non-detached) resource errors"
 D=$SCRATCH/I3

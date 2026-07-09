@@ -610,3 +610,58 @@ func TestDetectOrphanRegistryEntriesSortedOutput(t *testing.T) {
 		}
 	}
 }
+// TestExecuteDetachRecordsWithoutPrinting pins the CLI-facing split:
+// ExecuteDetach records intent AND runs the plan while writing
+// nothing to options.Stdout (the CLI already printed via
+// engine.PrintPlan). A regression that put printPlan back inside
+// ExecuteDetach would cause `wrk detach` to double-print, so this
+// captures Stdout and asserts it stayed empty.
+func TestExecuteDetachRecordsWithoutPrinting(t *testing.T) {
+	repo := newTestRepoWithHead(t, nil)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+
+	linkOpts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, linkOpts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	plan, err := BuildDetachPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildDetachPlan: %v", err)
+	}
+
+	var out bytes.Buffer
+	execOpts := Options{StorageRoot: storage, Stdout: &out}
+	if err := ExecuteDetach(repo, plan, execOpts); err != nil {
+		t.Fatalf("ExecuteDetach: %v", err)
+	}
+
+	// Registry MUST contain the workspace-relative path — this is the
+	// same "record before execute" invariant Detach preserves; the
+	// split half is expected to keep it.
+	got := sortedRegistryEntry(readRegistry(t, repo), repo.Root)
+	if want := []string{".env"}; !equalSlice(got, want) {
+		t.Errorf("registry after ExecuteDetach = %v, want %v", got, want)
+	}
+
+	// Execute path must have produced no plan-preview output —
+	// PrintPlan is the CLI's job.
+	if out.Len() != 0 {
+		t.Errorf("ExecuteDetach wrote to stdout (double-print risk):\n%s", out.String())
+	}
+
+	// And the executor DID run: the workspace .env is now a real
+	// file, not a symlink to shared storage.
+	info, err := os.Lstat(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("lstat .env: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".env still a symlink; ExecuteDetach did not execute the plan (mode=%v)", info.Mode())
+	}
+}

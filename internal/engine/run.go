@@ -10,6 +10,31 @@ import (
 	"github.com/blaineventurine/wrk/internal/resolver"
 )
 
+// RunPlan describes a `wrk run <resource>` invocation resolved
+// against the current .wrk.yml. It is the read-only handoff between
+// BuildRunPlan (preflight, plan assembly) and ExecuteRunPlan (actual
+// hook execution). CLI callers use it to render a preview before
+// prompting for confirmation.
+type RunPlan struct {
+	// Root is the workspace root, echoed by the plan preview.
+	Root string
+
+	// Resource is the configured resource being re-initialized. Its
+	// Path is what users identify in the preview.
+	Resource config.Resource
+
+	// Commands is the initialize hook command list, hoisted here so
+	// the plan preview can show a count without touching Resource.
+	Commands []config.Command
+
+	// Actions is the fully-built planner.Plan action list — one
+	// InitializeResource{Force:true} entry per resolved instance,
+	// same shape a bare Link plan would produce. ExecuteRunPlan
+	// wraps this into a planner.Plan with WorkspaceRoot set and
+	// dispatches to the executor.
+	Actions []planner.PlannedAction
+}
+
 // Run re-executes a resource's initialize hook against the currently
 // linked shared variant, atomically replacing the variant's contents.
 // Use this to retry after fixing a hook or to refresh a variant without
@@ -26,18 +51,50 @@ import (
 //     variant would have no visible effect on the workspace's
 //     independent copy)
 //   - the resolver, plan build, or hook execution fails
+//
+// Run is the plan-then-execute wrapper preserved for backward
+// compatibility; it prints the assembled planner.Plan before executing.
+// CLI callers that need to interpose confirmation should call
+// BuildRunPlan + ExecuteRunPlan directly so the preview and prompt can
+// slot between planning and mutation.
 func Run(
 	repo *repository.Repository,
 	resourceName string,
 	options Options,
 ) error {
+	plan, err := BuildRunPlan(repo, resourceName, options)
+	if err != nil {
+		return err
+	}
+	full := planner.Plan{
+		WorkspaceRoot: repo.Root,
+		Actions:       plan.Actions,
+	}
+	if err := printPlan(options.Stdout, full); err != nil {
+		return err
+	}
+	return executePlan(full, options)
+}
+
+// BuildRunPlan performs the read-only preflight for a `wrk run`
+// invocation: config lookup, hook presence, detach guard, resolver
+// expansion, and per-instance action assembly. It never mutates state.
+//
+// Errors returned from BuildRunPlan are user-facing refusals that no
+// flag can override (a detached-resource run has no correct outcome
+// against the shared variant, and an unknown resource is a typo).
+func BuildRunPlan(
+	repo *repository.Repository,
+	resourceName string,
+	options Options,
+) (RunPlan, error) {
 	if repo == nil {
-		return fmt.Errorf("Run: nil repo")
+		return RunPlan{}, fmt.Errorf("Run: nil repo")
 	}
 
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return err
+		return RunPlan{}, err
 	}
 
 	var target *config.Resource
@@ -48,12 +105,12 @@ func Run(
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("resource %q not configured", resourceName)
+		return RunPlan{}, fmt.Errorf("resource %q not configured", resourceName)
 	}
 
 	hookCommands, ok := target.Hooks["initialize"]
 	if !ok || len(hookCommands) == 0 {
-		return fmt.Errorf(
+		return RunPlan{}, fmt.Errorf(
 			"resource %q has no initialize hook to run",
 			resourceName,
 		)
@@ -65,15 +122,15 @@ func Run(
 	// silently be wrong.
 	reg, err := loadRegistry(repo)
 	if err != nil {
-		return err
+		return RunPlan{}, err
 	}
 
 	instances, err := resolver.Resolve(repo.Root, *target)
 	if err != nil {
-		return err
+		return RunPlan{}, err
 	}
 	if len(instances) == 0 {
-		return fmt.Errorf(
+		return RunPlan{}, fmt.Errorf(
 			"resource %q resolved to no instances",
 			resourceName,
 		)
@@ -81,17 +138,18 @@ func Run(
 
 	for _, instance := range instances {
 		if isDetached(reg, repo.Root, instance.RelativePath) {
-			return fmt.Errorf(
+			return RunPlan{}, fmt.Errorf(
 				"resource %q is detached in this workspace; run `wrk relink` first",
 				resourceName,
 			)
 		}
 	}
 
-	// Build a plan with one Force=true InitializeResource action per
-	// resolved instance. WorkspaceRoot lets ensureContained gate on the
+	// Assemble one Force=true InitializeResource action per resolved
+	// instance. WorkspaceRoot is set by ExecuteRunPlan when it wraps
+	// these into a full planner.Plan so ensureContained gates on the
 	// same guard the Link path uses.
-	plan := planner.Plan{WorkspaceRoot: repo.Root}
+	actions := make([]planner.PlannedAction, 0, len(instances))
 	for _, instance := range instances {
 		loc, err := location.For(
 			options.StorageRoot,
@@ -99,22 +157,46 @@ func Run(
 			instance,
 		)
 		if err != nil {
-			return err
+			return RunPlan{}, err
 		}
 
-		plan.Actions = append(plan.Actions, planner.PlannedAction{
+		actions = append(actions, planner.PlannedAction{
 			Instance: instance,
 			Action: planner.InitializeResource{
 				Description: fmt.Sprintf(
 					"re-run initialize hook for %s",
 					target.Name,
 				),
-				Context: instance.Context(loc.Path),
+				Context:  instance.Context(loc.Path),
 				Commands: hookCommands,
 				Force:    true,
 			},
 		})
 	}
 
-	return runPlan(plan, options)
+	return RunPlan{
+		Root:     repo.Root,
+		Resource: *target,
+		Commands: hookCommands,
+		Actions:  actions,
+	}, nil
+}
+
+// ExecuteRunPlan runs a pre-built RunPlan through the executor
+// without printing the planner.Plan diagnostic block. CLI callers
+// that already displayed their own preview + prompted for confirmation
+// use this to avoid a double-print.
+//
+// On dry-run, the executor is bypassed and no output is produced —
+// the CLI's caller is responsible for the preview.
+func ExecuteRunPlan(
+	repo *repository.Repository,
+	plan RunPlan,
+	options Options,
+) error {
+	full := planner.Plan{
+		WorkspaceRoot: repo.Root,
+		Actions:       plan.Actions,
+	}
+	return executePlan(full, options)
 }

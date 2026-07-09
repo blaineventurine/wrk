@@ -11,13 +11,33 @@ import (
 	"github.com/blaineventurine/wrk/internal/repository"
 )
 
+// IsolatePlan describes the per-workspace variants that a subsequent
+// ExecuteRelinkIsolate will materialize. Resources is the ordered,
+// preflight-validated set — every entry is configured AND currently
+// detached in this workspace. Preflight failures (unknown resource,
+// linked resource, nothing to isolate) surface as errors from
+// BuildRelinkIsolatePlan rather than fields on IsolatePlan: --force
+// has no meaning for "isolate an undetached resource" (there is no
+// safe fallback), so the CLI prompt path never sees them.
+type IsolatePlan struct {
+	// Root is the workspace root, echoed by the CLI's plan preview so
+	// the user sees which worktree they are isolating.
+	Root string
+
+	// Resources is the ordered set of resources to isolate. Empty
+	// slices from BuildRelinkIsolatePlan are always a hard error, so
+	// ExecuteRelinkIsolate can treat an empty slice as "programmer
+	// error" rather than "nothing to do".
+	Resources []config.Resource
+}
+
 // RelinkIsolate promotes a workspace's detached resources into private
 // per-workspace variants in shared storage. Peer workspaces of the same
 // repository (sibling worktrees) are UNAFFECTED: only this workspace's
 // symlink is repointed, only this workspace's detach + isolation records
 // are edited.
 //
-// For each named resource, RelinkIsolate:
+// For each named resource, ExecuteRelinkIsolate:
 //
 //  1. Moves the workspace's detached copy into
 //     `<storage>/<repositoryID>/<resource-path>/isolated-<hex>/`
@@ -53,23 +73,49 @@ import (
 //   - A mid-loop failure across multiple resources leaves earlier
 //     resources isolated and later ones untouched. Re-running the same
 //     command completes the rest.
+//
+// RelinkIsolate is the plan-then-execute wrapper preserved for backward
+// compatibility. CLI callers that need to interpose confirmation should
+// call BuildRelinkIsolatePlan + ExecuteRelinkIsolate directly.
 func RelinkIsolate(
 	repo *repository.Repository,
 	resourceNames []string,
 	options Options,
 ) error {
+	plan, err := BuildRelinkIsolatePlan(repo, resourceNames, options)
+	if err != nil {
+		return err
+	}
+	return ExecuteRelinkIsolate(repo, plan, options)
+}
+
+// BuildRelinkIsolatePlan runs the read-only preflight for a
+// `wrk relink --isolate` invocation and returns the resolved,
+// validated resource set. It never mutates the filesystem or any
+// registry.
+//
+// See RelinkIsolate for the semantics of resourceNames (empty ->
+// every currently-detached resource). Every returned error is a
+// user-facing refusal that --force cannot override: isolating an
+// undetached resource would silently steal bytes from peers, and an
+// unknown resource name is almost always a typo.
+func BuildRelinkIsolatePlan(
+	repo *repository.Repository,
+	resourceNames []string,
+	options Options,
+) (IsolatePlan, error) {
 	if repo == nil {
-		return fmt.Errorf("RelinkIsolate: nil repo")
+		return IsolatePlan{}, fmt.Errorf("BuildRelinkIsolatePlan: nil repo")
 	}
 
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return err
+		return IsolatePlan{}, err
 	}
 
 	detach, err := loadRegistry(repo)
 	if err != nil {
-		return err
+		return IsolatePlan{}, err
 	}
 	detachedPaths := detach[repo.Root]
 
@@ -86,7 +132,7 @@ func RelinkIsolate(
 			}
 		}
 		if len(resourceNames) == 0 {
-			return fmt.Errorf(
+			return IsolatePlan{}, fmt.Errorf(
 				"no detached resources to isolate in this workspace")
 		}
 	}
@@ -99,7 +145,8 @@ func RelinkIsolate(
 	for _, name := range resourceNames {
 		r := findResourceByName(cfg.Resources, name)
 		if r == nil {
-			return fmt.Errorf("resource %q not configured", name)
+			return IsolatePlan{}, fmt.Errorf(
+				"resource %q not configured", name)
 		}
 		detachedHere := false
 		for _, p := range detachedPaths {
@@ -109,15 +156,31 @@ func RelinkIsolate(
 			}
 		}
 		if !detachedHere {
-			return fmt.Errorf(
+			return IsolatePlan{}, fmt.Errorf(
 				"resource %q is not detached in this workspace; "+
 					"only detached resources can be isolated", name)
 		}
 		resources = append(resources, *r)
 	}
 
+	return IsolatePlan{Root: repo.Root, Resources: resources}, nil
+}
+
+// ExecuteRelinkIsolate applies a pre-built IsolatePlan. Callers that
+// print the plan themselves — e.g. the CLI's Build -> Print -> Confirm
+// -> Execute flow — use this instead of RelinkIsolate to skip the
+// preflight already performed.
+//
+// On dry-run: prints one `# Would isolate ...` line per resource so
+// interactive callers still see what would happen, matching the
+// wrapper's historical output.
+func ExecuteRelinkIsolate(
+	repo *repository.Repository,
+	plan IsolatePlan,
+	options Options,
+) error {
 	if options.DryRun {
-		for _, r := range resources {
+		for _, r := range plan.Resources {
 			fmt.Fprintf(options.Stdout,
 				"# Would isolate %s (%s) into private storage\n",
 				r.Name, r.Path)
@@ -131,7 +194,7 @@ func RelinkIsolate(
 	// and loadRegistry/saveRegistry DIRECTLY, not their `record*` wrappers
 	// — those would reacquire the same flock and deadlock.
 	return withRegistryLock(repo, func() error {
-		for _, r := range resources {
+		for _, r := range plan.Resources {
 			if err := isolateOne(repo, r, options); err != nil {
 				return err
 			}

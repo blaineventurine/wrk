@@ -1,85 +1,14 @@
 package main
 
 import (
-	"io"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/engine"
 )
 
-// TestConfirmRelinkYesSkipsPrompt pins S7: `--yes` short-circuits the
-// entire prompt path, regardless of whether stdin is a terminal. The
-// output side stays untouched — no banner, no prompt — so scripted
-// callers get a clean stream.
-func TestConfirmRelinkYesSkipsPrompt(t *testing.T) {
-	// A closed pipe as stdin would explode if confirmRelink tried to
-	// read; --yes must never touch it.
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = pw.Close()
-	defer func() { _ = pr.Close() }()
-
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = outR.Close() }()
-	defer func() { _ = outW.Close() }()
-
-	if err := confirmRelink(true, pr, outW); err != nil {
-		t.Fatalf("confirmRelink(yes=true) = %v, want nil", err)
-	}
-	_ = outW.Close()
-	written, _ := io.ReadAll(outR)
-	if len(written) != 0 {
-		t.Fatalf("--yes should produce no banner/prompt, got: %q", written)
-	}
-}
-
-// TestConfirmRelinkNonTTYRefuses pins S7: without --yes and without a
-// TTY, confirmRelink refuses immediately. The error must name --yes so
-// pipe/CI users know exactly how to unblock themselves.
-func TestConfirmRelinkNonTTYRefuses(t *testing.T) {
-	// os.Pipe read-end is NOT a terminal, so isatty returns false —
-	// this is the non-interactive branch.
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = pw.Close()
-	defer func() { _ = pr.Close() }()
-
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = outR.Close() }()
-	defer func() { _ = outW.Close() }()
-
-	err = confirmRelink(false, pr, outW)
-	if err == nil {
-		t.Fatal("confirmRelink(yes=false, non-tty) should error")
-	}
-	if !strings.Contains(err.Error(), "--yes") {
-		t.Fatalf("error should reference --yes so users know the fix, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "refusing to run destructive relink") {
-		t.Fatalf("error should identify itself as a destructive-action refusal, got: %v", err)
-	}
-
-	// A refusal must NOT print the interactive banner — that would
-	// double-alarm scripts capturing stdout while parsing stderr for
-	// the error.
-	_ = outW.Close()
-	written, _ := io.ReadAll(outR)
-	if len(written) != 0 {
-		t.Fatalf("non-tty refusal should not print the interactive banner, got: %q", written)
-	}
-}
-
-// TestRelinkFlagsYesRegistered pins S7's flag wiring: both --yes and
+// TestRelinkFlagsYesRegistered pins the flag wiring: both --yes and
 // -y point at relinkYes. If the short form ever drifts, users typing
 // `wrk relink -y` in a rush would silently trip the unknown-flag
 // error, which is exactly the failure mode --yes is meant to prevent.
@@ -97,8 +26,19 @@ func TestRelinkFlagsYesRegistered(t *testing.T) {
 	}
 }
 
+// TestRelinkFlagsForceRegistered pins that `wrk relink --force`
+// resolves — parity with `wrk gc/forget/remove/detach/run --force`.
+// The wire matters for two reasons: users who habitually type
+// --force expect it to work, and the plan-first flow depends on
+// Confirm receiving Force to render the override banner uniformly.
+func TestRelinkFlagsForceRegistered(t *testing.T) {
+	if relinkCmd.Flags().Lookup("force") == nil {
+		t.Fatal("--force flag not registered on relinkCmd")
+	}
+}
+
 // TestRelinkIsolateFlagRegistered pins that --isolate is wired on
-// relinkCmd. If this drifts, the whole Task 3.5 CLI surface silently
+// relinkCmd. If this drifts, the whole isolate CLI surface silently
 // disappears — `wrk relink --isolate` would fail as "unknown flag"
 // after already having survived through review.
 func TestRelinkIsolateFlagRegistered(t *testing.T) {
@@ -146,65 +86,44 @@ func TestRelinkArgsAcceptsPositionalWithIsolate(t *testing.T) {
 	}
 }
 
-// TestConfirmRelinkIsolateYesSkipsPrompt pins the --yes short-circuit:
-// the prompt path must never touch stdin (a closed pipe would panic).
-// This mirrors TestConfirmRelinkYesSkipsPrompt for the isolate flow.
-func TestConfirmRelinkIsolateYesSkipsPrompt(t *testing.T) {
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = pw.Close()
-	defer func() { _ = pr.Close() }()
+// TestPrintIsolatePlanLists asserts the local plan formatter renders
+// every resource on its own line. This is the only path users see
+// what --isolate will do before answering the prompt; if the loop
+// drops entries, the prompt lies about scope.
+func TestPrintIsolatePlanLists(t *testing.T) {
+	var buf strings.Builder
 
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = outR.Close() }()
-	defer func() { _ = outW.Close() }()
+	// engine.IsolatePlan lives in the engine package; construct via a
+	// zero-value helper so this test does not couple to the internal
+	// resource shape beyond Name and Path.
+	plan := makeIsolatePlanFixture(t, [][2]string{
+		{"node", "node_modules"},
+		{"env", ".env"},
+	})
 
-	if err := confirmRelinkIsolate(true, pr, outW); err != nil {
-		t.Fatalf("confirmRelinkIsolate(yes=true) = %v, want nil", err)
-	}
-	_ = outW.Close()
-	written, _ := io.ReadAll(outR)
-	if len(written) != 0 {
-		t.Fatalf("--yes should produce no banner/prompt, got: %q", written)
+	printIsolatePlan(&buf, plan)
+	got := buf.String()
+
+	for _, want := range []string{
+		"node (node_modules)",
+		"env (.env)",
+		"Files stay under shared storage",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("printIsolatePlan output missing %q; got:\n%s", want, got)
+		}
 	}
 }
 
-// TestConfirmRelinkIsolateNonTTYRefuses pins the non-interactive
-// safety gate: a pipe stdin without --yes is a script that didn't
-// consent, so we refuse and name --yes in the error so the caller
-// knows what to add. The banner must NOT print — that would confuse
-// stderr-parsing scripts.
-func TestConfirmRelinkIsolateNonTTYRefuses(t *testing.T) {
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+// makeIsolatePlanFixture builds a minimal engine.IsolatePlan for
+// display-only unit tests. The plan fields not exercised by
+// printIsolatePlan (Root) are left at zero values on purpose so the
+// test asserts only what the formatter reads.
+func makeIsolatePlanFixture(t *testing.T, pairs [][2]string) engine.IsolatePlan {
+	t.Helper()
+	resources := make([]config.Resource, 0, len(pairs))
+	for _, p := range pairs {
+		resources = append(resources, config.Resource{Name: p[0], Path: p[1]})
 	}
-	_ = pw.Close()
-	defer func() { _ = pr.Close() }()
-
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = outR.Close() }()
-	defer func() { _ = outW.Close() }()
-
-	err = confirmRelinkIsolate(false, pr, outW)
-	if err == nil {
-		t.Fatal("confirmRelinkIsolate(yes=false, non-tty) should error")
-	}
-	if !strings.Contains(err.Error(), "--yes required") {
-		t.Fatalf("error should reference --yes required, got: %v", err)
-	}
-
-	_ = outW.Close()
-	written, _ := io.ReadAll(outR)
-	if len(written) != 0 {
-		t.Fatalf("non-tty refusal should not print the interactive banner, got: %q", written)
-	}
+	return engine.IsolatePlan{Resources: resources}
 }

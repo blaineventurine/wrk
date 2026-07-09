@@ -220,3 +220,61 @@ func TestRelinkNoOpWhenNothingDetached(t *testing.T) {
 		t.Errorf("no-op Relink emitted a destructive marker; plan output was:\n%s", out.String())
 	}
 }
+// TestExecuteRelinkClearsDetachedAfterSuccess pins the CLI-facing
+// split: ExecuteRelink applies a pre-built plan AND clears the
+// detach registry, WITHOUT printing the plan preview (the CLI
+// already did via engine.PrintPlan). A regression that put
+// printPlan back inside ExecuteRelink would cause `wrk relink` to
+// double-print.
+func TestExecuteRelinkClearsDetachedAfterSuccess(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "shared\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := Detach(repo, opts); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+
+	// After Detach the registry MUST have an entry — that's the
+	// state ExecuteRelink is supposed to clean up.
+	if entry := readRegistry(t, repo)[repo.Root]; len(entry) == 0 {
+		t.Fatalf("detach registry empty after Detach; nothing for ExecuteRelink to clear")
+	}
+
+	plan, err := BuildRelinkPlan(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatalf("BuildRelinkPlan: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := ExecuteRelink(repo, plan, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("ExecuteRelink: %v", err)
+	}
+
+	// Registry cleared.
+	if entry := readRegistry(t, repo)[repo.Root]; entry != nil {
+		t.Errorf("detach registry still has entry after ExecuteRelink: %v", entry)
+	}
+
+	// Workspace .env is a symlink again.
+	info, err := os.Lstat(filepath.Join(repo.Root, ".env"))
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("workspace .env not a symlink after ExecuteRelink; mode=%v", info.Mode())
+	}
+
+	// And no plan-preview output from Execute — CLI already printed.
+	if out.Len() != 0 {
+		t.Errorf("ExecuteRelink wrote to stdout (double-print risk):\n%s", out.String())
+	}
+}

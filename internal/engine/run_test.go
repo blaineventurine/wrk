@@ -311,3 +311,92 @@ func TestRunDryRunPrintsPlanNoExecution(t *testing.T) {
 		t.Errorf("dry-run mutated variant: got %q, want %q", after, before)
 	}
 }
+// TestBuildRunPlanUnknownResourceErrors pins that the "not
+// configured" refusal survives the Build/Execute split — it must
+// come from BuildRunPlan itself, not ExecuteRunPlan, so the CLI's
+// Confirm prompt never appears for a name the user typo'd.
+func TestBuildRunPlanUnknownResourceErrors(t *testing.T) {
+	repo, _, storage := linkWithHook(t, "seed")
+
+	_, err := BuildRunPlan(repo, "nope", Options{StorageRoot: storage})
+	if err == nil {
+		t.Fatal("BuildRunPlan for unknown resource: err = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), `"nope" not configured`) {
+		t.Fatalf("BuildRunPlan error does not name the unknown resource: %v", err)
+	}
+}
+
+// TestBuildRunPlanNilRepoErrors pins the earliest guard-clause on
+// the split. A nil repo would deref inside config.Load and produce a
+// confusing panic instead of a caller-actionable error.
+func TestBuildRunPlanNilRepoErrors(t *testing.T) {
+	_, err := BuildRunPlan(nil, "node", Options{})
+	if err == nil {
+		t.Fatal("BuildRunPlan(nil, ...): err = nil, want non-nil")
+	}
+}
+
+// TestExecuteRunPlanReplacesVariantContents pins the CLI-facing
+// split: ExecuteRunPlan applies a pre-built RunPlan, running the
+// hook against the shared variant. This mirrors TestRun's core
+// contract but goes through the split path — a regression that
+// broke ExecuteRunPlan while leaving Run intact would still ship
+// broken CLI behaviour.
+func TestExecuteRunPlanReplacesVariantContents(t *testing.T) {
+	repo, sharedPath, storage := linkWithHook(t, "seed")
+
+	// Sanity: the seed hook ran during Link and wrote the seed marker.
+	got, err := os.ReadFile(filepath.Join(sharedPath, "marker"))
+	if err != nil {
+		t.Fatalf("initial marker missing: %v", err)
+	}
+	if string(got) != "seed" {
+		t.Fatalf("initial marker = %q, want %q", got, "seed")
+	}
+
+	// Rewrite the config so the hook now writes a fresh token. Run
+	// re-reads config on each invocation, so BuildRunPlan below sees
+	// the new commands.
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: node\n"+
+			"    path: node_modules\n"+
+			"    hooks:\n"+
+			"      initialize:\n"+
+			"        - run: sh -c 'mkdir -p {shared} && printf %s \"$WRK_TEST_TOKEN\" > {shared}/marker'\n"+
+			"          env:\n"+
+			"            WRK_TEST_TOKEN: refresh\n",
+	)
+
+	plan, err := BuildRunPlan(repo, "node", Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildRunPlan: %v", err)
+	}
+	if len(plan.Actions) == 0 {
+		t.Fatalf("BuildRunPlan produced no actions for the configured resource")
+	}
+	if plan.Resource.Name != "node" {
+		t.Errorf("plan.Resource.Name = %q, want %q", plan.Resource.Name, "node")
+	}
+
+	var out bytes.Buffer
+	if err := ExecuteRunPlan(repo, plan, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("ExecuteRunPlan: %v", err)
+	}
+
+	// The hook rewrote the marker with the fresh token.
+	got, err = os.ReadFile(filepath.Join(sharedPath, "marker"))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(got) != "refresh" {
+		t.Fatalf("marker after ExecuteRunPlan = %q, want %q", got, "refresh")
+	}
+
+	// And the split's contract: NO plan preview from Execute — CLI
+	// callers have already printed via printRunPlan.
+	if out.Len() != 0 {
+		t.Errorf("ExecuteRunPlan wrote to stdout (double-print risk):\n%s", out.String())
+	}
+}
