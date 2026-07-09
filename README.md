@@ -70,6 +70,7 @@ Every subsequent workspace simply links to it.
 - Works with Jujutsu workspaces and Git worktrees.
 - Read-only introspection (`status`, `workspaces`, `list`).
 - Dry-run mode.
+- Reclaim disk and tear down workspaces (`wrk gc`, `wrk remove`, `wrk forget`).
 - Fully reversible (`wrk detach`) with an explicit reconnect (`wrk relink`).
 
 ---
@@ -313,11 +314,13 @@ wrk init
 ```
 
 `wrk init` inspects the current directory for well-known project files
-(`package.json` + lockfile, `Gemfile`, `pyproject.toml` + `uv.lock`/`poetry.lock`,
-`Pipfile.lock`, `requirements.txt`, `Cargo.toml`, `.env.example`) and writes a
-`.wrk.yml` seeded with sensible defaults for each detected layout. It refuses
-to overwrite an existing `.wrk.yml` unless you pass `--force`, and `--dry-run`
-prints the generated file to stdout without touching disk.
+(`package.json` + `yarn.lock`/`pnpm-lock.yaml`/`bun.lockb`/`package-lock.json`
+including monorepo `workspaces` layouts, `Gemfile`, `pyproject.toml` +
+`uv.lock`/`poetry.lock`, `Pipfile.lock`, `requirements.txt`, `Cargo.toml`,
+`.env.example`/`.env.sample`) and writes a `.wrk.yml` seeded with sensible
+defaults for each detected layout. It refuses to overwrite an existing
+`.wrk.yml` unless you pass `--force`, and `--dry-run` prints the generated
+file to stdout without touching disk.
 
 ```bash
 wrk init --dry-run       # preview only
@@ -419,8 +422,9 @@ wrk gc --dry-run      # show the plan, do nothing
   previous variant. Concurrent `wrk link` operations are respected: a
   variant whose lock is currently held is skipped with a warning.
 - **Stale bookkeeping** — orphaned `.wrk-lock` files, `.wrk-provisioning`
-  scratch dirs whose lock is free, and `.wrk-deleting` markers left by
-  a previous crashed `wrk gc`.
+  scratch dirs whose lock is free, `.wrk-deleting` markers left by a
+  previous crashed `wrk gc`, and `.wrk-forgetting/` markers left by a
+  previous crashed `wrk forget`.
 
 Storage-side deletes use rename-then-remove: a variant is renamed to
 `<variant>.wrk-deleting/` before `RemoveAll` runs, so a crash mid-delete
@@ -482,7 +486,7 @@ leave those workspaces stranded. Reconnect them first with `wrk relink
 Removal is atomic: `<storage>/<repo-id>/` is renamed to
 `<storage>/<repo-id>.wrk-forgetting/` (single rename), then removed.
 A crash between the rename and the registry clear leaves the marker;
-re-run `wrk forget` to finish the sweep.
+the next `wrk forget` or `wrk gc` sweeps it automatically.
 
 ### Introspection (read-only)
 
