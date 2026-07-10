@@ -24,12 +24,23 @@ func (gitBackend) commonDir(root string) (string, error) {
 	return filepath.Join(root, path), nil
 }
 
-func (gitBackend) createWorkspace(root, dest string) error {
+func (gitBackend) createWorkspace(root, dest, base string) error {
 	// "--" separates options from the (absolute) destination path so a
 	// destination beginning with "-" cannot be reparsed as a flag.
 	// resolveDestination already yields an absolute path, but the
 	// separator is defensive: cheap, and pins the invariant in code.
-	return passthrough(root, "git", "worktree", "add", "--", dest)
+	if base == "" {
+		return passthrough(root, "git", "worktree", "add", "--", dest)
+	}
+	// With --base, always fork a fresh branch off <base> named after
+	// the destination basename. Never check out <base> directly: git's
+	// default `worktree add <path> <commit-ish>` behaviour with a
+	// branch arg silently shares the checkout across worktrees, which
+	// leads to "already checked out" errors from the SECOND workspace
+	// forward. -b makes the fork explicit and fails loudly on branch-
+	// name collision, which is the right signal for the user.
+	branch := filepath.Base(dest)
+	return passthrough(root, "git", "worktree", "add", "-b", branch, "--", dest, base)
 }
 
 func (gitBackend) workspaces(root string) ([]string, error) {

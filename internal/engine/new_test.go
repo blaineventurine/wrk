@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -32,10 +33,8 @@ func TestNewWorkspaceDryRunHasNoSideEffects(t *testing.T) {
 	before := listNames(t, parent)
 
 	var out bytes.Buffer
-	err := NewWorkspace(repo, "feature", Options{
-		DryRun: true,
-		Stdout: &out,
-	})
+	err := NewWorkspace(repo, "feature", "", Options{DryRun: true,
+		Stdout: &out})
 	if err != nil {
 		t.Fatalf("NewWorkspace(dry-run): %v", err)
 	}
@@ -94,10 +93,8 @@ func TestNewWorkspaceDryRunSurfacesResolutionErrors(t *testing.T) {
 	// would reject this, and ResolveDestination must reject it too so
 	// the preview stays honest.
 	var out bytes.Buffer
-	err := NewWorkspace(repo, ".", Options{
-		DryRun: true,
-		Stdout: &out,
-	})
+	err := NewWorkspace(repo, ".", "", Options{DryRun: true,
+		Stdout: &out})
 	if err == nil {
 		t.Fatalf(
 			"expected an error for destination inside current workspace, got nil\nstdout:\n%s",
@@ -134,10 +131,8 @@ func TestNewWorkspaceSkipsLinkOnCleanPrimary(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := NewWorkspace(repo, "feature", Options{
-		Stdout:      &out,
-		StorageRoot: storageIn(t, repo.Root),
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{Stdout: &out,
+		StorageRoot: storageIn(t, repo.Root)}); err != nil {
 		t.Fatalf("NewWorkspace: %v\nstdout:\n%s", err, out.String())
 	}
 
@@ -164,10 +159,8 @@ func TestNewWorkspaceRunsLinkWhenPrimaryHasActions(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := NewWorkspace(repo, "feature", Options{
-		Stdout:      &out,
-		StorageRoot: storageIn(t, repo.Root),
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{Stdout: &out,
+		StorageRoot: storageIn(t, repo.Root)}); err != nil {
 		t.Fatalf("NewWorkspace: %v\nstdout:\n%s", err, out.String())
 	}
 
@@ -196,10 +189,8 @@ func TestNewWorkspaceValidatesDestinationBeforePrimary(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := NewWorkspace(repo, ".", Options{
-		Stdout:      &out,
-		StorageRoot: storageIn(t, repo.Root),
-	})
+	err := NewWorkspace(repo, ".", "", Options{Stdout: &out,
+		StorageRoot: storageIn(t, repo.Root)})
 	if err == nil {
 		t.Fatalf("NewWorkspace(.) succeeded; want validation error\nstdout:\n%s", out.String())
 	}
@@ -238,10 +229,8 @@ func TestNewWorkspaceCreatesAndLinks(t *testing.T) {
 	// NewWorkspace moves it to shared storage and symlinks it back.
 	writeFile(t, filepath.Join(primary.Root, ".env"), "provisioned\n")
 
-	if err := NewWorkspace(primary, "feature", Options{
-		StorageRoot: storage,
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(primary, "feature", "", Options{StorageRoot: storage,
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 
@@ -295,10 +284,8 @@ func TestNewWorkspaceFailsOnNestedDestination(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	err := NewWorkspace(primary, "./inside", Options{
-		StorageRoot: storageIn(t, primary.Root),
-		Stdout:      &out,
-	})
+	err := NewWorkspace(primary, "./inside", "", Options{StorageRoot: storageIn(t, primary.Root),
+		Stdout: &out})
 	if err == nil {
 		t.Fatalf("NewWorkspace(./inside) succeeded; want nesting error\nstdout:\n%s", out.String())
 	}
@@ -322,4 +309,82 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestNewWorkspaceWithBaseThreadsToBackend pins that a non-empty base
+// reaches the git backend: the new worktree ends up on a branch
+// whose name matches the destination basename — the shape only the
+// `--base` code path in gitBackend.createWorkspace produces. If the
+// engine dropped `base` on the floor (or swapped it with
+// `destination`), the new worktree would be on the primary's HEAD
+// branch and this test would fail.
+func TestNewWorkspaceWithBaseThreadsToBackend(t *testing.T) {
+	primary := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources: []\n",
+	})
+
+	// Pre-existing branch to fork off of.
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = primary.Root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("branch", "feature-base")
+
+	var out bytes.Buffer
+	if err := NewWorkspace(primary, "secondary", "feature-base", Options{
+		StorageRoot: storageIn(t, primary.Root),
+		Stdout:      &out,
+	}); err != nil {
+		t.Fatalf("NewWorkspace with base: %v\nstdout:\n%s", err, out.String())
+	}
+
+	parent := filepath.Dir(primary.Root)
+	newWs := canonPath(t, filepath.Join(parent, "secondary"))
+	if _, err := os.Stat(newWs); err != nil {
+		t.Fatalf("stat new workspace: %v", err)
+	}
+
+	// The branch the backend created off feature-base is named
+	// after the destination basename — the observable signal that
+	// base reached `git worktree add -b`.
+	head := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	head.Dir = newWs
+	got, err := head.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v\n%s", err, got)
+	}
+	if got := string(bytes.TrimSpace(got)); got != "secondary" {
+		t.Errorf("HEAD branch = %q, want %q", got, "secondary")
+	}
+}
+
+// TestNewWorkspaceDryRunAnnouncesBase pins the dry-run preview's
+// user-facing signal for --base: when base is non-empty, the "Would
+// create workspace at ..." line MUST name the base ref so the user
+// can verify the fork target before committing to it.
+func TestNewWorkspaceDryRunAnnouncesBase(t *testing.T) {
+	repo := newTestRepo(t)
+
+	if err := os.WriteFile(
+		filepath.Join(repo.Root, ".wrk.yml"),
+		[]byte("resources: []\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := NewWorkspace(repo, "feature", "some-ref", Options{
+		DryRun: true,
+		Stdout: &out,
+	}); err != nil {
+		t.Fatalf("NewWorkspace(dry-run with base): %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("(based on some-ref)")) {
+		t.Errorf("dry-run output missing base annotation:\n%s", out.String())
+	}
 }

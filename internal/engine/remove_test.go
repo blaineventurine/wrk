@@ -64,10 +64,8 @@ func TestBuildRemovePlanPrimaryWorkspaceErrors(t *testing.T) {
 // this comparison honest.
 func TestBuildRemovePlanCurrentWorkspaceErrors(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -134,10 +132,8 @@ func TestBuildRemovePlanGhostFromRegistry(t *testing.T) {
 // worktree command the executor will run.
 func TestBuildRemovePlanLiveWorkspaceCleanPlan(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -176,10 +172,8 @@ func TestBuildRemovePlanLiveWorkspaceCleanPlan(t *testing.T) {
 // layer can render `<path1>, <path2>`.
 func TestBuildRemovePlanDetachedFilesRefuse(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -217,10 +211,8 @@ func TestBuildRemovePlanDetachedFilesRefuse(t *testing.T) {
 // CLI (Task 2.4) decides how to combine it with --force semantics.
 func TestBuildRemovePlanUncommittedChangesRefuse(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -251,10 +243,8 @@ func TestBuildRemovePlanUncommittedChangesRefuse(t *testing.T) {
 // AND fire the "uncommitted" refusal string.
 func TestBuildRemovePlanJJUncommittedChangesRefuse(t *testing.T) {
 	repo := newTestColocatedJJRepo(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -282,10 +272,8 @@ func TestBuildRemovePlanJJUncommittedChangesRefuse(t *testing.T) {
 // resolved, the same live-workspace/refusal machinery runs.
 func TestBuildRemovePlanBareNameResolvesSibling(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 
@@ -309,10 +297,8 @@ func TestBuildRemovePlanBareNameResolvesSibling(t *testing.T) {
 // workspace and the directory is removed from the filesystem.
 func TestExecuteRemoveHappyPath(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -334,10 +320,8 @@ func TestExecuteRemoveHappyPath(t *testing.T) {
 // target from the detach registry, even when --force is required.
 func TestExecuteRemoveClearsRegistryEntry(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -373,10 +357,8 @@ func TestExecuteRemoveClearsRegistryEntry(t *testing.T) {
 // already removed externally.
 func TestExecuteRemoveIdempotentAfterExternalRemoval(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := NewWorkspace(repo, "feature", Options{
-		StorageRoot: storageIn(t, repo.Root),
-		Stdout:      &bytes.Buffer{},
-	}); err != nil {
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")

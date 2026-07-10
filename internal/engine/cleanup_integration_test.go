@@ -65,7 +65,7 @@ func TestCleanupLifecycle(t *testing.T) {
 	}
 
 	// 5) Create a feature workspace, then remove it via wrk remove.
-	if err := NewWorkspace(repo, "feature", opts); err != nil {
+	if err := NewWorkspace(repo, "feature", "", opts); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
@@ -126,7 +126,7 @@ func TestCleanupGhostSweepClearsRegistry(t *testing.T) {
 	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
 
 	// Create a feature workspace via wrk new.
-	if err := NewWorkspace(repo, "ghost", opts); err != nil {
+	if err := NewWorkspace(repo, "ghost", "", opts); err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "ghost")

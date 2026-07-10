@@ -11,13 +11,19 @@ import (
 // returns a Repository rooted there. Bare names become siblings of
 // the current workspace; nesting inside an existing workspace is
 // refused.
-func (r *Repository) CreateWorkspace(destination string) (*Repository, error) {
+//
+// base selects the ref/revset to fork the new workspace from. Empty
+// preserves the backend's default (git HEAD, jj @); a non-empty value
+// is forwarded verbatim to `git worktree add -b <basename> <base>` /
+// `jj workspace add --revision <base>`. See backend.createWorkspace
+// for the per-backend semantics.
+func (r *Repository) CreateWorkspace(destination, base string) (*Repository, error) {
 	dest, err := r.ResolveDestination(destination)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := r.backend.createWorkspace(r.Root, dest); err != nil {
+	if err := r.backend.createWorkspace(r.Root, dest, base); err != nil {
 		return nil, err
 	}
 

@@ -120,7 +120,7 @@ func TestGitBackendCreateWorkspace(t *testing.T) {
 	initGitRepo(t, root)
 
 	dest := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, dest); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, dest, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -155,6 +155,89 @@ func TestGitBackendCreateWorkspace(t *testing.T) {
 	}
 }
 
+// TestGitBackendCreateWorkspaceWithBase exercises the `--base <ref>`
+// path: given a repository with an extra pre-existing branch, the
+// backend forks a fresh branch off <base> named after the destination
+// basename. Success means the destination is a linked worktree AND
+// its HEAD sits on a branch called after the last path component —
+// which is git's default `-b` shape when no branch name is given.
+// This test would fail if the backend accidentally checked out
+// <base> directly (branch would equal `feature-base`, sharing a
+// checkout that git refuses on the next worktree add) or dropped the
+// `-b` altogether (branch would equal `HEAD` on a detached checkout).
+func TestGitBackendCreateWorkspaceWithBase(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	// Pre-existing branch to fork off of.
+	branchCmd := exec.Command("git", "branch", "feature-base")
+	branchCmd.Dir = root
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch feature-base: %v\n%s", err, out)
+	}
+
+	dest := filepath.Join(parent, "secondary")
+	if err := (gitBackend{}).createWorkspace(root, dest, "feature-base"); err != nil {
+		t.Fatalf("createWorkspace with base: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("dest not created: %v", err)
+	}
+
+	// The new branch is named after the destination basename — the
+	// contract that keeps subsequent `wrk new` calls off the same
+	// <base> from colliding on branch names.
+	got, err := capture(dest, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD in secondary: %v", err)
+	}
+	if strings.TrimSpace(got) != "secondary" {
+		t.Errorf("HEAD branch = %q, want %q", strings.TrimSpace(got), "secondary")
+	}
+}
+
+// TestGitBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior pins
+// the base="" contract: the backend MUST behave exactly like the
+// pre-`--base` code path (`git worktree add -- <dest>`), so callers
+// that never set --base see zero behaviour change. Signal: the
+// destination checks out fine AND its HEAD branch matches the
+// primary's HEAD branch — which git derives from the last path
+// component absent an explicit `-b`.
+func TestGitBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	dest := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, dest, ""); err != nil {
+		t.Fatalf("createWorkspace empty base: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("dest not created: %v", err)
+	}
+	// Legacy `git worktree add` derives the branch name from the
+	// last path component. If the empty-base branch ever routed
+	// through `-b <basename> <ref>` unintentionally we would still
+	// land on this same name; the sibling `WithBase` test above
+	// covers the intentional case.
+	got, err := capture(dest, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if strings.TrimSpace(got) != "feature" {
+		t.Errorf("HEAD branch = %q, want %q", strings.TrimSpace(got), "feature")
+	}
+}
+
 // TestGitBackendWorkspacesListsAll seeds primary + secondary worktrees
 // and asserts workspaces() returns BOTH canonical roots, primary
 // first. The order matters for callers like `wrk list` that print the
@@ -169,7 +252,7 @@ func TestGitBackendWorkspacesListsAll(t *testing.T) {
 	initGitRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 
@@ -201,7 +284,7 @@ func TestGitBackendWorkspacesSkipsPrunable(t *testing.T) {
 	initGitRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 
@@ -252,7 +335,7 @@ func TestGitBackendWorkspacesHandlesBareRecord(t *testing.T) {
 	}
 
 	secondary := filepath.Join(parent, "linked")
-	if err := (gitBackend{}).createWorkspace(bareRepo, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(bareRepo, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace from bare: %v", err)
 	}
 
@@ -287,7 +370,7 @@ func TestGitBackendCommonDirFromWorktree(t *testing.T) {
 	initGitRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -344,7 +427,7 @@ func TestGitBackendCreateWorkspaceErrorsOutsideRepo(t *testing.T) {
 	root := canonPath(t, t.TempDir())
 	dest := filepath.Join(filepath.Dir(root), "would-be-worktree")
 
-	err := (gitBackend{}).createWorkspace(root, dest)
+	err := (gitBackend{}).createWorkspace(root, dest, "")
 	if err == nil {
 		t.Fatal("createWorkspace outside repo: expected error")
 	}
@@ -397,7 +480,7 @@ func TestGitBackendDetectGhostsFindsRemoved(t *testing.T) {
 	initGitRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -457,7 +540,7 @@ func TestGitBackendPruneGhostsClearsMetadata(t *testing.T) {
 	initGitRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -584,7 +667,7 @@ func TestGitBackendRemoveWorkspace(t *testing.T) {
 	initGitRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, feature, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -644,7 +727,7 @@ func TestGitBackendRemoveWorkspaceForce(t *testing.T) {
 	initGitRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, feature, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -681,7 +764,7 @@ func TestRepositoryRemoveWorkspace(t *testing.T) {
 	initGitRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (gitBackend{}).createWorkspace(root, feature); err != nil {
+	if err := (gitBackend{}).createWorkspace(root, feature, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 

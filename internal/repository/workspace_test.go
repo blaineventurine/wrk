@@ -183,7 +183,7 @@ func TestCreateWorkspaceFullFlow(t *testing.T) {
 		t.Fatalf("Detect(primary): %v", err)
 	}
 
-	newRepo, err := repo.CreateWorkspace("feature")
+	newRepo, err := repo.CreateWorkspace("feature", "")
 	if err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCreateWorkspaceRefusesNesting(t *testing.T) {
 	// "./inside" is an explicit relative path so it stays under the
 	// primary — resolveDestination treats it literally, and then the
 	// containingWorkspace check MUST fire.
-	_, err = repo.CreateWorkspace("./inside")
+	_, err = repo.CreateWorkspace("./inside", "")
 	if err == nil {
 		t.Fatal("CreateWorkspace(./inside): expected nesting error")
 	}
@@ -282,7 +282,7 @@ func TestCreateWorkspaceRefusesExistingDestination(t *testing.T) {
 		t.Fatalf("Detect: %v", err)
 	}
 
-	_, err = repo.CreateWorkspace("feature")
+	_, err = repo.CreateWorkspace("feature", "")
 	if err == nil {
 		t.Fatal("CreateWorkspace(feature): expected 'already exists' error")
 	}
@@ -321,7 +321,7 @@ func TestRepositoryWorkspacesReturnsAllLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if _, err := repo.CreateWorkspace("feature"); err != nil {
+	if _, err := repo.CreateWorkspace("feature", ""); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestCreateWorkspaceBackendFailurePropagates(t *testing.T) {
 		t.Fatalf("Detect: %v", err)
 	}
 
-	newRepo, err := repo.CreateWorkspace("existing")
+	newRepo, err := repo.CreateWorkspace("existing", "")
 	if err == nil {
 		t.Fatalf("CreateWorkspace: got %v, want error from branch conflict",
 			newRepo)
@@ -444,5 +444,61 @@ func TestResolveDestinationPropagatesWorkspacesError(t *testing.T) {
 	if dest != "" {
 		t.Fatalf("ResolveDestination error path returned %q, want empty",
 			dest)
+	}
+}
+
+// TestCreateWorkspaceWithBaseThreadsToBackend pins that the Repository
+// wrapper forwards a non-empty base to the backend, which then forks
+// the new worktree off that ref. The check is indirect but strong:
+// after CreateWorkspace(dest, "feature-base"), the new worktree lives
+// on a branch named after the destination basename — the shape only
+// the `--base` code path in gitBackend.createWorkspace produces.
+// A regression that dropped base (`r.backend.createWorkspace(root,
+// dest, "")`) would land on the primary's HEAD branch instead.
+func TestCreateWorkspaceWithBaseThreadsToBackend(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, primary)
+
+	// Pre-existing branch to fork off of.
+	branchCmd := exec.Command("git", "branch", "feature-base")
+	branchCmd.Dir = primary
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch feature-base: %v\n%s", err, out)
+	}
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	newRepo, err := repo.CreateWorkspace("secondary", "feature-base")
+	if err != nil {
+		t.Fatalf("CreateWorkspace with base: %v", err)
+	}
+
+	// The wrapper's own contract: newRepo is rooted at the new
+	// worktree, not the primary.
+	wantRoot := filepath.Join(parent, "secondary")
+	if newRepo.Root != wantRoot {
+		t.Fatalf("new Repository.Root = %q, want %q",
+			newRepo.Root, wantRoot)
+	}
+
+	// And the backend's --base branch semantics reached disk: the
+	// new worktree's HEAD sits on a branch named after the
+	// destination basename.
+	got, err := capture(wantRoot, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if strings.TrimSpace(got) != "secondary" {
+		t.Errorf("HEAD branch = %q, want %q", strings.TrimSpace(got), "secondary")
 	}
 }

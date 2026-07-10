@@ -28,12 +28,20 @@ func (jjBackend) commonDir(root string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func (jjBackend) createWorkspace(root, dest string) error {
+func (jjBackend) createWorkspace(root, dest, base string) error {
 	// "--" separates options from the (absolute) destination path so a
 	// destination beginning with "-" cannot be reparsed as a flag.
 	// resolveDestination already yields an absolute path, but the
 	// separator is defensive: cheap, and pins the invariant in code.
-	return passthrough(root, "jj", "workspace", "add", "--", dest)
+	args := []string{"workspace", "add"}
+	if base != "" {
+		// --revision starts the new workspace's @ on top of <base>,
+		// mirroring git's "new branch off <ref>" behaviour: the two
+		// workspaces do not share a working-copy commit.
+		args = append(args, "--revision", base)
+	}
+	args = append(args, "--", dest)
+	return passthrough(root, "jj", args...)
 }
 
 func (jjBackend) workspaces(root string) ([]string, error) {

@@ -357,6 +357,25 @@ time. Explicit relative paths (`./foo`, `../foo`, `foo/bar`) and absolute paths
 are resolved literally, so long-standing habits like `wrk new ../feature-auth`
 still work.
 
+`wrk new` bases the new worktree on the CURRENT worktree's HEAD (or `@`, for
+Jujutsu). Run it from any worktree — primary or secondary — and the new
+workspace forks off that worktree's state. Previously implicit; now called
+out explicitly so `wrk new` from within a secondary worktree does what you
+expect.
+
+Use `--base <ref>` to fork off a specific branch, tag, or commit instead:
+
+```bash
+wrk new feature --base main
+wrk new hotfix --base v1.0.0
+wrk new experiment --base abc1234
+```
+
+On Git, `--base <ref>` creates a new branch named after the destination path
+off `<ref>` — so `wrk new feature --base main` lands on a fresh `feature`
+branch forked from `main`. On Jujutsu, the new workspace's `@` starts on top
+of `<ref>`.
+
 `wrk` refuses to create a new workspace inside any existing one. Nested
 worktrees confuse both Git and Jujutsu, and wrk's shared-storage links assume
 workspace roots are siblings — never parents or children of one another. The

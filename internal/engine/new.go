@@ -12,11 +12,15 @@ import (
 // provision the primary as a surprising side effect. A clean primary
 // (empty plan) is left untouched to avoid piggy-backing on `wrk new`.
 //
+// base is passed through to Repository.CreateWorkspace: empty means
+// "fork off the invoking worktree's HEAD/@" (the historical default);
+// a non-empty ref/revset forks the new worktree off that instead.
+//
 // With Options.DryRun set, the second Link is skipped (no on-disk
 // workspace to plan against).
 func NewWorkspace(
 	repo *repository.Repository,
-	destination string,
+	destination, base string,
 	options Options,
 ) error {
 	dest, err := repo.ResolveDestination(destination)
@@ -36,13 +40,19 @@ func NewWorkspace(
 
 	if options.DryRun {
 		fmt.Fprintln(options.Stdout)
-		fmt.Fprintf(options.Stdout, "Would create workspace at %s\n", dest)
+		if base != "" {
+			fmt.Fprintf(options.Stdout,
+				"Would create workspace at %s (based on %s)\n", dest, base)
+		} else {
+			fmt.Fprintf(options.Stdout,
+				"Would create workspace at %s\n", dest)
+		}
 		fmt.Fprintln(options.Stdout,
 			"(dry-run: second Link cannot be previewed until the workspace exists)")
 		return nil
 	}
 
-	newRepo, err := repo.CreateWorkspace(destination)
+	newRepo, err := repo.CreateWorkspace(destination, base)
 	if err != nil {
 		return err
 	}

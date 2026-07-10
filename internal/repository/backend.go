@@ -19,8 +19,11 @@ type backend interface {
 	commonDir(root string) (string, error)
 
 	// createWorkspace creates a new workspace/worktree at dest, running
-	// from root.
-	createWorkspace(root, dest string) error
+	// from root. When base is non-empty, the new workspace is forked
+	// off that ref (git branch/tag/commit, or jj revset) rather than
+	// the invoking worktree's HEAD/@. Empty base preserves the
+	// backend's default: git checks out HEAD, jj starts @ on top of @.
+	createWorkspace(root, dest, base string) error
 
 	// workspaces returns the roots of every live workspace/worktree.
 	workspaces(root string) ([]string, error)

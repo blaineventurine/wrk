@@ -55,7 +55,7 @@ func TestJJBackendCreateWorkspace(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	dest := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, dest); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, dest, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -70,6 +70,97 @@ func TestJJBackendCreateWorkspace(t *testing.T) {
 	// Registered? `jj workspace list` (from the primary) must show
 	// both roots — a passthrough failure or wrong `--` handling
 	// would create the dir but leave jj with no record of it.
+	got, err := (jjBackend{}).workspaces(root)
+	if err != nil {
+		t.Fatalf("workspaces: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{dest, root}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("workspaces = %v, want %v", got, want)
+	}
+}
+
+// TestJJBackendCreateWorkspaceWithBase exercises the `--revision`
+// path: given a colocated repo, the backend forks the new workspace's
+// @ off a chosen change_id rather than the invoking workspace's
+// default parent. Success means the destination exists AND its @-
+// (parent of the working-copy commit) equals the requested base.
+// This would fail if the backend accidentally dropped --revision
+// (@- would still equal root but the assertion would collapse to the
+// legacy behavior) or fed the base after the `--` separator (jj would
+// parse it as a second path argument and error).
+func TestJJBackendCreateWorkspaceWithBase(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	// Pin a stable base rev: the root() change_id is the same across
+	// every workspace in the repo, so the equality assertion below
+	// doesn't drift with whichever change happens to be @.
+	baseChange, err := capture(root, "jj", "log", "-r", "@-",
+		"--no-graph", "-T", "change_id")
+	if err != nil {
+		t.Fatalf("read base change_id: %v", err)
+	}
+	baseChange = strings.TrimSpace(baseChange)
+	if baseChange == "" {
+		t.Fatal("empty base change_id")
+	}
+
+	dest := filepath.Join(parent, "secondary")
+	if err := (jjBackend{}).createWorkspace(root, dest, baseChange); err != nil {
+		t.Fatalf("createWorkspace with base: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("dest not created: %v", err)
+	}
+
+	// The new workspace's @- MUST equal the base we requested. If
+	// the backend forgot --revision, @- would default to the
+	// invoking workspace's @- — which happens to also be root here,
+	// so this test doubles as a canary against a swap of `base` and
+	// destination positional order.
+	got, err := capture(dest, "jj", "log", "-r", "@-",
+		"--no-graph", "-T", "change_id")
+	if err != nil {
+		t.Fatalf("read new @- change_id: %v", err)
+	}
+	if strings.TrimSpace(got) != baseChange {
+		t.Errorf("new workspace @- = %q, want %q", strings.TrimSpace(got), baseChange)
+	}
+}
+
+// TestJJBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior pins
+// the base="" contract: the backend MUST behave exactly like the
+// pre-`--base` code path (`jj workspace add -- <dest>`), so callers
+// that never set --base see zero behaviour change. Signal: the
+// destination is created AND jj's workspace list registers it —
+// mirroring the assertions in TestJJBackendCreateWorkspace.
+func TestJJBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	dest := filepath.Join(parent, "feature")
+	if err := (jjBackend{}).createWorkspace(root, dest, ""); err != nil {
+		t.Fatalf("createWorkspace empty base: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("dest not created: %v", err)
+	}
+
 	got, err := (jjBackend{}).workspaces(root)
 	if err != nil {
 		t.Fatalf("workspaces: %v", err)
@@ -98,7 +189,7 @@ func TestJJBackendWorkspacesListsAll(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 
@@ -209,7 +300,7 @@ func TestJJBackendCreateWorkspaceErrorsOutsideRepo(t *testing.T) {
 	root := canonPath(t, t.TempDir())
 	dest := filepath.Join(filepath.Dir(root), "would-be-workspace")
 
-	err := (jjBackend{}).createWorkspace(root, dest)
+	err := (jjBackend{}).createWorkspace(root, dest, "")
 	if err == nil {
 		t.Fatal("createWorkspace outside jj repo: expected error")
 	}
@@ -240,7 +331,7 @@ func TestJJBackendDetectGhostsFindsRemoved(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -300,7 +391,7 @@ func TestJJBackendPruneGhostsForgetsAndReports(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -412,7 +503,7 @@ func TestJJBackendRemoveWorkspace(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, feature); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, feature, ""); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 	// Sanity: directory exists after add so a failed RemoveAll
