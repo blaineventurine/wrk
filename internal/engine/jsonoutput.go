@@ -493,11 +493,7 @@ func inputProjection(inputs []FingerprintInput) []fingerprintInputJSON {
 	}
 	out := make([]fingerprintInputJSON, 0, len(inputs))
 	for _, in := range inputs {
-		out = append(out, fingerprintInputJSON{
-			Path:      in.Path,
-			Exists:    in.Exists,
-			SizeBytes: in.SizeBytes,
-		})
+		out = append(out, fingerprintInputJSON(in))
 	}
 	return out
 }
