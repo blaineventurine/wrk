@@ -379,3 +379,191 @@ func TestGitBackendCommonDirErrorsOutsideRepo(t *testing.T) {
 		t.Fatalf("commonDir error path returned %q, want empty", got)
 	}
 }
+
+// TestGitBackendDetectGhostsFindsRemoved seeds a secondary worktree,
+// rm -rf's it out-of-band (the way users do when they forget
+// `git worktree remove`), and asserts detectGhosts returns exactly
+// the missing worktree's canonical root. This is the sibling of
+// TestGitBackendWorkspacesSkipsPrunable: workspaces() drops prunable
+// records so callers don't walk into missing dirs; detectGhosts()
+// returns them so `wrk gc` can reconcile the metadata.
+func TestGitBackendDetectGhostsFindsRemoved(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	secondary := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+		t.Fatalf("createWorkspace secondary: %v", err)
+	}
+	if err := os.RemoveAll(secondary); err != nil {
+		t.Fatalf("rm secondary: %v", err)
+	}
+
+	got, err := (gitBackend{}).detectGhosts(root)
+	if err != nil {
+		t.Fatalf("detectGhosts: %v", err)
+	}
+
+	want := []string{secondary}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detectGhosts(%q) = %v, want %v",
+			root, got, want)
+	}
+}
+
+// TestGitBackendDetectGhostsEmptyWhenClean pins the empty case: a
+// clean repository with a single live primary returns an empty
+// (non-nil) slice. `wrk gc` treats a nil return as "backend
+// failed" — the empty slice is the contract for "nothing to prune".
+func TestGitBackendDetectGhostsEmptyWhenClean(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initGitRepo(t, root)
+
+	got, err := (gitBackend{}).detectGhosts(root)
+	if err != nil {
+		t.Fatalf("detectGhosts: %v", err)
+	}
+
+	if got == nil {
+		t.Fatalf("detectGhosts(clean) = nil, want []string{}")
+	}
+	if len(got) != 0 {
+		t.Fatalf("detectGhosts(clean) = %v, want empty", got)
+	}
+}
+
+// TestGitBackendPruneGhostsClearsMetadata seeds a ghost worktree,
+// prunes it, and checks BOTH invariants: the returned slice names
+// the pruned path, AND a follow-up `git worktree list --porcelain`
+// no longer emits any record for it. Just returning the path without
+// running the underlying `git worktree prune` would leave metadata
+// unreconciled and the next `wrk` invocation would surface the same
+// ghost.
+func TestGitBackendPruneGhostsClearsMetadata(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	secondary := filepath.Join(parent, "feature")
+	if err := (gitBackend{}).createWorkspace(root, secondary); err != nil {
+		t.Fatalf("createWorkspace secondary: %v", err)
+	}
+	if err := os.RemoveAll(secondary); err != nil {
+		t.Fatalf("rm secondary: %v", err)
+	}
+
+	pruned, err := (gitBackend{}).pruneGhosts(root)
+	if err != nil {
+		t.Fatalf("pruneGhosts: %v", err)
+	}
+
+	want := []string{secondary}
+	if !reflect.DeepEqual(pruned, want) {
+		t.Fatalf("pruneGhosts(%q) returned %v, want %v",
+			root, pruned, want)
+	}
+
+	// After prune, the metadata must be clean — no record for the
+	// dead worktree in the porcelain listing.
+	out, err := capture(root, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("post-prune worktree list: %v", err)
+	}
+	if strings.Contains(out, "feature") {
+		t.Errorf("expected no `feature` entry after prune; got:\n%s", out)
+	}
+
+	// A second prune on the same clean repo must return the empty
+	// slice — the operation is idempotent from the caller's view.
+	pruned, err = (gitBackend{}).pruneGhosts(root)
+	if err != nil {
+		t.Fatalf("second pruneGhosts: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("second pruneGhosts returned %v, want empty", pruned)
+	}
+}
+
+// TestGitBackendDetectGhostsErrorsOutsideRepo mirrors
+// TestGitBackendWorkspacesErrorsOutsideRepo: pointing detectGhosts at
+// a directory that isn't a git repo MUST surface an error, not
+// silently return an empty slice. A caller treating no-error+empty
+// as "clean" would happily report success for a directory git never
+// looked at.
+func TestGitBackendDetectGhostsErrorsOutsideRepo(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	got, err := (gitBackend{}).detectGhosts(t.TempDir())
+	if err == nil {
+		t.Fatalf("detectGhosts outside repo: got %v, want error", got)
+	}
+	if got != nil {
+		t.Fatalf("detectGhosts error path returned %v, want nil", got)
+	}
+}
+
+// TestParsePrunableWorktreesFiltersLiveAndBare pins the pure parser:
+// the mirror of parseWorktreePorcelain must return ONLY prunable
+// records, dropping live worktrees and bare-primary records. A
+// swap of the two filter conditions would send `wrk gc` after live
+// worktrees.
+func TestParsePrunableWorktreesFiltersLiveAndBare(t *testing.T) {
+	// Two live records, one bare, one prunable — only the prunable
+	// one may appear in the return.
+	input := strings.Join([]string{
+		"worktree /repo/main",
+		"HEAD abc123",
+		"branch refs/heads/main",
+		"",
+		"worktree /repo/live",
+		"HEAD def456",
+		"branch refs/heads/live",
+		"",
+		"worktree /repo/bare.git",
+		"bare",
+		"",
+		"worktree /repo/gone",
+		"HEAD 000000",
+		"prunable gitdir file points to non-existent location",
+		"",
+	}, "\n")
+
+	got := parsePrunableWorktrees(input)
+	want := []string{"/repo/gone"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("parsePrunableWorktrees = %v, want %v", got, want)
+	}
+}
+
+// TestParsePrunableWorktreesEmptyOnClean guards the empty return: no
+// prunable record ⇒ empty (non-nil) slice, so the backend contract
+// holds without a nil-check at every caller.
+func TestParsePrunableWorktreesEmptyOnClean(t *testing.T) {
+	input := strings.Join([]string{
+		"worktree /repo/main",
+		"HEAD abc123",
+		"branch refs/heads/main",
+		"",
+	}, "\n")
+
+	got := parsePrunableWorktrees(input)
+	if got == nil {
+		t.Fatalf("parsePrunableWorktrees(clean) = nil, want empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("parsePrunableWorktrees(clean) = %v, want empty", got)
+	}
+}

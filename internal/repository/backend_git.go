@@ -41,6 +41,38 @@ func (gitBackend) workspaces(root string) ([]string, error) {
 	return parseWorktreePorcelain(out), nil
 }
 
+// detectGhosts returns the roots of worktrees git still tracks whose
+// working directory has vanished. The porcelain listing tags any
+// such record with `prunable`; we filter to those and hand back the
+// worktree paths so callers can report and reconcile them without a
+// second git invocation.
+func (gitBackend) detectGhosts(root string) ([]string, error) {
+	out, err := capture(root, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+
+	return parsePrunableWorktrees(out), nil
+}
+
+// pruneGhosts collects the ghost roots first (so the return value is
+// stable) then runs `git worktree prune`, which is git's supported
+// path for garbage-collecting metadata for missing worktrees. Both
+// calls surface the underlying failure verbatim; a successful prune
+// leaves stdout empty and needs no parsing.
+func (gitBackend) pruneGhosts(root string) ([]string, error) {
+	ghosts, err := (gitBackend{}).detectGhosts(root)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := capture(root, "git", "worktree", "prune"); err != nil {
+		return nil, err
+	}
+
+	return ghosts, nil
+}
+
 // parseWorktreePorcelain extracts the roots of live worktrees from
 // `git worktree list --porcelain` output.
 //
@@ -97,4 +129,48 @@ func parseWorktreePorcelain(out string) []string {
 	}
 
 	return paths
+}
+
+// parsePrunableWorktrees returns the worktree paths git has marked
+// `prunable` in `git worktree list --porcelain` output — the mirror
+// of parseWorktreePorcelain, which drops those same records. Bare
+// records are skipped because they have no working tree to ghost.
+// Returns an empty (non-nil) slice on a clean listing so the backend
+// contract (`[]string{}, nil`) is preserved even when no ghosts exist.
+func parsePrunableWorktrees(out string) []string {
+	ghosts := make([]string, 0)
+
+	for _, record := range strings.Split(out, "\n\n") {
+		var (
+			path     string
+			bare     bool
+			prunable bool
+		)
+
+		for _, line := range strings.Split(record, "\n") {
+			line = strings.TrimRight(line, "\r")
+			if line == "" {
+				continue
+			}
+
+			key, value, hasValue := strings.Cut(line, " ")
+			switch key {
+			case "worktree":
+				if hasValue {
+					path = strings.TrimSpace(value)
+				}
+			case "bare":
+				bare = true
+			case "prunable":
+				prunable = true
+			}
+		}
+
+		if bare || !prunable || path == "" {
+			continue
+		}
+		ghosts = append(ghosts, path)
+	}
+
+	return ghosts
 }

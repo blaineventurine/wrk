@@ -67,6 +67,23 @@ func (r *Repository) Workspaces() ([]string, error) {
 	return r.backend.workspaces(r.Root)
 }
 
+// DetectGhosts returns absolute workspace roots that VCS metadata
+// still references but whose working directory is missing. Read-only:
+// callers (notably `wrk gc`) inspect the result and decide whether to
+// reconcile via PruneGhosts. Returns an empty (non-nil) slice on a
+// clean repository.
+func (r *Repository) DetectGhosts() ([]string, error) {
+	return r.backend.detectGhosts(r.Root)
+}
+
+// PruneGhosts detects ghost workspaces (as DetectGhosts does) and
+// cleans them from the underlying VCS's metadata. Returns the roots
+// pruned so callers can surface them in output. Returns an empty
+// (non-nil) slice when there was nothing to prune.
+func (r *Repository) PruneGhosts() ([]string, error) {
+	return r.backend.pruneGhosts(r.Root)
+}
+
 // resolveDestination applies the sibling-default policy: a bare name
 // becomes ../<name>; paths with a separator or leading dot pass
 // through untouched.

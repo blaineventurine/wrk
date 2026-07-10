@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -218,5 +219,172 @@ func TestJJBackendCreateWorkspaceErrorsOutsideRepo(t *testing.T) {
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatalf("dest should not exist after failed createWorkspace; stat err = %v",
 			statErr)
+	}
+}
+
+// TestJJBackendDetectGhostsFindsRemoved seeds a colocated repo with
+// a secondary workspace, deletes its working-copy directory
+// out-of-band, and asserts detectGhosts returns exactly the missing
+// workspace's path. jj 0.43's `self.root()` template evaluation
+// itself emits an inline `<Error: ...>` string for missing
+// working copies — the backend recovers the path from that string
+// so callers can report and prune the ghost without extra shell-outs.
+func TestJJBackendDetectGhostsFindsRemoved(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	secondary := filepath.Join(parent, "feature")
+	if err := (jjBackend{}).createWorkspace(root, secondary); err != nil {
+		t.Fatalf("createWorkspace secondary: %v", err)
+	}
+	if err := os.RemoveAll(secondary); err != nil {
+		t.Fatalf("rm secondary: %v", err)
+	}
+
+	got, err := (jjBackend{}).detectGhosts(root)
+	if err != nil {
+		t.Fatalf("detectGhosts: %v", err)
+	}
+
+	want := []string{secondary}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detectGhosts(%q) = %v, want %v", root, got, want)
+	}
+}
+
+// TestJJBackendDetectGhostsEmptyWhenClean pins the empty case: a
+// clean colocated repo returns an empty (non-nil) slice, satisfying
+// the backend contract `wrk gc` relies on to distinguish "nothing
+// to do" from "backend failed".
+func TestJJBackendDetectGhostsEmptyWhenClean(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	root := canonPath(t, t.TempDir())
+	initColocatedJJRepo(t, root)
+
+	got, err := (jjBackend{}).detectGhosts(root)
+	if err != nil {
+		t.Fatalf("detectGhosts: %v", err)
+	}
+
+	if got == nil {
+		t.Fatalf("detectGhosts(clean) = nil, want []string{}")
+	}
+	if len(got) != 0 {
+		t.Fatalf("detectGhosts(clean) = %v, want empty", got)
+	}
+}
+
+// TestJJBackendPruneGhostsForgetsAndReports seeds a ghost workspace,
+// prunes it, and checks BOTH invariants: the returned slice names
+// the pruned path, AND a follow-up workspaces() call no longer lists
+// the ghost. jj's `workspace forget` is the only supported way to
+// drop the workspace from the repo's metadata; the test would fail
+// if the implementation returned the path but never called forget.
+func TestJJBackendPruneGhostsForgetsAndReports(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	secondary := filepath.Join(parent, "feature")
+	if err := (jjBackend{}).createWorkspace(root, secondary); err != nil {
+		t.Fatalf("createWorkspace secondary: %v", err)
+	}
+	if err := os.RemoveAll(secondary); err != nil {
+		t.Fatalf("rm secondary: %v", err)
+	}
+
+	pruned, err := (jjBackend{}).pruneGhosts(root)
+	if err != nil {
+		t.Fatalf("pruneGhosts: %v", err)
+	}
+
+	want := []string{secondary}
+	if !reflect.DeepEqual(pruned, want) {
+		t.Fatalf("pruneGhosts(%q) = %v, want %v", root, pruned, want)
+	}
+
+	// Post-prune: workspaces() must no longer see the ghost. The
+	// primary is still there and it stays the only survivor.
+	ws, err := (jjBackend{}).workspaces(root)
+	if err != nil {
+		t.Fatalf("post-prune workspaces: %v", err)
+	}
+	if !slices.Equal(ws, []string{root}) {
+		t.Fatalf("post-prune workspaces = %v, want [%q]", ws, root)
+	}
+
+	// Idempotent: a second prune returns the empty slice, not an
+	// error, so callers can call it defensively.
+	pruned, err = (jjBackend{}).pruneGhosts(root)
+	if err != nil {
+		t.Fatalf("second pruneGhosts: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("second pruneGhosts = %v, want empty", pruned)
+	}
+}
+
+// TestJJBackendDetectGhostsErrorsOutsideRepo mirrors
+// TestJJBackendWorkspacesErrorsOutsideRepo: a directory that isn't
+// a jj repo MUST surface the underlying `jj workspace list` error
+// rather than a silent empty slice, which callers would treat as
+// "clean".
+func TestJJBackendDetectGhostsErrorsOutsideRepo(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	got, err := (jjBackend{}).detectGhosts(t.TempDir())
+	if err == nil {
+		t.Fatalf("detectGhosts outside jj repo: got %v, want error", got)
+	}
+	if got != nil {
+		t.Fatalf("detectGhosts error path returned %v, want nil", got)
+	}
+}
+
+// TestParseJJInlineErrorExtractsPath is the pure-parser unit test for
+// jj 0.43's template-time error string. A regression that dropped the
+// LastIndex-based split (say, splitting on the first ": " after the
+// name) would truncate the workspace path at the first embedded
+// colon and hand callers a bogus prefix to display or prune.
+func TestParseJJInlineErrorExtractsPath(t *testing.T) {
+	// Exact shape observed on jj 0.43 with a rm -rf'd workspace.
+	input := `<Error: Failed to resolve workspace root: feature: /tmp/main/.jj/repo/../../../feature: No such file or directory (os error 2)>`
+
+	got, isErr := parseJJInlineError("feature", input)
+	if !isErr {
+		t.Fatal("parseJJInlineError: shape was a jj inline error, isErr = false")
+	}
+	// filepath.Clean collapses `.jj/repo/../../../` down to the
+	// actual workspace root, matching what wrk hands to callers.
+	want := "/tmp/feature"
+	if got != want {
+		t.Fatalf("parseJJInlineError = %q, want %q", got, want)
+	}
+}
+
+// TestParseJJInlineErrorRejectsPlainPath guards the negative branch:
+// a plain absolute path (what jj emits for a live workspace) MUST
+// come back as (_, false), so callers don't mistake a live entry for
+// a ghost and try to forget it.
+func TestParseJJInlineErrorRejectsPlainPath(t *testing.T) {
+	got, isErr := parseJJInlineError("default", "/tmp/main")
+	if isErr {
+		t.Fatalf("parseJJInlineError(plain path) = (%q, true), want (_, false)", got)
 	}
 }

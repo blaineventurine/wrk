@@ -24,6 +24,17 @@ type backend interface {
 
 	// workspaces returns the roots of every live workspace/worktree.
 	workspaces(root string) ([]string, error)
+
+	// detectGhosts returns the roots of workspaces the VCS still
+	// tracks whose working directory is missing on disk. Read-only.
+	// Returns an empty slice (not nil) when the repository is clean.
+	detectGhosts(root string) ([]string, error)
+
+	// pruneGhosts detects ghost workspaces (as detectGhosts does) and
+	// cleans them from the VCS's metadata. Returns the roots pruned so
+	// callers can surface them in output. Returns an empty slice (not
+	// nil) when the repository is clean.
+	pruneGhosts(root string) ([]string, error)
 }
 
 func backendFor(vcs VCS) (backend, error) {
