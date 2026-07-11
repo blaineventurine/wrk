@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/blaineventurine/wrk/internal/executor"
 )
 
 type jjBackend struct{}
@@ -141,12 +143,18 @@ func (jjBackend) pruneGhosts(root string) ([]string, error) {
 // `jj workspace forget` is metadata-only — unlike `git worktree
 // remove` it leaves the working-copy directory on disk. Match the
 // git backend's user-visible contract by sweeping the directory
-// after the forget succeeds. Order matters: if RemoveAll fails
+// after the forget succeeds. Order matters: if the sweep fails
 // afterwards the user is left in the same "orphan directory" state
 // the pre-fix jj backend produced, which `wrk gc` cannot catch (gc
 // looks for the inverse: metadata present, directory missing), but
 // a subsequent `rm -rf` by hand is safe.
-func (jjBackend) removeWorkspace(root, target string, _ bool) error {
+//
+// The sweep uses executor.RemoveAllProgress so the CLI-supplied
+// onProgress callback fires for each regular file removed. Progress
+// events on the multi-GB `node_modules`-style workspaces are the
+// whole reason this backend does the sweep here instead of leaving
+// it to `wrk gc`.
+func (jjBackend) removeWorkspace(root, target string, _ bool, onProgress func(int64)) error {
 	entries, err := listJJWorkspaces(root)
 	if err != nil {
 		return err
@@ -164,7 +172,7 @@ func (jjBackend) removeWorkspace(root, target string, _ bool) error {
 		if err := passthrough(root, "jj", "workspace", "forget", "--", e.name); err != nil {
 			return err
 		}
-		if err := os.RemoveAll(target); err != nil {
+		if err := executor.RemoveAllProgress(target, onProgress); err != nil {
 			return fmt.Errorf(
 				"jj workspace forget succeeded but failed to remove directory %s: %w",
 				target, err,

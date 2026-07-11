@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/progress"
 )
 
 // forgetYes is bound to `--yes`/`-y`. Scripts and CI (which have no
@@ -66,6 +67,10 @@ var forgetCmd = &cobra.Command{
 		if dec != Proceed {
 			return nil
 		}
+
+		bar := progress.New(os.Stdout, plan.TotalSize, "Forgetting")
+		defer bar.Finish()
+		options.Progress = bar.Add
 
 		return engine.ExecuteForget(repo, plan, options)
 	},

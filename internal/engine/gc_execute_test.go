@@ -236,3 +236,56 @@ func TestExecuteGCSweepsCrashedForgetMarker(t *testing.T) {
 		t.Errorf("forgetting marker survived gc: %v", err)
 	}
 }
+
+// TestExecuteGCInvokesProgress pins the plumbing that fires
+// options.Progress during a variant delete. After Link mints a
+// second variant, the first (now-unpinned) variant contains at
+// least the initialize hook's touched marker; RemoveAllProgress
+// must fire the callback for each regular file it removes.
+func TestExecuteGCInvokesProgress(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n" +
+			"    hooks:\n" +
+			"      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\" && dd if=/dev/zero of=\"{shared}/blob\" bs=1024 count=4 2>/dev/null'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v1: %v", err)
+	}
+	writeFile(t, filepath.Join(repo.Root, "package.json"), `{"v":2}`)
+	_ = os.Remove(filepath.Join(repo.Root, "node_modules"))
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v2: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.DeleteVariants) != 1 {
+		t.Fatalf("expected 1 variant to delete, got %d", len(plan.DeleteVariants))
+	}
+
+	var total int64
+	opts := Options{
+		StorageRoot: storage,
+		Stdout:      &bytes.Buffer{},
+		Progress:    func(n int64) { total += n },
+	}
+	if err := ExecuteGC(repo, plan, opts); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+	// The dd blob is 4 KiB and the variant subtree is renamed then
+	// removed via RemoveAllProgress. A non-zero total proves the
+	// callback actually fired for at least the blob file.
+	if total <= 0 {
+		t.Errorf("progress total = %d, want >0 (blob bytes)", total)
+	}
+}

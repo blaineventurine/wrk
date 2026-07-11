@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blaineventurine/wrk/internal/executor"
 	"github.com/blaineventurine/wrk/internal/repository"
 )
 
@@ -160,7 +161,7 @@ func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options
 		// RemoveAll left the marker on disk. Finish the delete before
 		// the fresh rename so step 1 has a clean target.
 		if _, err := os.Stat(marker); err == nil {
-			if err := os.RemoveAll(marker); err != nil {
+			if err := executor.RemoveAllProgress(marker, options.Progress); err != nil {
 				return fmt.Errorf("clearing forgetting marker: %w", err)
 			}
 		} else if !os.IsNotExist(err) {
@@ -174,7 +175,7 @@ func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options
 			if err := os.Rename(plan.StoragePath, marker); err != nil {
 				return fmt.Errorf("marking storage for removal: %w", err)
 			}
-			if err := os.RemoveAll(marker); err != nil {
+			if err := executor.RemoveAllProgress(marker, options.Progress); err != nil {
 				return fmt.Errorf("removing marked storage: %w", err)
 			}
 		} else if !os.IsNotExist(err) {

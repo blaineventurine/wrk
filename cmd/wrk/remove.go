@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/progress"
 )
 
 // removeYes is bound to `--yes`/`-y`. Scripts and CI (which have no
@@ -74,7 +75,20 @@ var removeCmd = &cobra.Command{
 			return nil
 		}
 
-		return engine.ExecuteRemove(repo, plan, removeForce)
+		// Only the jj backend emits per-file byte events during a
+		// remove: `git worktree remove` deletes inside its own
+		// subprocess so wrk cannot inspect its progress. Rather than
+		// render a bar that snaps from 0% to 100% at the end for
+		// git, skip creation entirely on that backend — the plan
+		// display still shows the pre-remove Size so the user knows
+		// what is disappearing.
+		if plan.Backend == "jj" {
+			bar := progress.New(os.Stdout, plan.TotalBytes, "Removing")
+			defer bar.Finish()
+			options.Progress = bar.Add
+		}
+
+		return engine.ExecuteRemove(repo, plan, removeForce, options)
 	},
 }
 
@@ -86,6 +100,7 @@ func printRemovePlan(w *os.File, plan engine.RemovePlan) {
 	fmt.Fprintf(w, "Removing workspace: %s\n\n", plan.Target)
 	fmt.Fprintf(w, "  Backend: %s\n", plan.Backend)
 	fmt.Fprintf(w, "  VCS command: %s\n", plan.VCSCommand)
+	fmt.Fprintf(w, "  Size: %s\n", engine.HumanSize(plan.TotalBytes))
 	if plan.UncommittedChanges > 0 {
 		fmt.Fprintf(w, "  Uncommitted changes: %d\n", plan.UncommittedChanges)
 	}

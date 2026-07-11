@@ -512,7 +512,7 @@ func TestJJBackendRemoveWorkspace(t *testing.T) {
 		t.Fatalf("secondary workspace missing after createWorkspace: %v", err)
 	}
 
-	if err := (jjBackend{}).removeWorkspace(root, feature, false); err != nil {
+	if err := (jjBackend{}).removeWorkspace(root, feature, false, nil); err != nil {
 		t.Fatalf("removeWorkspace: %v", err)
 	}
 
@@ -551,8 +551,47 @@ func TestJJBackendRemoveWorkspaceIdempotent(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	nonexistent := filepath.Join(parent, "never-was")
-	if err := (jjBackend{}).removeWorkspace(root, nonexistent, false); err != nil {
+	if err := (jjBackend{}).removeWorkspace(root, nonexistent, false, nil); err != nil {
 		t.Errorf("idempotent jj removeWorkspace of missing target: %v", err)
+	}
+}
+
+// TestJJBackendRemoveWorkspaceFiresProgress pins the byte-count
+// plumbing: a workspace with a seeded file MUST invoke the
+// onProgress callback at least once with the file's size while
+// removeWorkspace is sweeping the working-copy directory.
+// Guards the split between "jj workspace forget" (metadata-only)
+// and executor.RemoveAllProgress (byte-count sweep).
+func TestJJBackendRemoveWorkspaceFiresProgress(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initColocatedJJRepo(t, root)
+
+	feature := filepath.Join(parent, "feature")
+	if err := (jjBackend{}).createWorkspace(root, feature, ""); err != nil {
+		t.Fatalf("createWorkspace: %v", err)
+	}
+	// Fixed-size seed so the lower-bound assertion is stable.
+	if err := os.WriteFile(filepath.Join(feature, "seed.bin"), make([]byte, 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var total int64
+	if err := (jjBackend{}).removeWorkspace(root, feature, false, func(n int64) {
+		total += n
+	}); err != nil {
+		t.Fatalf("removeWorkspace: %v", err)
+	}
+	if total < 2048 {
+		t.Errorf("progress total = %d, want >= 2048 (seed.bin size)", total)
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("workspace dir survives removeWorkspace: %v", err)
 	}
 }
 

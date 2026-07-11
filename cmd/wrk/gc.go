@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/progress"
 )
 
 // gcYes is bound to `--yes`/`-y`. Present so scripts and CI (which
@@ -77,6 +78,10 @@ var gcCmd = &cobra.Command{
 		if dec != Proceed {
 			return nil
 		}
+
+		bar := progress.New(os.Stdout, plan.TotalBytesFreed, "Reclaiming")
+		defer bar.Finish()
+		options.Progress = bar.Add
 
 		return engine.ExecuteGC(repo, plan, options)
 	},

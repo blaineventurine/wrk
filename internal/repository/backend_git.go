@@ -91,7 +91,12 @@ func (gitBackend) pruneGhosts(root string) ([]string, error) {
 // failure, and the metadata cleanup is `wrk gc`'s job via
 // pruneGhosts. Both sides of the path comparison are canonicalized
 // so macOS's /private vs /var symlink pair doesn't miss a match.
-func (gitBackend) removeWorkspace(root, target string, force bool) error {
+//
+// onProgress is ignored: `git worktree remove` deletes the working
+// tree inside git's own subprocess, so wrk cannot inspect the
+// per-file byte count. The plan display still shows the pre-remove
+// size so callers know how much data is disappearing.
+func (gitBackend) removeWorkspace(root, target string, force bool, _ func(int64)) error {
 	out, err := capture(root, "git", "worktree", "list", "--porcelain")
 	if err != nil {
 		return err

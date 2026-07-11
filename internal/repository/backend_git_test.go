@@ -671,7 +671,7 @@ func TestGitBackendRemoveWorkspace(t *testing.T) {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
-	if err := (gitBackend{}).removeWorkspace(root, feature, false); err != nil {
+	if err := (gitBackend{}).removeWorkspace(root, feature, false, nil); err != nil {
 		t.Fatalf("removeWorkspace: %v", err)
 	}
 
@@ -706,7 +706,7 @@ func TestGitBackendRemoveWorkspaceIdempotent(t *testing.T) {
 	initGitRepo(t, root)
 
 	nonexistent := filepath.Join(parent, "never-was")
-	if err := (gitBackend{}).removeWorkspace(root, nonexistent, false); err != nil {
+	if err := (gitBackend{}).removeWorkspace(root, nonexistent, false, nil); err != nil {
 		t.Errorf("idempotent removeWorkspace of missing target: %v", err)
 	}
 }
@@ -742,7 +742,7 @@ func TestGitBackendRemoveWorkspaceForce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := (gitBackend{}).removeWorkspace(root, feature, true); err != nil {
+	if err := (gitBackend{}).removeWorkspace(root, feature, true, nil); err != nil {
 		t.Fatalf("removeWorkspace --force: %v", err)
 	}
 	if _, err := os.Stat(feature); !os.IsNotExist(err) {
@@ -772,7 +772,7 @@ func TestRepositoryRemoveWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if err := repo.RemoveWorkspace(feature, false); err != nil {
+	if err := repo.RemoveWorkspace(feature, false, nil); err != nil {
 		t.Fatalf("RemoveWorkspace: %v", err)
 	}
 	if _, err := os.Stat(feature); !os.IsNotExist(err) {

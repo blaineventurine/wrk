@@ -48,12 +48,20 @@ type RemovePlan struct {
 	// detach registry still carries an entry keyed by it — a stale
 	// bookkeeping artefact `wrk gc` should sweep.
 	IsGhost bool
-
 	// Refusal is the composed refusal reason. Empty when no refusal
 	// applies. Ghost cases populate Refusal with a hint at `wrk gc`
 	// (and the caller MUST branch on IsGhost, not Refusal-emptiness,
 	// to distinguish soft from ghost refusals).
 	Refusal string
+
+	// TotalBytes is the sum of regular-file bytes under Target,
+	// computed by treeSize during BuildRemovePlan. Best-effort: walk
+	// errors are swallowed so a partial reading yields a lower bound
+	// rather than aborting the plan (same policy as `wrk list --size`
+	// and BuildForgetPlan). The CLI uses this to size the progress
+	// bar; 0 means either the target has no regular files or the
+	// walk failed early.
+	TotalBytes int64
 }
 
 // BuildRemovePlan resolves destination and checks every refusal guard
@@ -161,6 +169,14 @@ func BuildRemovePlan(
 		Backend: string(repo.VCS()),
 	}
 	plan.VCSCommand = renderRemoveCommand(repo.VCS(), target)
+
+	// TotalBytes is populated for every code path that returns a
+	// plan (live workspace or ghost). treeSize tolerates partial
+	// walk failures internally; the error is swallowed here so a
+	// filesystem hiccup does not abort the plan — a slightly-low
+	// size is preferable to no plan at all, matching the policy
+	// shared with BuildForgetPlan and `wrk list --size`.
+	plan.TotalBytes, _ = treeSize(target)
 
 	// 5. Ghost vs hard-unknown branch. A registry entry keyed by
 	// target proves someone tore the workspace down externally (VCS
@@ -277,8 +293,14 @@ func renderRemoveCommand(vcs repository.VCS, target string) string {
 // (idempotent per backend contract) then clears any detach-registry
 // entry keyed by the target. Callers must have already applied the
 // safety gates from BuildRemovePlan / Confirm.
-func ExecuteRemove(repo *repository.Repository, plan RemovePlan, force bool) error {
-	if err := repo.RemoveWorkspace(plan.Target, force); err != nil {
+//
+// options.Progress, if non-nil, is fired for each regular file
+// removed by the wrk-side directory sweep. Only the jj backend
+// fires it: `git worktree remove` runs its own subprocess and we
+// cannot inspect its per-file deletes. See
+// backend.removeWorkspace's contract for the asymmetry.
+func ExecuteRemove(repo *repository.Repository, plan RemovePlan, force bool, options Options) error {
+	if err := repo.RemoveWorkspace(plan.Target, force, options.Progress); err != nil {
 		return err
 	}
 	return withRegistryLock(repo, func() error {

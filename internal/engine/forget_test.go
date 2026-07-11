@@ -297,3 +297,73 @@ func TestExecuteForgetClearsMultiWorkspaceRegistry(t *testing.T) {
 		t.Errorf("registry not fully cleared: %v", after)
 	}
 }
+
+// TestExecuteForgetInvokesProgress pins the plumbing that fires
+// options.Progress during the trailing storage sweep. Link mints a
+// non-empty storage tree containing an initialize-hook blob;
+// ExecuteForget MUST call the callback with a positive byte total
+// as it removes every regular file.
+func TestExecuteForgetInvokesProgress(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: node\n    path: node_modules\n" +
+			"    fingerprint:\n      - \"{root}/package.json\"\n" +
+			"    hooks:\n      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\" && dd if=/dev/zero of=\"{shared}/blob\" bs=1024 count=8 2>/dev/null'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if plan.TotalSize <= 0 {
+		t.Fatalf("prerequisite: plan.TotalSize=%d, want >0", plan.TotalSize)
+	}
+
+	var total int64
+	opts := Options{StorageRoot: storage, Progress: func(n int64) { total += n }}
+	if err := ExecuteForget(repo, plan, opts); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+	if total <= 0 {
+		t.Errorf("progress total = %d, want >0 (blob bytes)", total)
+	}
+}
+
+// TestExecuteForgetRecoveryPathInvokesProgress pins the crashed-
+// marker recovery branch also routes through RemoveAllProgress.
+// A seeded .wrk-forgetting marker with content MUST fire the
+// callback, otherwise the recovery path silently regresses to
+// os.RemoveAll.
+func TestExecuteForgetRecoveryPathInvokesProgress(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	storage := storageIn(t, repo.Root)
+
+	storagePath := filepath.Join(storage, repo.RepositoryID)
+	marker := storagePath + ".wrk-forgetting"
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fixed size for a stable lower-bound assertion.
+	if err := os.WriteFile(filepath.Join(marker, "leftover"), make([]byte, 512), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+
+	var total int64
+	opts := Options{StorageRoot: storage, Progress: func(n int64) { total += n }}
+	if err := ExecuteForget(repo, plan, opts); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+	if total < 512 {
+		t.Errorf("progress total = %d, want >= 512 (leftover blob)", total)
+	}
+}

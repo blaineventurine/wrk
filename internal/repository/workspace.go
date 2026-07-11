@@ -39,12 +39,17 @@ func (r *Repository) CreateWorkspace(destination, base string) (*Repository, err
 // target is canonicalized with filepath.Abs — NOT EvalSymlinks —
 // because the caller passed a specific path; walking through
 // symlinks might land on a different workspace than intended.
-func (r *Repository) RemoveWorkspace(target string, force bool) error {
+//
+// onProgress is a byte-count callback fired for each regular file
+// removed by the wrk-side directory sweep. Only the jj backend fires
+// it — see backend.removeWorkspace's documentation. Nil is a valid
+// no-op.
+func (r *Repository) RemoveWorkspace(target string, force bool, onProgress func(int64)) error {
 	abs, err := filepath.Abs(target)
 	if err != nil {
 		return err
 	}
-	return r.backend.removeWorkspace(r.Root, abs, force)
+	return r.backend.removeWorkspace(r.Root, abs, force, onProgress)
 }
 
 // UncommittedCount returns the number of files with uncommitted

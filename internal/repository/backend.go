@@ -45,7 +45,15 @@ type backend interface {
 	// `workspace forget` has no equivalent flag and treats force as
 	// a no-op. Idempotent: if target is not currently tracked as a
 	// live workspace, returns nil.
-	removeWorkspace(root, target string, force bool) error
+	//
+	// onProgress is an optional byte-count callback fired for each
+	// regular file removed by the wrk-side directory sweep. The git
+	// backend delegates deletion to `git worktree remove`, which
+	// runs in a subprocess we cannot inspect — onProgress is ignored
+	// there. The jj backend runs its own RemoveAllProgress sweep
+	// after `jj workspace forget`, so onProgress fires for every
+	// working-copy file. Nil is a valid no-op.
+	removeWorkspace(root, target string, force bool, onProgress func(int64)) error
 
 	// uncommittedCount returns the number of files with uncommitted
 	// changes in target — for git the `git status --porcelain` line

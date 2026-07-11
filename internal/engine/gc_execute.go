@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/blaineventurine/wrk/internal/executor"
 	"github.com/blaineventurine/wrk/internal/repository"
 )
 
@@ -117,7 +118,7 @@ func deleteVariant(v variant, options Options, recordErr func(error)) {
 	// leaves the marker. In that case we skip the rename (there is
 	// nothing left to move) and finish the RemoveAll.
 	if _, err := os.Lstat(deletingPath); err == nil {
-		if err := os.RemoveAll(deletingPath); err != nil {
+		if err := executor.RemoveAllProgress(deletingPath, options.Progress); err != nil {
 			recordErr(err)
 		}
 		return
@@ -134,7 +135,7 @@ func deleteVariant(v variant, options Options, recordErr func(error)) {
 		return
 	}
 
-	if err := os.RemoveAll(deletingPath); err != nil {
+	if err := executor.RemoveAllProgress(deletingPath, options.Progress); err != nil {
 		recordErr(err)
 	}
 }
@@ -145,7 +146,7 @@ func deleteVariant(v variant, options Options, recordErr func(error)) {
 // going.
 func sweepBookkeeping(paths []string, options Options) {
 	for _, p := range paths {
-		if err := os.RemoveAll(p); err != nil {
+		if err := executor.RemoveAllProgress(p, options.Progress); err != nil {
 			fmt.Fprintf(options.Stdout, "failed to remove %s: %v\n", p, err)
 		}
 	}

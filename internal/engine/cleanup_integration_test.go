@@ -79,7 +79,7 @@ func TestCleanupLifecycle(t *testing.T) {
 	if removePlan.Refusal != "" {
 		t.Fatalf("clean feature should have no refusal, got %q", removePlan.Refusal)
 	}
-	if err := ExecuteRemove(repo, removePlan, false); err != nil {
+	if err := ExecuteRemove(repo, removePlan, false, opts); err != nil {
 		t.Fatalf("ExecuteRemove: %v", err)
 	}
 	if _, err := os.Stat(feature); !os.IsNotExist(err) {

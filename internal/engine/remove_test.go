@@ -293,6 +293,125 @@ func TestBuildRemovePlanBareNameResolvesSibling(t *testing.T) {
 	}
 }
 
+// TestBuildRemovePlanTotalBytesCountsRegularFiles pins the
+// TotalBytes population contract: BuildRemovePlan MUST sum every
+// regular file under the target. A workspace with two files
+// totalling 300 bytes should surface plan.TotalBytes >= 300 (git's
+// own .git directory adds more, so we only assert a lower bound).
+func TestBuildRemovePlanTotalBytesCountsRegularFiles(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	// Fixed byte counts so the assertion is stable.
+	if err := os.WriteFile(filepath.Join(feature, "a.bin"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(feature, "b.bin"), make([]byte, 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if plan.TotalBytes < 300 {
+		t.Errorf("TotalBytes = %d, want >= 300 (100 + 200 + git metadata)", plan.TotalBytes)
+	}
+}
+
+// TestBuildRemovePlanTotalBytesGhostIsZeroSafe pins the ghost
+// branch: a ghost target (missing dir, stale registry) still
+// returns a plan. TotalBytes will be 0 because treeSize tolerates a
+// missing root — the CLI's bar suppression via Threshold handles the
+// rest so no spurious render fires.
+func TestBuildRemovePlanTotalBytesGhostIsZeroSafe(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	reg, _ := loadRegistry(repo)
+	ghost := "/tmp/definitely-not-a-live-worktree-progress-test"
+	reg[ghost] = []string{"node_modules"}
+	if err := saveRegistry(repo, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, ghost, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if !plan.IsGhost {
+		t.Errorf("IsGhost = false, want true")
+	}
+	if plan.TotalBytes != 0 {
+		t.Errorf("TotalBytes = %d, want 0 for missing target", plan.TotalBytes)
+	}
+}
+
+// TestExecuteRemoveInvokesProgress pins the plumbing: on a jj
+// backend workspace, ExecuteRemove MUST fire Options.Progress at
+// least once with a positive byte count. The git backend delegates
+// deletion to `git worktree remove`'s own subprocess so the
+// callback stays silent there; TestExecuteRemoveProgressSilentOnGit
+// pins that half of the contract.
+func TestExecuteRemoveInvokesProgress(t *testing.T) {
+	repo := newTestColocatedJJRepo(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	// Seed a file the sweep must count. Size well above zero so a
+	// spurious zero-byte callback couldn't mask a broken plumbing.
+	if err := os.WriteFile(filepath.Join(feature, "seed.bin"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+
+	var total int64
+	opts := Options{Progress: func(n int64) { total += n }}
+	if err := ExecuteRemove(repo, plan, false, opts); err != nil {
+		t.Fatalf("ExecuteRemove: %v", err)
+	}
+	if total < 4096 {
+		t.Errorf("progress total = %d, want >= 4096 (seed.bin size)", total)
+	}
+}
+
+// TestExecuteRemoveProgressSilentOnGit is the git-side mirror of
+// TestExecuteRemoveInvokesProgress. `git worktree remove` runs its
+// own subprocess and we cannot inspect its deletes; the callback
+// MUST stay quiet — but the workspace MUST still be gone.
+func TestExecuteRemoveProgressSilentOnGit(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	var fired bool
+	opts := Options{Progress: func(int64) { fired = true }}
+	if err := ExecuteRemove(repo, plan, false, opts); err != nil {
+		t.Fatalf("ExecuteRemove: %v", err)
+	}
+	if fired {
+		t.Errorf("git backend fired Progress callback; expected silent")
+	}
+	if _, err := os.Stat(feature); !os.IsNotExist(err) {
+		t.Errorf("feature dir survives: %v", err)
+	}
+}
 // TestExecuteRemoveHappyPath: ExecuteRemove tears down a clean
 // workspace and the directory is removed from the filesystem.
 func TestExecuteRemoveHappyPath(t *testing.T) {
@@ -308,7 +427,7 @@ func TestExecuteRemoveHappyPath(t *testing.T) {
 		t.Fatalf("BuildRemovePlan: %v", err)
 	}
 
-	if err := ExecuteRemove(repo, plan, false); err != nil {
+	if err := ExecuteRemove(repo, plan, false, Options{}); err != nil {
 		t.Fatalf("ExecuteRemove: %v", err)
 	}
 	if _, err := os.Stat(feature); !os.IsNotExist(err) {
@@ -342,7 +461,7 @@ func TestExecuteRemoveClearsRegistryEntry(t *testing.T) {
 		t.Fatalf("BuildRemovePlan: %v", err)
 	}
 
-	if err := ExecuteRemove(repo, plan, true); err != nil {
+	if err := ExecuteRemove(repo, plan, true, Options{}); err != nil {
 		t.Fatalf("ExecuteRemove --force: %v", err)
 	}
 
@@ -377,7 +496,7 @@ func TestExecuteRemoveIdempotentAfterExternalRemoval(t *testing.T) {
 	// Plan may treat this as a ghost or still find registry state; we
 	// construct the plan by hand to isolate the executor test.
 	plan := RemovePlan{Target: feature, Backend: "git"}
-	if err := ExecuteRemove(repo, plan, true); err != nil {
+	if err := ExecuteRemove(repo, plan, true, Options{}); err != nil {
 		t.Fatalf("ExecuteRemove idempotent path: %v", err)
 	}
 
