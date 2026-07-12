@@ -415,7 +415,7 @@ func TestCleanBookkeepingDetectEmptyStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if len(result.OrphanedLocks)+len(result.StaleProvisioning)+len(result.StaleDeleting)+len(result.StaleForgetting) != 0 {
+	if len(result.OrphanedLocks)+len(result.StaleProvisioning)+len(result.StaleDeleting)+len(result.StaleForgetting)+len(result.PendingSwaps)+len(result.OrphanedIsolationEntries) != 0 {
 		t.Fatalf("expected empty result, got %+v", result)
 	}
 }
@@ -622,5 +622,184 @@ func TestBuildGCPlanIsReadOnlyOnDisk(t *testing.T) {
 			t.Errorf("variant path drift: before=%v after=%v", before, afterPaths)
 			break
 		}
+	}
+}
+
+// TestCleanBookkeepingDetectPromotesMidSwapCrash pins the B1
+// recovery: when `wrk run` crashes between its swap-aside
+// `Rename(real, deleting)` and install `Rename(tmp, real)`, the
+// fingerprint is `.wrk-provisioning/` present + `.wrk-deleting/`
+// present + real MISSING. cleanBookkeepingDetect must emit a
+// PendingSwap for that provisioning (so the executor promotes it,
+// preserving the hook output) AND still emit the deleting into
+// StaleDeleting (so the standard sweep cleans up the old aside).
+// The provisioning MUST NOT also land in StaleProvisioning — that
+// would race the sweep against the promotion.
+func TestCleanBookkeepingDetectPromotesMidSwapCrash(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	variantBase := filepath.Join(resourceDir, "abc123")
+	deletingPath := variantBase + ".wrk-deleting"
+	provisioningPath := variantBase + ".wrk-provisioning"
+	if err := os.MkdirAll(deletingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deletingPath, "old-content.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(provisioningPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(provisioningPath, "new-content.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No variantBase — the real path is missing, which is the
+	// crash fingerprint.
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+
+	if len(result.PendingSwaps) != 1 {
+		t.Fatalf("PendingSwaps = %d, want 1: %+v", len(result.PendingSwaps), result.PendingSwaps)
+	}
+	if result.PendingSwaps[0].Provisioning != provisioningPath {
+		t.Errorf("PendingSwaps[0].Provisioning = %q, want %q",
+			result.PendingSwaps[0].Provisioning, provisioningPath)
+	}
+	if result.PendingSwaps[0].Real != variantBase {
+		t.Errorf("PendingSwaps[0].Real = %q, want %q",
+			result.PendingSwaps[0].Real, variantBase)
+	}
+
+	// The provisioning must NOT double-book into StaleProvisioning
+	// — otherwise the sweep races the promotion and can throw away
+	// the hook output the promotion is meant to preserve.
+	for _, p := range result.StaleProvisioning {
+		if p == provisioningPath {
+			t.Errorf("provisioning also in StaleProvisioning: %q", p)
+		}
+	}
+
+	// The deleting still lands in StaleDeleting so the standard
+	// sweep cleans up the old aside after the promotion completes.
+	found := false
+	for _, d := range result.StaleDeleting {
+		if d == deletingPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("deleting sibling missing from StaleDeleting: %v", result.StaleDeleting)
+	}
+}
+
+// TestCleanBookkeepingDetectStaleProvisioningWithoutDeletingSweeps
+// pins the fall-through path: `.wrk-provisioning/` alone (no sibling
+// `.wrk-deleting/`) is stale scratch, not a mid-swap-crash. The
+// realMissing branch fires ONLY when both siblings are present, so
+// this input must still route to StaleProvisioning.
+func TestCleanBookkeepingDetectStaleProvisioningWithoutDeletingSweeps(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prov := filepath.Join(resourceDir, "beefcafe.wrk-provisioning")
+	if err := os.MkdirAll(prov, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No .wrk-deleting sibling; no real; no lock — stale scratch.
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(result.PendingSwaps) != 0 {
+		t.Errorf("PendingSwaps = %v, want empty (no deleting sibling)", result.PendingSwaps)
+	}
+	if len(result.StaleProvisioning) != 1 || result.StaleProvisioning[0] != prov {
+		t.Errorf("StaleProvisioning = %v, want [%q]", result.StaleProvisioning, prov)
+	}
+}
+
+// TestCleanBookkeepingDetectFlagsOrphanedIsolationEntries pins the
+// B2 read-only sweep: a workspace root that no longer exists on disk
+// but still has an isolation-registry entry accretes forever without
+// this detection. cleanBookkeepingDetect must flag every
+// (workspaceRoot, resourcePath) pair whose workspace root has been
+// removed. Live entries MUST NOT be flagged — they belong to
+// still-live workspaces.
+func TestCleanBookkeepingDetectFlagsOrphanedIsolationEntries(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	// Live workspace root (the repo itself) with an isolation entry.
+	if err := recordIsolation(repo, repo.Root, "node_modules", "/storage/live"); err != nil {
+		t.Fatalf("recordIsolation live: %v", err)
+	}
+	// Ghost workspace root with two isolation entries.
+	ghostRoot := filepath.Join(filepath.Dir(repo.Root), "ghost-worktree")
+	if err := recordIsolation(repo, ghostRoot, "node_modules", "/storage/ghost-nm"); err != nil {
+		t.Fatalf("recordIsolation ghost node_modules: %v", err)
+	}
+	if err := recordIsolation(repo, ghostRoot, "vendor/bundle", "/storage/ghost-vb"); err != nil {
+		t.Fatalf("recordIsolation ghost vendor: %v", err)
+	}
+
+	result, err := cleanBookkeepingDetect(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+
+	if len(result.OrphanedIsolationEntries) != 2 {
+		t.Fatalf("OrphanedIsolationEntries = %d, want 2: %+v",
+			len(result.OrphanedIsolationEntries), result.OrphanedIsolationEntries)
+	}
+	// The detector sorts by (WorkspaceRoot, ResourcePath). Both
+	// entries share the ghost root so order is by resource path.
+	got := make([]string, 0, len(result.OrphanedIsolationEntries))
+	for _, e := range result.OrphanedIsolationEntries {
+		if e.WorkspaceRoot != ghostRoot {
+			t.Errorf("WorkspaceRoot = %q, want %q", e.WorkspaceRoot, ghostRoot)
+		}
+		got = append(got, e.ResourcePath)
+	}
+	want := []string{"node_modules", "vendor/bundle"}
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("OrphanedIsolationEntries resource order = %v, want sorted", got)
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("resource paths = %v, want %v", got, want)
+	}
+
+	// The live entry MUST survive — anything under a live workspace
+	// still holds a pin the sweep is responsible for keeping.
+	reg, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation: %v", err)
+	}
+	if _, ok := isIsolated(reg, repo.Root, "node_modules"); !ok {
+		t.Errorf("live isolation entry should still be in the registry after detect (read-only!)")
+	}
+	// And detect is read-only: the ghost entries are still there
+	// too. The executor is the one that clears them.
+	if _, ok := isIsolated(reg, ghostRoot, "node_modules"); !ok {
+		t.Errorf("detect must be read-only; ghost entry vanished")
 	}
 }

@@ -201,6 +201,53 @@ func TestGitBackendCreateWorkspaceWithBase(t *testing.T) {
 	}
 }
 
+// TestGitBackendCreateWorkspaceWithBaseErrorsOnBranchCollision pins
+// the wrk-level preflight for a branch-name collision. Without the
+// preflight, `git worktree add -b <existing>` returns git's raw
+// `fatal: a branch named 'existing' already exists.` — accurate but
+// unhelpful to a user staring at a failed `wrk new`. The preflight
+// surfaces a wrk-shaped error naming the branch and the remediation,
+// so the CLI's exit message points the user at the fix.
+//
+// The success path stays unchanged (see the sibling with-base test)
+// — only the collision path adds a check.
+func TestGitBackendCreateWorkspaceWithBaseErrorsOnBranchCollision(t *testing.T) {
+	skipIfNoGit(t)
+	isolateGitConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	root := filepath.Join(parent, "main")
+	makeDir(t, root)
+	initGitRepo(t, root)
+
+	// Pre-create the branch that would collide with the destination
+	// basename. `secondary` matches the last segment of dest below.
+	branchCmd := exec.Command("git", "branch", "secondary")
+	branchCmd.Dir = root
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch secondary: %v\n%s", err, out)
+	}
+
+	dest := filepath.Join(parent, "secondary")
+	err := (gitBackend{}).createWorkspace(root, dest, "HEAD")
+	if err == nil {
+		t.Fatal("expected error for existing branch name; got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention 'already exists' so users can grep for it; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "secondary") {
+		t.Errorf("error should name the branch %q so the remediation makes sense; got: %v", "secondary", err)
+	}
+	// Preflight MUST fail BEFORE `git worktree add` runs — otherwise
+	// git would leave partial metadata behind that `wrk gc` would
+	// have to clean up. The absence of the destination directory is
+	// the strongest proof that nothing ran.
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("destination %q should not exist after preflight refusal; stat err = %v", dest, statErr)
+	}
+}
+
 // TestGitBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior pins
 // the base="" contract: the backend MUST behave exactly like the
 // pre-`--base` code path (`git worktree add -- <dest>`), so callers

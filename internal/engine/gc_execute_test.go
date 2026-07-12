@@ -289,3 +289,133 @@ func TestExecuteGCInvokesProgress(t *testing.T) {
 		t.Errorf("progress total = %d, want >0 (blob bytes)", total)
 	}
 }
+
+// TestExecuteGCCompletesMidSwapCrash pins the B1 end-to-end: given
+// the mid-swap-crash fingerprint (`.wrk-provisioning/` +
+// `.wrk-deleting/` + missing real), ExecuteGC must promote the
+// provisioning payload to real BEFORE the standard sweep runs, then
+// let the sweep clean up the deleting sibling. If the promotion ran
+// AFTER the sweep, the sweep would have already deleted the
+// provisioning as stale and the hook's output would be gone.
+//
+// Post-conditions:
+//   - variant real path exists AND contains the provisioning payload
+//   - .wrk-provisioning/ is gone (renamed)
+//   - .wrk-deleting/ is gone (swept)
+func TestExecuteGCCompletesMidSwapCrash(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	resourceDir := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	if err := os.MkdirAll(resourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	variantBase := filepath.Join(resourceDir, "abc123")
+	deletingPath := variantBase + ".wrk-deleting"
+	provisioningPath := variantBase + ".wrk-provisioning"
+	if err := os.MkdirAll(deletingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deletingPath, "old-content.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(provisioningPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(provisioningPath, "new-content.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.PendingSwaps) != 1 {
+		t.Fatalf("PendingSwaps = %d, want 1", len(plan.PendingSwaps))
+	}
+
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	// Real variant now exists and holds the promoted payload.
+	promoted := filepath.Join(variantBase, "new-content.txt")
+	got, err := os.ReadFile(promoted)
+	if err != nil {
+		t.Fatalf("read promoted content at %s: %v", promoted, err)
+	}
+	if string(got) != "new" {
+		t.Errorf("promoted content = %q, want %q", string(got), "new")
+	}
+
+	// Provisioning is gone (renamed).
+	if _, err := os.Stat(provisioningPath); !os.IsNotExist(err) {
+		t.Errorf("provisioning still present: %v", err)
+	}
+	// Deleting is gone (swept by the standard sweep phase).
+	if _, err := os.Stat(deletingPath); !os.IsNotExist(err) {
+		t.Errorf("deleting sibling still present: %v", err)
+	}
+}
+
+// TestExecuteGCSweepsOrphanedIsolationEntries pins the B2 end-to-end:
+// isolation-registry entries whose workspace root has vanished MUST
+// be cleared from `isolated.json` after ExecuteGC. Live entries MUST
+// survive; a ghost-only sweep is the whole point.
+func TestExecuteGCSweepsOrphanedIsolationEntries(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+
+	// One live entry (the repo itself is a live workspace) and two
+	// ghost entries pointing at a workspace root that never existed
+	// / has been rm -rf'd.
+	if err := recordIsolation(repo, repo.Root, "node_modules", "/storage/live-nm"); err != nil {
+		t.Fatalf("recordIsolation live: %v", err)
+	}
+	ghostRoot := filepath.Join(filepath.Dir(repo.Root), "ghost-worktree")
+	if err := recordIsolation(repo, ghostRoot, "node_modules", "/storage/ghost-nm"); err != nil {
+		t.Fatalf("recordIsolation ghost nm: %v", err)
+	}
+	if err := recordIsolation(repo, ghostRoot, "vendor/bundle", "/storage/ghost-vb"); err != nil {
+		t.Fatalf("recordIsolation ghost vb: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.OrphanedIsolationEntries) != 2 {
+		t.Fatalf("OrphanedIsolationEntries = %d, want 2: %+v",
+			len(plan.OrphanedIsolationEntries), plan.OrphanedIsolationEntries)
+	}
+
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	// Ghost entries gone; live entry survives.
+	reg, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation: %v", err)
+	}
+	if _, ok := reg[ghostRoot]; ok {
+		t.Errorf("ghost workspace still in registry after ExecuteGC: %+v", reg[ghostRoot])
+	}
+	if _, ok := isIsolated(reg, repo.Root, "node_modules"); !ok {
+		t.Errorf("live isolation entry was swept — B2 must scope to orphans only")
+	}
+
+	// Idempotence: a second BuildGCPlan is empty on this axis.
+	plan2, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan (post): %v", err)
+	}
+	if len(plan2.OrphanedIsolationEntries) != 0 {
+		t.Errorf("post-execute OrphanedIsolationEntries = %+v, want empty",
+			plan2.OrphanedIsolationEntries)
+	}
+}

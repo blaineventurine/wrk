@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -271,6 +272,42 @@ type bookkeepingCleanup struct {
 	// the repo-id subtree, not inside it, so cleanBookkeepingDetect
 	// checks for it after the tree walk.
 	StaleForgetting []string
+	// PendingSwaps carries mid-swap-crash recoveries from `wrk run`'s
+	// force-reprovision path (see internal/executor/execute.go
+	// runInitialize). Fingerprint: a `.wrk-provisioning/` exists AND
+	// its sibling `.wrk-deleting/` exists AND the real variant is
+	// missing. That triple is only reachable when the process died
+	// between the swap-aside `Rename(real, deleting)` and the
+	// install `Rename(tmp, real)`. A successful hook run's output
+	// is already on disk under `.wrk-provisioning/` — plain sweep
+	// would throw it away and force `wrk link` to re-run the hook
+	// (external side effects). The executor promotes each swap
+	// before the standard sweep and lets the sibling `.wrk-deleting`
+	// path fall through StaleDeleting normally.
+	PendingSwaps []pendingSwap
+	// OrphanedIsolationEntries names (workspaceRoot, resourcePath)
+	// pairs in `isolated.json` whose workspaceRoot no longer exists
+	// on disk. Storage under those entries is already caught by the
+	// ghost-workspace variant sweep; clearing the registry entry
+	// keeps the JSON file from accreting forever as workspaces come
+	// and go.
+	OrphanedIsolationEntries []orphanedIsolation
+}
+
+// pendingSwap is one mid-swap-crash recovery record. Both paths are
+// absolute. The executor performs `Rename(Provisioning, Real)` and
+// then leaves the sibling `.wrk-deleting/` to the standard sweep.
+type pendingSwap struct {
+	Provisioning string // <variant>.wrk-provisioning
+	Real         string // <variant> — target of the recovery rename
+}
+
+// orphanedIsolation is one registry entry the executor will clear
+// via clearIsolation. Order-independent, sorted by (Workspace,
+// Resource) at detection time so tests are deterministic.
+type orphanedIsolation struct {
+	WorkspaceRoot string
+	ResourcePath  string
 }
 
 // cleanBookkeepingDetect walks the shared-storage tree of repo and
@@ -289,6 +326,12 @@ func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookk
 	if _, err := os.Stat(marker); err == nil {
 		result.StaleForgetting = append(result.StaleForgetting, marker)
 	}
+
+	// Isolation-registry orphan sweep — happens BEFORE the storage
+	// tree walk so a repo with no shared storage yet (fresh Link
+	// never run) still gets its registry pruned when a workspace
+	// gets rm -rf'd.
+	detectOrphanedIsolation(repo, &result)
 
 	root := filepath.Join(options.StorageRoot, repo.RepositoryID)
 	if _, err := os.Stat(root); err != nil {
@@ -310,6 +353,29 @@ func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookk
 
 		switch {
 		case strings.HasSuffix(name, ".wrk-provisioning"):
+			// Distinguish mid-swap-crash (recoverable) from stale
+			// scratch (sweepable). Only when BOTH the sibling
+			// `.wrk-deleting/` is present AND the real variant is
+			// missing has runInitialize crashed between its two
+			// renames — the hook already ran, its output sits under
+			// `.wrk-provisioning/`, and promoting it back to real
+			// avoids re-running the hook (external side effects). If
+			// the real variant is present, the crash didn't happen
+			// there — sweep as stale. If the deleting sibling is
+			// missing, the swap-aside never started — sweep as stale.
+			variantPath := strings.TrimSuffix(path, ".wrk-provisioning")
+			deletingPath := variantPath + ".wrk-deleting"
+			_, realStatErr := os.Stat(variantPath)
+			_, deletingStatErr := os.Stat(deletingPath)
+			realMissing := os.IsNotExist(realStatErr)
+			deletingExists := deletingStatErr == nil
+			if realMissing && deletingExists {
+				result.PendingSwaps = append(result.PendingSwaps, pendingSwap{
+					Provisioning: path,
+					Real:         variantPath,
+				})
+				return fs.SkipDir
+			}
 			result.StaleProvisioning = appendIfStaleProvisioning(result.StaleProvisioning, path)
 			return fs.SkipDir
 
@@ -331,7 +397,42 @@ func cleanBookkeepingDetect(repo *repository.Repository, options Options) (bookk
 	if walkErr != nil {
 		return result, walkErr
 	}
+
 	return result, nil
+}
+
+// detectOrphanedIsolation is the read-only isolation-registry sweep
+// for cleanBookkeepingDetect. It appends to result.OrphanedIsolationEntries
+// every (workspaceRoot, resourcePath) pair whose workspaceRoot is gone
+// from disk and returns nothing. Errors from loadIsolation are
+// swallowed silently — the corrupt-tolerant load path already logs to
+// stderr, and gc's detect pass is best-effort by convention.
+//
+// Sorted output on (WorkspaceRoot, ResourcePath) so plan rendering
+// and tests stay stable across registry map iteration.
+func detectOrphanedIsolation(repo *repository.Repository, result *bookkeepingCleanup) {
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return
+	}
+	for wsRoot, entries := range iso {
+		if _, statErr := os.Stat(wsRoot); !os.IsNotExist(statErr) {
+			continue
+		}
+		for resourcePath := range entries {
+			result.OrphanedIsolationEntries = append(result.OrphanedIsolationEntries, orphanedIsolation{
+				WorkspaceRoot: wsRoot,
+				ResourcePath:  resourcePath,
+			})
+		}
+	}
+	sort.Slice(result.OrphanedIsolationEntries, func(i, j int) bool {
+		a, b := result.OrphanedIsolationEntries[i], result.OrphanedIsolationEntries[j]
+		if a.WorkspaceRoot != b.WorkspaceRoot {
+			return a.WorkspaceRoot < b.WorkspaceRoot
+		}
+		return a.ResourcePath < b.ResourcePath
+	})
 }
 
 // appendIfStaleProvisioning probes the sibling <variant>.wrk-lock non-
@@ -403,6 +504,17 @@ type GCPlan struct {
 	// why DeleteVariants may be smaller than the user expects.
 	UnreachableWorkspaces []string
 
+
+	// PendingSwaps carries mid-swap-crash recoveries the executor
+	// runs BEFORE the standard sweep. See bookkeepingCleanup for the
+	// crash fingerprint. Empty for the vast majority of gc runs.
+	PendingSwaps []pendingSwap
+
+	// OrphanedIsolationEntries names isolation-registry pairs whose
+	// workspaceRoot is gone. The executor clears each via
+	// clearIsolation, sequentially, under the shared registry flock.
+	OrphanedIsolationEntries []orphanedIsolation
+
 	// TotalBytesFreed is the sum of DeleteVariants[*].Size.
 	TotalBytesFreed int64
 }
@@ -418,7 +530,9 @@ func (p GCPlan) HasNothing() bool {
 		len(p.OrphanedLocks) == 0 &&
 		len(p.StaleProvisioning) == 0 &&
 		len(p.StaleDeleting) == 0 &&
-		len(p.StaleForgetting) == 0
+		len(p.StaleForgetting) == 0 &&
+		len(p.PendingSwaps) == 0 &&
+		len(p.OrphanedIsolationEntries) == 0
 }
 
 // BuildGCPlan runs the read-only detection sweeps and composes them
@@ -484,6 +598,8 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 	plan.StaleProvisioning = bookkeeping.StaleProvisioning
 	plan.StaleDeleting = bookkeeping.StaleDeleting
 	plan.StaleForgetting = bookkeeping.StaleForgetting
+	plan.PendingSwaps = bookkeeping.PendingSwaps
+	plan.OrphanedIsolationEntries = bookkeeping.OrphanedIsolationEntries
 
 	for _, v := range variants {
 		if pinned[v.StoragePath] {

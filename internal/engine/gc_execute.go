@@ -24,21 +24,34 @@ import (
 //
 // Step order:
 //
-//  1. PruneGhosts before anything else — the registry sweep needs the
-//     post-prune live-workspace set, and a variant sweep that used a
-//     ghost's cached pin set would preserve dead data.
-//  2. Sweep orphan detach-registry entries using a FRESH Workspaces()
+//  1. Complete PendingSwaps from a crashed `wrk run` force-reprovision.
+//     Runs BEFORE any sweep so a `.wrk-provisioning/` payload the
+//     hook already produced is preserved: the standard sweep would
+//     otherwise delete it and force wrk link to re-run the hook
+//     (external side effects). Each swap is a single Rename; a
+//     failure surfaces as a warning and the next gc run tries again.
+//  2. PruneGhosts before any registry sweep — the registry sweep
+//     needs the post-prune live-workspace set, and a variant sweep
+//     that used a ghost's cached pin set would preserve dead data.
+//  3. Sweep orphan detach-registry entries using a FRESH Workspaces()
 //     call. Recomputing (rather than trusting plan.OrphanRegistry) is
 //     defensive: re-running ExecuteGC after a partial application
 //     produces the same result as running it once against a clean
 //     plan.
-//  3. Delete variants. Each acquires <variant>.wrk-lock non-blocking;
+//  4. Clear OrphanedIsolationEntries — isolation registry keys whose
+//     workspace root is gone. Cheap map ops under the shared
+//     registry flock; the on-disk isolated storage is caught by the
+//     ghost-workspace variant sweep in step 5, so this step just
+//     keeps `isolated.json` from accreting stale keys forever.
+//  5. Delete variants. Each acquires <variant>.wrk-lock non-blocking;
 //     a held lock is skipped with a warning (a concurrent wrk link is
 //     provisioning). The delete uses rename-then-remove so a crash
 //     mid-RemoveAll leaves a .wrk-deleting marker the next gc sweeps.
-//  4. Sweep bookkeeping cruft (OrphanedLocks, StaleProvisioning,
+//  6. Sweep bookkeeping cruft (OrphanedLocks, StaleProvisioning,
 //     StaleDeleting, StaleForgetting). Failures here log and continue
-//     — leftover cruft is annoying but never corrupts state.
+//     — leftover cruft is annoying but never corrupts state. The
+//     `.wrk-deleting/` sibling of a step-1 swap arrives here as part
+//     of StaleDeleting.
 func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error {
 	var firstErr error
 	recordErr := func(err error) {
@@ -47,7 +60,23 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 		}
 	}
 
-	// Step 1: Prune ghosts from VCS metadata. If this fails we bail
+	// Step 1: Complete mid-swap-crash recoveries. Order matters:
+	// runs BEFORE the sweep so the `.wrk-provisioning/` payload of a
+	// crashed `wrk run` is preserved rather than deleted-then-
+	// reprovisioned (external hook side effects). A failed Rename is
+	// idempotent-safe: the same crash-fingerprint reappears next run
+	// and we retry. We do not abort ExecuteGC on a swap failure —
+	// downstream sweeps still have work to do on the rest of the
+	// tree.
+	for _, swap := range plan.PendingSwaps {
+		if err := os.Rename(swap.Provisioning, swap.Real); err != nil {
+			fmt.Fprintf(options.Stdout,
+				"warning: could not complete mid-swap recovery for %s: %v\n",
+				swap.Real, err)
+		}
+	}
+
+	// Step 2: Prune ghosts from VCS metadata. If this fails we bail
 	// before any other mutation so the operator can retry from a
 	// consistent state — a half-pruned registry against a live-ghost
 	// git tree would be worse than doing nothing.
@@ -55,7 +84,7 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 		return err
 	}
 
-	// Step 2: Sweep orphan registry entries against a freshly-queried
+	// Step 3: Sweep orphan registry entries against a freshly-queried
 	// workspace set. Post-prune Workspaces() no longer sees ghost
 	// worktrees, so any registry key it does not contain is genuinely
 	// orphan.
@@ -67,7 +96,19 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 		recordErr(err)
 	}
 
-	// Step 3: Delete variants. The per-iteration closure exists so
+	// Step 4: Clear orphaned isolation-registry entries. Sequential
+	// under the shared registry flock (clearIsolation takes it every
+	// call); the entries in plan.OrphanedIsolationEntries were
+	// snapshotted at plan time, so this is a straight replay. Each
+	// clear is a no-op on missing entries, so a partial-apply retry
+	// is safe.
+	for _, entry := range plan.OrphanedIsolationEntries {
+		if err := clearIsolation(repo, entry.WorkspaceRoot, entry.ResourcePath); err != nil {
+			recordErr(err)
+		}
+	}
+
+	// Step 5: Delete variants. The per-iteration closure exists so
 	// defer runs at loop-body exit, not function exit — otherwise a
 	// long DeleteVariants slice would hold every lock until we
 	// return.
@@ -75,7 +116,7 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 		deleteVariant(v, options, recordErr)
 	}
 
-	// Step 4: Sweep bookkeeping cruft. Failures are surfaced but do
+	// Step 6: Sweep bookkeeping cruft. Failures are surfaced but do
 	// not abort the sweep — a leftover .wrk-lock is a cosmetic wart
 	// the next gc will pick up.
 	sweepBookkeeping(plan.OrphanedLocks, options)

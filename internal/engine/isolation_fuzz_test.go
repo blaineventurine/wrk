@@ -30,13 +30,13 @@ import (
 // assertion bug: empty, valid empty, well-typed content, malformed
 // JSON, wrong outer type (array/string/number), and raw bytes.
 //
-// The literal-`null` case is intentionally NOT seeded: it decodes
-// with nil error but leaves the map nil (json.Unmarshal treats a
-// bare `null` as "reset the value"), which violates the non-nil
-// invariant. That is a real latent bug in loadIsolation (a
-// subsequent recordIsolation panics writing to a nil map); the fuzz
-// contract stays strict so any organic discovery — or a follow-up
-// production fix that adds a nil-guard — is caught here.
+// A literal-`null` payload used to decode with nil error but leave
+// the map nil (json.Unmarshal treats a bare `null` as "reset the
+// value"), which then NPE'd the next recordIsolation. loadIsolation
+// now coerces that shape back to an empty non-nil registry, so
+// `null` is seeded like every other tolerated corruption — the fuzz
+// invariants (no panic, non-nil registry, no bubbled error) must
+// hold for it too.
 func FuzzLoadIsolationTolerant(f *testing.F) {
 	seeds := [][]byte{
 		nil,
@@ -49,6 +49,7 @@ func FuzzLoadIsolationTolerant(f *testing.F) {
 		[]byte(`"just a string"`),
 		[]byte(`12345`),
 		{0, 1, 2, 3, 4},
+		[]byte(`null`),
 	}
 	for _, s := range seeds {
 		f.Add(s)

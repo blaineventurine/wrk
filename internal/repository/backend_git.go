@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -40,6 +41,17 @@ func (gitBackend) createWorkspace(root, dest, base string) error {
 	// forward. -b makes the fork explicit and fails loudly on branch-
 	// name collision, which is the right signal for the user.
 	branch := filepath.Base(dest)
+	// Preflight the collision so the user sees a wrk-level hint
+	// naming the remediation, not git's raw
+	// `fatal: a branch named 'foo' already exists`. show-ref exits 0
+	// when the ref exists, non-zero otherwise; capture returns nil
+	// error only on exit 0.
+	if _, err := capture(root, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		return fmt.Errorf(
+			"branch %q already exists; pick a different destination path or delete the branch first (git branch -d %s)",
+			branch, branch,
+		)
+	}
 	return passthrough(root, "git", "worktree", "add", "-b", branch, "--", dest, base)
 }
 

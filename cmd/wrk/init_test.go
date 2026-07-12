@@ -143,6 +143,74 @@ func TestInitFreshRepoNoConfirmPrompt(t *testing.T) {
 	}
 }
 
+// TestInitForceOnSymlinkedConfigPrompts pins the Lstat-not-Stat fix:
+// a `.wrk.yml` that is a SYMLINK to a broken (or missing) target used
+// to slip past the existence check — `os.Stat` follows the link, sees
+// "not exist," and skipped the "Overwriting" prompt. The next
+// WriteFile then silently replaced the symlink with a regular file
+// containing the freshly-generated config, quietly severing the user's
+// deliberate indirection.
+//
+// The fix uses `os.Lstat`, which reports the link itself and triggers
+// the prompt. Two branches: without --yes (non-TTY refuses); with
+// --yes (overwrite proceeds and the link is replaced by a real file).
+func TestInitForceOnSymlinkedConfigPrompts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := freshGitRepo(t)
+	writeFile(t, filepath.Join(repo, ".env.example"), "")
+
+	// Symlink .wrk.yml -> a target that does NOT exist. Stat sees
+	// "not exist" and would skip the prompt; Lstat sees the link.
+	brokenTarget := filepath.Join(repo, "config-elsewhere.yml")
+	link := filepath.Join(repo, ".wrk.yml")
+	if err := os.Symlink(brokenTarget, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// Without --yes on a non-TTY, the prompt refuses and the symlink
+	// survives unchanged.
+	code, stdout, stderr := runWrk(t, repo, "init", "--force")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Overwriting") {
+		t.Errorf("stdout should announce the overwrite for the symlink, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "--yes") {
+		t.Errorf("stderr should mention --yes so users know the fix, got: %q", stderr)
+	}
+
+	// The symlink MUST still be a symlink — refusal preserves state.
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat after refusal: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".wrk.yml is no longer a symlink after refusal (mode=%v)", info.Mode())
+	}
+
+	// With --yes, the overwrite proceeds. Post-condition: .wrk.yml is
+	// now a regular file (the symlink was replaced by WriteFile) with
+	// engine.Init's generated content.
+	code, stdout, stderr = runWrk(t, repo, "init", "--force", "--yes")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat after overwrite: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".wrk.yml is still a symlink after overwrite (mode=%v); WriteFile should have replaced it", info.Mode())
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf(".wrk.yml is not a regular file after overwrite (mode=%v)", info.Mode())
+	}
+}
+
 // readFile is a t.Helper wrapper around os.ReadFile that returns the
 // content as a string — the CLI init tests compare against small
 // YAML snippets that are easier to eyeball as strings than []byte.

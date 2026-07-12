@@ -52,7 +52,14 @@ var initCmd = &cobra.Command{
 		// gate on Confirm so the user gets the same explicit-consent
 		// UX every other destructive command provides.
 		if initForce && !dryRun {
-			if _, statErr := os.Stat(target); statErr == nil {
+			// Lstat, not Stat: a symlinked .wrk.yml whose target is
+			// broken would otherwise slip past `os.Stat` (which
+			// follows the link) and skip the prompt — the next
+			// engine.Init.WriteFile would then follow the link and
+			// silently create a file at the (unrelated) target path
+			// while leaving the symlink itself in place. Lstat sees
+			// the link itself so the prompt fires.
+			if info, statErr := os.Lstat(target); statErr == nil {
 				fmt.Fprintf(os.Stdout, "Overwriting existing config: %s\n\n", target)
 
 				dec, err := Confirm(ConfirmOptions{
@@ -72,6 +79,19 @@ var initCmd = &cobra.Command{
 				}
 				if dec != Proceed {
 					return nil
+				}
+				// If the pre-existing entry was NOT a plain regular
+				// file (symlink, socket, whatever the user set up),
+				// remove it before engine.Init's WriteFile runs so
+				// the result is deterministically a fresh regular
+				// file at .wrk.yml. Otherwise WriteFile through a
+				// symlink writes the target, and the user's `--yes`
+				// silently touches an unrelated path while the
+				// symlink survives.
+				if !info.Mode().IsRegular() {
+					if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+						return fmt.Errorf("remove non-regular %s before overwrite: %w", target, err)
+					}
 				}
 			}
 		}

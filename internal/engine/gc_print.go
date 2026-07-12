@@ -54,6 +54,35 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 		}
 	}
 
+	// Mid-swap recoveries (rare — populated only after a crash during
+	// `wrk run`'s force-reprovision path). Announced separately from
+	// bookkeeping cruft because these are recoveries the executor
+	// completes, not scratch it deletes.
+	if len(plan.PendingSwaps) > 0 {
+		sb.WriteString("\nMid-swap recoveries (")
+		sb.WriteString(pluralInt(len(plan.PendingSwaps)))
+		sb.WriteString(", `wrk run` crashed mid-swap; provisioning will be promoted):\n")
+		for _, swap := range plan.PendingSwaps {
+			sb.WriteString("  ↻ ")
+			sb.WriteString(swap.Real)
+			sb.WriteString("\n")
+		}
+	}
+
+	// Isolation-registry orphans.
+	if len(plan.OrphanedIsolationEntries) > 0 {
+		sb.WriteString("\nIsolation entries (")
+		sb.WriteString(pluralInt(len(plan.OrphanedIsolationEntries)))
+		sb.WriteString(" orphaned):\n")
+		for _, e := range plan.OrphanedIsolationEntries {
+			sb.WriteString("  ✗ ")
+			sb.WriteString(e.WorkspaceRoot)
+			sb.WriteString(" — ")
+			sb.WriteString(e.ResourcePath)
+			sb.WriteString("\n")
+		}
+	}
+
 	// Variant tables grouped by resource
 	variantsByResource := groupVariantsByResource(plan.DeleteVariants, plan.KeepVariants)
 	if len(variantsByResource) > 0 {
@@ -137,6 +166,16 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 	totalBookkeeping := len(plan.OrphanedLocks) + len(plan.StaleProvisioning) + len(plan.StaleDeleting) + len(plan.StaleForgetting)
 	if totalBookkeeping > 0 {
 		totalParts = append(totalParts, pluralInt(totalBookkeeping)+" bookkeeping")
+	}
+
+	// Mid-swap recoveries
+	if len(plan.PendingSwaps) > 0 {
+		totalParts = append(totalParts, pluralInt(len(plan.PendingSwaps))+" swap")
+	}
+
+	// Orphaned isolation entries
+	if len(plan.OrphanedIsolationEntries) > 0 {
+		totalParts = append(totalParts, pluralInt(len(plan.OrphanedIsolationEntries))+" isolation entr")
 	}
 
 	if len(totalParts) > 0 {

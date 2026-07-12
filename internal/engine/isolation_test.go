@@ -393,3 +393,48 @@ func TestIsolationConcurrentWithDetachCrossWorkspaces(t *testing.T) {
 		}
 	}
 }
+
+// TestIsolationLoadTolerantsJSONNull pins the nil-registry guard:
+// json.Unmarshal on a literal `null` payload decodes without error
+// but leaves the target map nil. Before the guard, the next
+// recordIsolation panicked trying to write into a nil map. Now the
+// load path coerces the shape back to an empty non-nil registry so
+// downstream indexing is safe.
+//
+// Load-bearing check: after the tolerant load, a follow-up
+// recordIsolation MUST succeed — that's the operation the pre-fix
+// bug crashed on.
+func TestIsolationLoadTolerantsJSONNull(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	path := isolationPath(repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation on `null` payload: %v", err)
+	}
+	if reg == nil {
+		t.Fatal("loadIsolation returned nil registry; contract is non-nil empty on `null` payload")
+	}
+	if len(reg) != 0 {
+		t.Errorf("expected empty registry, got %+v", reg)
+	}
+
+	// The load-bearing check: pre-fix, this panicked. Post-fix, it
+	// simply records into the empty registry.
+	if err := recordIsolation(repo, repo.Root, "node_modules", "/storage/x"); err != nil {
+		t.Fatalf("recordIsolation after loading `null` payload: %v", err)
+	}
+	reg, err = loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("post-record loadIsolation: %v", err)
+	}
+	if _, ok := isIsolated(reg, repo.Root, "node_modules"); !ok {
+		t.Errorf("record after loading `null` did not persist")
+	}
+}

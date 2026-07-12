@@ -154,3 +154,47 @@ func TestRemoveAllProgressSingleFile(t *testing.T) {
 		t.Errorf("file should be gone, got %v", err)
 	}
 }
+
+// TestRemoveAllProgressDedupsHardLinks pins the (device, inode)
+// dedup contract: a tree with N hard links to the same 9-byte file
+// MUST count 9 bytes total, not N * 9. `wrk gc`'s freed-bytes report
+// used to over-count by every hard-link multiplier — a big deal for
+// fingerprint variants whose node_modules subtrees are typically
+// materialized with cross-workspace hard links.
+//
+// Two additional links on a 9-byte inode = 18 pre-fix, 9 post-fix.
+// The removal itself still unlinks every path (the tree ends up
+// gone); dedup only affects the byte-counter.
+func TestRemoveAllProgressDedupsHardLinks(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "original.txt")
+	if err := os.WriteFile(original, []byte("some data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Two hard links to the same 9-byte inode.
+	for _, name := range []string{"link1.txt", "link2.txt"} {
+		if err := os.Link(original, filepath.Join(root, name)); err != nil {
+			t.Fatalf("os.Link %s: %v", name, err)
+		}
+	}
+	// A distinct file so we can prove dedup does NOT over-collapse
+	// truly-independent inodes.
+	other := filepath.Join(root, "other.txt")
+	if err := os.WriteFile(other, []byte("XX"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var counted int64
+	if err := RemoveAllProgress(root, func(n int64) { counted += n }); err != nil {
+		t.Fatalf("RemoveAllProgress: %v", err)
+	}
+
+	// 9 (deduped 3-way inode) + 2 (independent inode) = 11.
+	const want int64 = 9 + 2
+	if counted != want {
+		t.Errorf("counted = %d, want %d (hard-linked inode counted once, independent inode counted separately)", counted, want)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("root should be gone, got %v", err)
+	}
+}

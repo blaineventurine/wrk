@@ -16,6 +16,15 @@ import (
 // are removed but never followed, so a link pointing outside the
 // tree never trips a chain-of-deletion outside path.
 //
+// Hard links to the same underlying inode are counted only once, so
+// onProgress reflects actual bytes reclaimed rather than N * size for
+// N links. Without dedup, a resource whose fingerprint variant is
+// built from hard-linked node_modules copies over-reports the freed
+// bytes by a large multiple. The dedup runs on (device, inode) pairs
+// derived from FileInfo.Sys(); a platform whose FileInfo cannot
+// yield an inode falls back to the pre-fix per-link count so the
+// progress bar never stalls.
+//
 // A nil onProgress is a valid no-op; callers can pass the zero
 // value of Options.Progress unconditionally.
 //
@@ -24,6 +33,29 @@ import (
 // cost is only paid on operations that opted into progress reporting
 // (wrk remove / gc / forget); other paths still use os.RemoveAll.
 func RemoveAllProgress(path string, onProgress func(int64)) error {
+	// Per-call inode set: dedup is scoped to a single removal so a
+	// second invocation on an unrelated tree does not inherit any
+	// counted-inode state. Nil callback skips inode bookkeeping
+	// entirely — nothing to dedup against.
+	var seen map[inodeKey]bool
+	if onProgress != nil {
+		seen = make(map[inodeKey]bool)
+	}
+	return removeAllProgress(path, onProgress, seen)
+}
+
+// inodeKey identifies a unique on-disk inode. The (device, inode)
+// pair is the only correct dedup key for hard links: two paths sharing
+// an inode share bytes; two paths on different devices with the same
+// inode number are distinct files.
+type inodeKey struct {
+	dev uint64
+	ino uint64
+}
+
+// removeAllProgress is the recursive core. seen may be nil (nil
+// callback path), in which case inode bookkeeping is skipped.
+func removeAllProgress(path string, onProgress func(int64), seen map[inodeKey]bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -47,7 +79,7 @@ func RemoveAllProgress(path string, onProgress func(int64)) error {
 			return err
 		}
 		for _, e := range entries {
-			if err := RemoveAllProgress(filepath.Join(path, e.Name()), onProgress); err != nil {
+			if err := removeAllProgress(filepath.Join(path, e.Name()), onProgress, seen); err != nil {
 				return err
 			}
 		}
@@ -55,7 +87,18 @@ func RemoveAllProgress(path string, onProgress func(int64)) error {
 	}
 
 	if info.Mode().IsRegular() && onProgress != nil {
-		onProgress(info.Size())
+		// Count each inode at most once. On platforms without inode
+		// support (inodeKeyOf returns false), count every link — the
+		// worst-case over-report matches the pre-fix behavior and is
+		// still better than under-reporting.
+		if key, ok := inodeKeyOf(info); ok {
+			if !seen[key] {
+				seen[key] = true
+				onProgress(info.Size())
+			}
+		} else {
+			onProgress(info.Size())
+		}
 	}
 	return os.Remove(path)
 }

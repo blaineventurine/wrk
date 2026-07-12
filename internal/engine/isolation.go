@@ -59,6 +59,15 @@ func loadIsolation(repo *repository.Repository) (isolationRegistry, error) {
 			path, err)
 		return isolationRegistry{}, nil
 	}
+	// json.Unmarshal on a literal `null` payload decodes without
+	// error but leaves the target map nil. Downstream callers
+	// (recordIsolation, isIsolated) index into the returned map, so
+	// a nil registry would NPE on the very next access. Coerce to
+	// an empty non-nil registry so the "always usable" contract
+	// holds.
+	if reg == nil {
+		reg = isolationRegistry{}
+	}
 	return reg, nil
 }
 
