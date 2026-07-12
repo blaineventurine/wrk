@@ -86,3 +86,81 @@ else
   _mark_fail
   printf '  FAIL: --dry-run changed the timestamp (before=%s after=%s)\n' "$timestamp1" "$timestamp2" | tee -a "$TRANSCRIPT"
 fi
+
+subsec "H.4: wrk link recovers after fixing a failing hook"
+D=$SCRATCH/H4
+mkrepo git "$D"
+seed "$D"
+# The hook cat's a file the user hasn't created yet, so the initial
+# link MUST fail. wrk's error path exits 2 (the "any other error" bucket
+# in cmd/wrk/root.go); the C4 crash-safety contract guarantees the
+# variant is NOT left half-materialized, so the next link re-runs the
+# hook from scratch rather than skipping it.
+cat > "$D/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p {shared} && cat {root}/config-file > {shared}/output.txt"
+YAML
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/H4
+# First link: hook fails because config-file doesn't exist.
+( cd "$D" && expect_exit 2 "$WRK --storage $S link" )
+# User fixes the missing input.
+echo "fixed content" > "$D/config-file"
+# Retry: hook now runs to completion and materializes the variant.
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+if grep -q "fixed content" "$D/node_modules/output.txt" 2>/dev/null; then
+  _mark_pass
+  printf '  PASS: variant reflects the fixed hook output\n' | tee -a "$TRANSCRIPT"
+else
+  _mark_fail
+  printf '  FAIL: variant does not reflect fixed hook output\n' | tee -a "$TRANSCRIPT"
+fi
+
+subsec "H.5: wrk run --yes refreshes an existing variant with new hook output"
+D=$SCRATCH/H5
+mkrepo git "$D"
+seed "$D"
+# Same shape as H.4 but the input file exists from the start, so the
+# first link succeeds. Then we mutate the input WITHOUT changing the
+# fingerprint (fingerprint tracks package.json, not `data`) and force
+# a re-run via `wrk run node --yes` — the --yes accommodates the
+# destructive-confirmation gate on `wrk run` that ships in this release.
+cat > "$D/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p {shared} && cat {root}/data > {shared}/output.txt"
+YAML
+echo "v1" > "$D/data"
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/H5
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+if grep -q "^v1$" "$D/node_modules/output.txt" 2>/dev/null; then
+  _mark_pass
+  printf '  PASS: initial link populated variant with v1\n' | tee -a "$TRANSCRIPT"
+else
+  _mark_fail
+  printf '  FAIL: initial link did not populate variant with v1 (got: %s)\n' \
+    "$(cat "$D/node_modules/output.txt" 2>/dev/null || echo '<missing>')" | tee -a "$TRANSCRIPT"
+fi
+# Mutate the input and force a re-run.
+echo "v2" > "$D/data"
+( cd "$D" && expect_exit 0 "$WRK --storage $S run node --yes" )
+if grep -q "^v2$" "$D/node_modules/output.txt" 2>/dev/null; then
+  _mark_pass
+  printf '  PASS: wrk run --yes refreshed the variant to v2\n' | tee -a "$TRANSCRIPT"
+else
+  _mark_fail
+  printf '  FAIL: wrk run --yes did not refresh the variant (got: %s)\n' \
+    "$(cat "$D/node_modules/output.txt" 2>/dev/null || echo '<missing>')" | tee -a "$TRANSCRIPT"
+fi

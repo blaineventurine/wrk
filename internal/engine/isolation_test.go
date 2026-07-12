@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -282,5 +283,113 @@ func TestIsolationJSONFormatIsHumanReadable(t *testing.T) {
 	tmp := isolationPath(repo) + ".tmp"
 	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
 		t.Errorf("tmp file %s survived rename (err=%v)", tmp, err)
+	}
+}
+
+// TestIsolationConcurrentWithDetachCrossWorkspaces defends the
+// cross-workspace flock contract for the shared registry file. Two
+// git worktrees of the same repo point at the SAME
+// `<metadata>/wrk/detached.json` and `<metadata>/wrk/isolated.json`
+// (git's --git-common-dir shares them). Isolate on the primary and
+// detach on the secondary go through withRegistryLock against the
+// same on-disk lock file, so their load-modify-atomic-rename cycles
+// MUST serialize even when the OS process, workspace root, and the
+// operation type differ.
+//
+// Without the flock, either operation's rename can clobber the
+// other's file — the isolation entry silently vanishes, the detach
+// entry silently vanishes, or on macOS's rename-is-swap semantics
+// both survive by accident and hide the race. Under the flock, both
+// entries survive every iteration, keyed against their respective
+// workspace roots. Mirrors TestClearDetachedConcurrentWithRecord's
+// iteration count so a broken lock reliably fails within seconds.
+//
+// Cross-workspace over cross-registry: TestIsolationConcurrentWithDetach
+// covers same-repo, same-workspace concurrent isolate+detach; this
+// test covers the sibling-worktree case where the workspace keys
+// differ so a broken lock silently drops one workspace's entry.
+func TestIsolationConcurrentWithDetachCrossWorkspaces(t *testing.T) {
+	primary := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	_, secondary := addGitWorktree(t, primary, "wt-b")
+
+	if primary.MetadataDir() != secondary.MetadataDir() {
+		t.Fatalf(
+			"test precondition broken: worktrees have separate metadata dirs (%q vs %q)",
+			primary.MetadataDir(), secondary.MetadataDir(),
+		)
+	}
+
+	const iters = 30
+	for i := range iters {
+		pathA := "node_modules"
+		pathB := ".env"
+		storagePathA := fmt.Sprintf("/storage/iso-A-%d", i)
+
+		// Reset both registries so each iteration starts from a
+		// clean slate — otherwise a stale entry from iteration N-1
+		// would satisfy the "did the entry survive?" assertion
+		// vacuously.
+		if err := os.RemoveAll(isolationPath(primary)); err != nil {
+			t.Fatalf("iteration %d: reset isolation: %v", i, err)
+		}
+		if err := os.RemoveAll(registryPath(primary)); err != nil {
+			t.Fatalf("iteration %d: reset detach: %v", i, err)
+		}
+
+		var wg sync.WaitGroup
+		var isoErr, detErr error
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			isoErr = recordIsolation(primary, primary.Root, pathA, storagePathA)
+		}()
+		go func() {
+			defer wg.Done()
+			// recordDetached keys against repo.Root, so writing via
+			// `secondary` records under the secondary worktree's
+			// root — a distinct key from primary.Root, which is
+			// what makes this the cross-workspace race.
+			detErr = recordDetached(secondary, []string{pathB})
+		}()
+
+		wg.Wait()
+
+		if isoErr != nil {
+			t.Fatalf("iteration %d: recordIsolation: %v", i, isoErr)
+		}
+		if detErr != nil {
+			t.Fatalf("iteration %d: recordDetached: %v", i, detErr)
+		}
+
+		iso, err := loadIsolation(primary)
+		if err != nil {
+			t.Fatalf("iteration %d: loadIsolation: %v", i, err)
+		}
+		entry, ok := isIsolated(iso, primary.Root, pathA)
+		if !ok {
+			t.Fatalf("iteration %d: isolation entry for %s missing — clobbered by concurrent detach",
+				i, primary.Root)
+		}
+		if entry.StoragePath != storagePathA {
+			t.Errorf("iteration %d: StoragePath = %q, want %q",
+				i, entry.StoragePath, storagePathA)
+		}
+
+		reg, err := loadRegistry(primary)
+		if err != nil {
+			t.Fatalf("iteration %d: loadRegistry: %v", i, err)
+		}
+		found := false
+		for _, p := range reg[secondary.Root] {
+			if p == pathB {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("iteration %d: detach entry for %s (path %q) missing — clobbered by concurrent isolate",
+				i, secondary.Root, pathB)
+		}
 	}
 }
