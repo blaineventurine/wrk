@@ -79,3 +79,12 @@ func TestDetachYesAndDryRunCoexist(t *testing.T) {
 		t.Fatalf("stderr should be clean for --yes --dry-run, got:\n%s", stderr)
 	}
 }
+
+// TestDetachJSONFlagRegistered pins the --json flag wiring for
+// `wrk detach`. Agent callers rely on it for the machine-readable
+// envelope; drift would surface as "unknown flag" at script time.
+func TestDetachJSONFlagRegistered(t *testing.T) {
+	if detachCmd.Flags().Lookup("json") == nil {
+		t.Fatal("--json flag not registered on detachCmd")
+	}
+}

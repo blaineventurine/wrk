@@ -97,3 +97,13 @@ func TestRunRefusesUnknownResourceExitsTwo(t *testing.T) {
 		t.Fatalf("stderr should surface the engine's unknown-resource error, got: %q", stderr)
 	}
 }
+
+// TestRunJSONFlagRegistered pins the --json flag wiring for `wrk run`.
+// Agent callers rely on it to opt into the machine-readable Plan+Result
+// envelope; a silent drift would appear as an "unknown flag" error at
+// script time.
+func TestRunJSONFlagRegistered(t *testing.T) {
+	if runCmd.Flags().Lookup("json") == nil {
+		t.Fatal("--json flag not registered on runCmd")
+	}
+}

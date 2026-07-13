@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // runYes is bound to `--yes`/`-y`. Scripts and CI (which have no TTY
@@ -20,6 +22,7 @@ import (
 var (
 	runYes   bool
 	runForce bool
+	runJSON  bool
 )
 
 // runCmd wires the `wrk run <resource>` command to engine.BuildRunPlan +
@@ -59,9 +62,25 @@ var runCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
+		// Under --json every executor byte must be captured and
+		// re-emitted inside the JSON envelope's `warnings` array so
+		// the human-facing plain-text stream never mixes with the
+		// machine-readable one. Progress becomes a running total the
+		// result envelope carries as `bytesFreed`.
+		var warningsBuf bytes.Buffer
+		var bytesFreed int64
+		if runJSON {
+			options.Stdout = &warningsBuf
+			options.Progress = func(n int64) { bytesFreed += n }
+		}
+
 		plan, err := engine.BuildRunPlan(repo, args[0], options)
 		if err != nil {
 			return err
+		}
+
+		if runJSON {
+			return runRunJSON(plan, repo, options, &warningsBuf, &bytesFreed)
 		}
 
 		printRunPlan(os.Stdout, plan)
@@ -82,6 +101,50 @@ var runCmd = &cobra.Command{
 
 		return engine.ExecuteRunPlan(repo, plan, options)
 	},
+}
+
+// runRunJSON drives the --json path for `wrk run`. The confirmation
+// prompt still runs (with output suppressed) so a --force override
+// still surfaces as a Proceed decision; a refusal / preview yields
+// an envelope with a nil result field.
+func runRunJSON(
+	plan engine.RunPlan,
+	repo *repository.Repository,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	attempted := false
+	if !dryRun {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:    runYes,
+			Force:  runForce,
+			DryRun: dryRun,
+			Stdin:  os.Stdin,
+			Stdout: io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteRunPlan(repo, plan, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalRunJSON(engine.RunJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
 }
 
 // printRunPlan renders the RunPlan for the user. Kept small and
@@ -113,4 +176,7 @@ func init() {
 		"Skip the destructive-action confirmation prompt")
 	runCmd.Flags().BoolVar(&runForce, "force", false,
 		"Override refusals and skip the prompt")
+	runCmd.Flags().BoolVar(&runJSON, "json", false,
+		"Emit machine-readable JSON (plan+result envelope) "+
+			"instead of the human plan output")
 }

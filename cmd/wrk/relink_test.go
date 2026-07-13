@@ -127,3 +127,12 @@ func makeIsolatePlanFixture(t *testing.T, pairs [][2]string) engine.IsolatePlan 
 	}
 	return engine.IsolatePlan{Resources: resources}
 }
+
+// TestRelinkJSONFlagRegistered pins the --json flag wiring for
+// `wrk relink` and `wrk relink --isolate`. Both flavors share the
+// same flag var; drift would silently break both paths.
+func TestRelinkJSONFlagRegistered(t *testing.T) {
+	if relinkCmd.Flags().Lookup("json") == nil {
+		t.Fatal("--json flag not registered on relinkCmd")
+	}
+}

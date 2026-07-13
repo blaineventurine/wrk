@@ -38,6 +38,10 @@ var workspacesCmd = &cobra.Command{
 			return err
 		}
 
+		if workspacesJSON {
+			return printWorkspacesJSON(os.Stdout, summaries)
+		}
+
 		return printWorkspaces(os.Stdout, summaries)
 	},
 }
@@ -103,6 +107,29 @@ func formatCounts(counts map[engine.State]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// workspacesJSON is bound to `--json`. When set, workspaces emits
+// a single JSON envelope (schema/kind + list of workspace summaries)
+// instead of the tabular text output.
+var workspacesJSON bool
+
+// printWorkspacesJSON writes the engine's machine-readable workspaces
+// JSON to w, followed by a trailing newline for shell-friendliness.
+// It is the JSON equivalent of printWorkspaces and never falls
+// through to the tabular path.
+func printWorkspacesJSON(w io.Writer, summaries []engine.WorkspaceSummary) error {
+	data, err := engine.MarshalWorkspacesJSON(summaries)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	_, err = w.Write([]byte("\n"))
+	return err
+}
+
 func init() {
 	rootCmd.AddCommand(workspacesCmd)
+	workspacesCmd.Flags().BoolVar(&workspacesJSON, "json", false,
+		"Emit machine-readable JSON instead of the tabular text output")
 }

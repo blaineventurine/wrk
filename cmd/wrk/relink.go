@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 var (
 	relinkYes   bool
 	relinkForce bool
+	relinkJSON  bool
 )
 
 // relinkIsolate is bound to `--isolate`. When set, relink switches from
@@ -72,8 +74,26 @@ var relinkCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
+		// Under --json every executor byte must be captured and
+		// re-emitted inside the JSON envelope's `warnings` array so
+		// the human-facing plain-text stream never mixes with the
+		// machine-readable one. Progress becomes a running total the
+		// result envelope carries as `bytesFreed`.
+		var warningsBuf bytes.Buffer
+		var bytesFreed int64
+		if relinkJSON {
+			options.Stdout = &warningsBuf
+			options.Progress = func(n int64) { bytesFreed += n }
+		}
+
 		if relinkIsolate {
+			if relinkJSON {
+				return runRelinkIsolateJSON(repo, args, options, &warningsBuf, &bytesFreed)
+			}
 			return runRelinkIsolate(repo, args, options)
+		}
+		if relinkJSON {
+			return runRelinkPlainJSON(repo, options, &warningsBuf, &bytesFreed)
 		}
 		return runRelinkPlain(repo, options)
 	},
@@ -110,6 +130,55 @@ func runRelinkPlain(repo *repository.Repository, options engine.Options) error {
 	return engine.ExecuteRelink(repo, plan, options)
 }
 
+// runRelinkPlainJSON drives the --json path for `wrk relink` (no
+// --isolate). The confirmation prompt still runs (with output
+// suppressed) so a --force override still surfaces as a Proceed
+// decision; a refusal / preview yields an envelope with a nil
+// result field.
+func runRelinkPlainJSON(
+	repo *repository.Repository,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	plan, err := engine.BuildRelinkPlan(repo, options)
+	if err != nil {
+		return err
+	}
+
+	attempted := false
+	if !dryRun {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:    relinkYes,
+			Force:  relinkForce,
+			DryRun: dryRun,
+			Stdin:  os.Stdin,
+			Stdout: io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteRelink(repo, plan, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalRelinkJSON(engine.RelinkJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
+}
+
 // runRelinkIsolate drives the Build -> Print -> Confirm -> Execute
 // flow for `wrk relink --isolate`. The plan preview uses the local
 // printIsolatePlan since the IsolatePlan struct is not a planner.Plan.
@@ -138,6 +207,56 @@ func runRelinkIsolate(repo *repository.Repository, resourceNames []string, optio
 	return engine.ExecuteRelinkIsolate(repo, plan, options)
 }
 
+// runRelinkIsolateJSON drives the --json path for
+// `wrk relink --isolate`. The confirmation prompt still runs (with
+// output suppressed) so a --force override still surfaces as a
+// Proceed decision; a refusal / preview yields an envelope with a
+// nil result field.
+func runRelinkIsolateJSON(
+	repo *repository.Repository,
+	resourceNames []string,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	plan, err := engine.BuildRelinkIsolatePlan(repo, resourceNames, options)
+	if err != nil {
+		return err
+	}
+
+	attempted := false
+	if !dryRun {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:    relinkYes,
+			Force:  relinkForce,
+			DryRun: dryRun,
+			Stdin:  os.Stdin,
+			Stdout: io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteRelinkIsolate(repo, plan, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalRelinkIsolateJSON(engine.RelinkIsolateJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
+}
+
 // printIsolatePlan renders the IsolatePlan for the user. Kept small
 // and inline: the plan's user-visible fields are just a list of
 // resources, so a dedicated engine.PrintIsolatePlan would only
@@ -164,4 +283,7 @@ func init() {
 	relinkCmd.Flags().BoolVar(&relinkIsolate, "isolate", false,
 		"Promote detached resources into per-workspace variants "+
 			"(does not discard local edits)")
+	relinkCmd.Flags().BoolVar(&relinkJSON, "json", false,
+		"Emit machine-readable JSON (plan+result envelope) "+
+			"instead of the human plan output")
 }

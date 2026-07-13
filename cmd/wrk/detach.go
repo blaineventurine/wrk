@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
+	"github.com/blaineventurine/wrk/internal/planner"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // detachYes is bound to `--yes`/`-y`. Scripts and CI (which have no
@@ -18,6 +22,7 @@ import (
 var (
 	detachYes   bool
 	detachForce bool
+	detachJSON  bool
 )
 
 var detachCmd = &cobra.Command{
@@ -45,9 +50,25 @@ var detachCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
+		// Under --json every executor byte must be captured and
+		// re-emitted inside the JSON envelope's `warnings` array so
+		// the human-facing plain-text stream never mixes with the
+		// machine-readable one. Progress becomes a running total the
+		// result envelope carries as `bytesFreed`.
+		var warningsBuf bytes.Buffer
+		var bytesFreed int64
+		if detachJSON {
+			options.Stdout = &warningsBuf
+			options.Progress = func(n int64) { bytesFreed += n }
+		}
+
 		plan, err := engine.BuildDetachPlan(repo, options)
 		if err != nil {
 			return err
+		}
+
+		if detachJSON {
+			return runDetachJSON(plan, repo, options, &warningsBuf, &bytesFreed)
 		}
 
 		if err := engine.PrintPlan(os.Stdout, plan); err != nil {
@@ -72,6 +93,50 @@ var detachCmd = &cobra.Command{
 	},
 }
 
+// runDetachJSON drives the --json path for `wrk detach`. The
+// confirmation prompt still runs (with output suppressed) so a
+// --force override still surfaces as a Proceed decision; a refusal
+// / preview yields an envelope with a nil result field.
+func runDetachJSON(
+	plan planner.Plan,
+	repo *repository.Repository,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	attempted := false
+	if !dryRun {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:    detachYes,
+			Force:  detachForce,
+			DryRun: dryRun,
+			Stdin:  os.Stdin,
+			Stdout: io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteDetach(repo, plan, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalDetachJSON(engine.DetachJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
+}
+
 func init() {
 	rootCmd.AddCommand(detachCmd)
 
@@ -85,4 +150,7 @@ func init() {
 		"Skip the destructive-action confirmation prompt")
 	detachCmd.Flags().BoolVar(&detachForce, "force", false,
 		"Override refusals and skip the prompt")
+	detachCmd.Flags().BoolVar(&detachJSON, "json", false,
+		"Emit machine-readable JSON (plan+result envelope) "+
+			"instead of the human plan output")
 }

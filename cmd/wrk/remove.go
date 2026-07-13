@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/blaineventurine/wrk/internal/engine"
 	"github.com/blaineventurine/wrk/internal/progress"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // removeYes is bound to `--yes`/`-y`. Scripts and CI (which have no
@@ -23,6 +26,7 @@ import (
 var (
 	removeYes   bool
 	removeForce bool
+	removeJSON  bool
 )
 
 var removeCmd = &cobra.Command{
@@ -53,9 +57,25 @@ var removeCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
+		// Under --json every executor byte must be captured and
+		// re-emitted inside the JSON envelope's `warnings` array so
+		// the human-facing plain-text stream never mixes with the
+		// machine-readable one. Progress becomes a running total the
+		// result envelope carries as `bytesFreed`.
+		var warningsBuf bytes.Buffer
+		var bytesFreed int64
+		if removeJSON {
+			options.Stdout = &warningsBuf
+			options.Progress = func(n int64) { bytesFreed += n }
+		}
+
 		plan, err := engine.BuildRemovePlan(repo, args[0], options)
 		if err != nil {
 			return err
+		}
+
+		if removeJSON {
+			return runRemoveJSON(plan, repo, options, &warningsBuf, &bytesFreed)
 		}
 
 		printRemovePlan(os.Stdout, plan)
@@ -92,6 +112,53 @@ var removeCmd = &cobra.Command{
 	},
 }
 
+// runRemoveJSON drives the --json path for `wrk remove`. The
+// confirmation prompt still runs (with output suppressed) so a
+// --force override still surfaces as a Proceed decision; a refusal
+// error (e.g. uncommitted-changes without --force) still exits
+// non-zero — the JSON output is only emitted when Confirm returned
+// Proceed or Preview.
+func runRemoveJSON(
+	plan engine.RemovePlan,
+	repo *repository.Repository,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	attempted := false
+	if !dryRun {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:     removeYes,
+			Force:   removeForce,
+			DryRun:  dryRun,
+			Refusal: plan.Refusal,
+			Stdin:   os.Stdin,
+			Stdout:  io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteRemove(repo, plan, removeForce, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalRemoveJSON(engine.RemoveJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
+}
+
 // printRemovePlan renders the RemovePlan for the user. Kept small
 // and inline here — there is no dedicated engine.PrintRemovePlan
 // because the plan has a fixed, terse shape (one target, a handful
@@ -120,4 +187,7 @@ func init() {
 		"Skip the destructive-action confirmation prompt")
 	removeCmd.Flags().BoolVar(&removeForce, "force", false,
 		"Override refusals and skip the prompt")
+	removeCmd.Flags().BoolVar(&removeJSON, "json", false,
+		"Emit machine-readable JSON (plan+result envelope) "+
+			"instead of the human plan and progress output")
 }

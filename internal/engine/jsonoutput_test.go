@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/planner"
 )
 
 // statusJSONMirror decodes MarshalStatusJSON output for assertions without
@@ -1010,5 +1011,771 @@ func TestDoctorJSONPopulatesSliceChecks(t *testing.T) {
 func TestDoctorJSONNilReportErrors(t *testing.T) {
 	if _, err := MarshalDoctorJSON(nil); err == nil {
 		t.Fatal("expected error for nil report")
+	}
+}
+
+// ============================================================
+// destructive-command marshaler tests
+// ============================================================
+//
+// Every destructive command's marshaler shares the same envelope
+// contract: `schema`, `kind`, `dryRun`, `plan`, and an optional
+// `result` pointer whose omit-when-nil behaviour these tests pin
+// exhaustively.
+//
+// Uses a raw json.RawMessage for `result` so tests can distinguish
+// "key missing" (dry-run / refused) from "key present with a value"
+// (executed) without coupling to the marshaler's own struct type.
+
+// destructiveEnvelopeMirror decodes the shared envelope for the plan+
+// result destructive commands. RawResult stays as raw bytes so tests
+// can distinguish "result absent" from "result null" — the omitempty
+// pointer contract requires the key to disappear entirely on a
+// dry-run / refused execution.
+type destructiveEnvelopeMirror struct {
+	Schema    int             `json:"schema"`
+	Kind      string          `json:"kind"`
+	DryRun    bool            `json:"dryRun"`
+	RawResult json.RawMessage `json:"result"`
+}
+
+// resultMirror decodes the result envelope shared by every
+// destructive command. Kept flat and untyped so tests can assert on
+// the exact wire shape without importing the marshaler's own struct.
+type resultMirror struct {
+	Attempted  bool     `json:"attempted"`
+	BytesFreed int64    `json:"bytesFreed"`
+	Warnings   []string `json:"warnings"`
+}
+
+// ============================================================
+// workspaces
+// ============================================================
+
+// TestWorkspacesJSONEmitsEnvelope pins the schema+kind envelope
+// for `wrk workspaces --json`: an empty summary list must still
+// carry the envelope AND emit `workspaces: []` (not null) so
+// consumers can iterate without a nil check.
+func TestWorkspacesJSONEmitsEnvelope(t *testing.T) {
+	data, err := MarshalWorkspacesJSON(nil)
+	if err != nil {
+		t.Fatalf("MarshalWorkspacesJSON(nil): %v", err)
+	}
+	if !strings.Contains(string(data), "\"kind\": \"workspaces\"") {
+		t.Fatalf("kind envelope missing:\n%s", data)
+	}
+	if !strings.Contains(string(data), "\"workspaces\": []") {
+		t.Fatalf("expected `workspaces: []`, got:\n%s", data)
+	}
+
+	var out struct {
+		Schema     int `json:"schema"`
+		Workspaces []struct {
+			Root string `json:"root"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Schema != 1 {
+		t.Errorf("schema: got %d want 1", out.Schema)
+	}
+	if out.Workspaces == nil {
+		t.Errorf("workspaces MUST unmarshal to a non-nil slice")
+	}
+}
+
+// TestWorkspacesJSONProjectsCounts pins the resourceCounts rollup:
+// every configured state maps to a fixed field, and Unhealthy
+// aggregates every state that would drive a WorkspaceUnhealthy
+// rollup (conflict + stale + missing + not-linked + absent).
+func TestWorkspacesJSONProjectsCounts(t *testing.T) {
+	summaries := []WorkspaceSummary{
+		{
+			Root:      "/primary",
+			IsCurrent: true,
+			State:     WorkspaceUnhealthy,
+			Counts: map[State]int{
+				StateLinked:    2,
+				StateDetached:  1,
+				StateIsolated:  1,
+				StatePending:   1,
+				StateExpected:  1,
+				StateConflict:  1,
+				StateStale:     1,
+				StateMissing:   1,
+				StateNotLinked: 1,
+				StateAbsent:    1,
+			},
+		},
+	}
+
+	data, err := MarshalWorkspacesJSON(summaries)
+	if err != nil {
+		t.Fatalf("MarshalWorkspacesJSON: %v", err)
+	}
+	var out struct {
+		Workspaces []struct {
+			Root           string `json:"root"`
+			IsPrimary      bool   `json:"isPrimary"`
+			State          string `json:"state"`
+			ResourceCounts struct {
+				Linked    int `json:"linked"`
+				Detached  int `json:"detached"`
+				Isolated  int `json:"isolated"`
+				Pending   int `json:"pending"`
+				Unhealthy int `json:"unhealthy"`
+				Expected  int `json:"expected"`
+			} `json:"resourceCounts"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Workspaces) != 1 {
+		t.Fatalf("workspaces: got %d want 1", len(out.Workspaces))
+	}
+	w := out.Workspaces[0]
+	if w.Root != "/primary" {
+		t.Errorf("root: got %q want /primary", w.Root)
+	}
+	if !w.IsPrimary {
+		t.Errorf("isPrimary: got false want true (IsCurrent=true)")
+	}
+	if w.State != "unhealthy" {
+		t.Errorf("state: got %q want unhealthy", w.State)
+	}
+	if w.ResourceCounts.Linked != 2 {
+		t.Errorf("linked: got %d want 2", w.ResourceCounts.Linked)
+	}
+	if w.ResourceCounts.Detached != 1 {
+		t.Errorf("detached: got %d want 1", w.ResourceCounts.Detached)
+	}
+	if w.ResourceCounts.Isolated != 1 {
+		t.Errorf("isolated: got %d want 1", w.ResourceCounts.Isolated)
+	}
+	if w.ResourceCounts.Pending != 1 {
+		t.Errorf("pending: got %d want 1", w.ResourceCounts.Pending)
+	}
+	if w.ResourceCounts.Expected != 1 {
+		t.Errorf("expected: got %d want 1", w.ResourceCounts.Expected)
+	}
+	// Unhealthy = conflict+stale+missing+notLinked+absent = 5
+	if w.ResourceCounts.Unhealthy != 5 {
+		t.Errorf("unhealthy: got %d want 5 (sum of 5 unhealthy states)",
+			w.ResourceCounts.Unhealthy)
+	}
+}
+
+// ============================================================
+// gc
+// ============================================================
+
+// TestGCJSONDryRunOmitsResult pins the omitempty contract: a
+// --dry-run marshal MUST NOT carry a `result` key at all (nil
+// pointer = key elided) so consumers can dispatch on "was the
+// executor invoked?" purely by key presence.
+func TestGCJSONDryRunOmitsResult(t *testing.T) {
+	plan := GCPlan{
+		Ghosts: []string{"/g/1"},
+		DeleteVariants: []variant{{
+			Resource:    "node",
+			Path:        "node_modules",
+			Fingerprint: "abc",
+			StoragePath: "/store/abc",
+			Size:        4096,
+		}},
+		TotalBytesFreed: 4096,
+	}
+
+	data, err := MarshalGCJSON(GCJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatalf("MarshalGCJSON: %v", err)
+	}
+
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, data)
+	}
+	if env.Schema != 1 || env.Kind != "gc" {
+		t.Errorf("envelope: schema=%d kind=%q, want 1/gc", env.Schema, env.Kind)
+	}
+	if !env.DryRun {
+		t.Errorf("dryRun: got false want true")
+	}
+	if len(env.RawResult) != 0 {
+		t.Errorf("result MUST be omitted in dry-run mode, got %s",
+			string(env.RawResult))
+	}
+
+	// Plan fields land in the payload.
+	var full struct {
+		Plan struct {
+			VariantsToRemove       []gcVariantJSON `json:"variantsToRemove"`
+			GhostWorkspacesToPrune []string        `json:"ghostWorkspacesToPrune"`
+			TotalBytesToFree       int64           `json:"totalBytesToFree"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatalf("unmarshal plan: %v", err)
+	}
+	if len(full.Plan.VariantsToRemove) != 1 || full.Plan.VariantsToRemove[0].Resource != "node" {
+		t.Errorf("variantsToRemove: %+v", full.Plan.VariantsToRemove)
+	}
+	if len(full.Plan.GhostWorkspacesToPrune) != 1 || full.Plan.GhostWorkspacesToPrune[0] != "/g/1" {
+		t.Errorf("ghostWorkspacesToPrune: %+v", full.Plan.GhostWorkspacesToPrune)
+	}
+	if full.Plan.TotalBytesToFree != 4096 {
+		t.Errorf("totalBytesToFree: got %d want 4096", full.Plan.TotalBytesToFree)
+	}
+}
+
+// TestGCJSONExecutePopulatesResult pins the executed branch: with
+// Attempted=true the marshaler MUST carry a non-nil `result` object
+// whose Attempted / BytesFreed / Warnings mirror the input.
+func TestGCJSONExecutePopulatesResult(t *testing.T) {
+	plan := GCPlan{}
+	data, err := MarshalGCJSON(GCJSONInput{
+		Plan:       plan,
+		Attempted:  true,
+		BytesFreed: 1234567,
+		Warnings:   []string{"warning: skipped foo"},
+	})
+	if err != nil {
+		t.Fatalf("MarshalGCJSON: %v", err)
+	}
+
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if len(env.RawResult) == 0 {
+		t.Fatalf("result MUST be present when Attempted=true")
+	}
+
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !res.Attempted {
+		t.Errorf("attempted: got false want true")
+	}
+	if res.BytesFreed != 1234567 {
+		t.Errorf("bytesFreed: got %d want 1234567", res.BytesFreed)
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0] != "warning: skipped foo" {
+		t.Errorf("warnings: %+v", res.Warnings)
+	}
+}
+
+// TestGCJSONEmptyPlanEmitsNullSafeArrays pins that every plan slice
+// serialises as `[]` even when the underlying GCPlan carries nil
+// slices — consumers iterate without a nil check.
+func TestGCJSONEmptyPlanEmitsNullSafeArrays(t *testing.T) {
+	data, err := MarshalGCJSON(GCJSONInput{Plan: GCPlan{}, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Grep for each slice field explicitly — decoded nil vs empty are
+	// indistinguishable in Go, but the raw JSON bytes MUST show `[]`.
+	for _, field := range []string{
+		"\"variantsToRemove\": []",
+		"\"ghostWorkspacesToPrune\": []",
+		"\"orphanedLocks\": []",
+		"\"staleProvisioning\": []",
+		"\"staleDeleting\": []",
+		"\"staleForgetting\": []",
+		"\"pendingSwaps\": []",
+		"\"orphanedIsolationEntries\": []",
+		"\"orphanRegistry\": []",
+		"\"unreachableWorkspaces\": []",
+	} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("missing empty-array field %q in:\n%s", field, data)
+		}
+	}
+}
+
+// TestGCJSONExecutedNilWarningsSerializeAsEmptyArray pins the
+// warnings-array contract on the result envelope: even when the
+// caller passes nil, the wire form MUST be `[]` so consumers can
+// iterate without a nil check.
+func TestGCJSONExecutedNilWarningsSerializeAsEmptyArray(t *testing.T) {
+	data, err := MarshalGCJSON(GCJSONInput{Plan: GCPlan{}, Attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\"warnings\": []") {
+		t.Errorf("warnings MUST serialize as []:\n%s", data)
+	}
+}
+
+// ============================================================
+// remove
+// ============================================================
+
+// TestRemoveJSONDryRunOmitsResult pins the shared envelope shape
+// for `wrk remove --json --dry-run`: schema=1, kind=remove, no
+// result key.
+func TestRemoveJSONDryRunOmitsResult(t *testing.T) {
+	plan := RemovePlan{
+		Target:             "/wk/feature",
+		Backend:            "git",
+		VCSCommand:         "git worktree remove /wk/feature",
+		UncommittedChanges: 2,
+		DetachedPaths:      []string{".env"},
+		TotalBytes:         512,
+		Refusal:            "workspace has uncommitted changes",
+		IsGhost:            false,
+	}
+
+	data, err := MarshalRemoveJSON(RemoveJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatalf("MarshalRemoveJSON: %v", err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Schema != 1 || env.Kind != "remove" || !env.DryRun {
+		t.Errorf("envelope: %+v", env)
+	}
+	if len(env.RawResult) != 0 {
+		t.Errorf("result MUST be omitted in dry-run mode")
+	}
+
+	var full struct {
+		Plan removePlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Plan.Target != "/wk/feature" {
+		t.Errorf("target: got %q", full.Plan.Target)
+	}
+	if full.Plan.Backend != "git" {
+		t.Errorf("backend: got %q", full.Plan.Backend)
+	}
+	if full.Plan.UncommittedChanges != 2 {
+		t.Errorf("uncommittedChanges: got %d", full.Plan.UncommittedChanges)
+	}
+	if len(full.Plan.DetachedPaths) != 1 || full.Plan.DetachedPaths[0] != ".env" {
+		t.Errorf("detachedPaths: %+v", full.Plan.DetachedPaths)
+	}
+	if full.Plan.TotalBytesToFree != 512 {
+		t.Errorf("totalBytesToFree: got %d", full.Plan.TotalBytesToFree)
+	}
+	if full.Plan.Refusal != "workspace has uncommitted changes" {
+		t.Errorf("refusal: got %q", full.Plan.Refusal)
+	}
+}
+
+// TestRemoveJSONExecutePopulatesResult pins the executed branch:
+// Attempted=true carries BytesFreed and any Warnings.
+func TestRemoveJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalRemoveJSON(RemoveJSONInput{
+		Plan:       RemovePlan{Target: "/wk/f", Backend: "jj"},
+		Attempted:  true,
+		BytesFreed: 999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted || res.BytesFreed != 999 {
+		t.Errorf("result: %+v", res)
+	}
+	if res.Warnings == nil {
+		t.Errorf("warnings MUST be non-nil (empty slice)")
+	}
+}
+
+// TestRemoveJSONEmptyRefusalOmittedFromWire pins the `omitempty`
+// contract on the refusal field: an empty string MUST NOT appear on
+// the wire so consumers can dispatch on key presence.
+func TestRemoveJSONEmptyRefusalOmittedFromWire(t *testing.T) {
+	data, err := MarshalRemoveJSON(RemoveJSONInput{
+		Plan: RemovePlan{Target: "/wk/f", Backend: "git"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "\"refusal\"") {
+		t.Errorf("empty refusal MUST be omitted from wire:\n%s", data)
+	}
+}
+
+// ============================================================
+// forget
+// ============================================================
+
+// TestForgetJSONDryRunOmitsResult pins the shared envelope shape
+// for `wrk forget --json --dry-run`.
+func TestForgetJSONDryRunOmitsResult(t *testing.T) {
+	plan := ForgetPlan{
+		RepositoryID:  "local/abc",
+		StoragePath:   "/store/local/abc",
+		VariantCount:  3,
+		ResourceCount: 2,
+		TotalSize:     4096,
+		RegistryEntries: map[string][]string{
+			"/wk/b": {".env"},
+			"/wk/a": {"node_modules"},
+		},
+		Refusal: "detached-file registry entries exist",
+	}
+
+	data, err := MarshalForgetJSON(ForgetJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != "forget" || !env.DryRun || len(env.RawResult) != 0 {
+		t.Errorf("envelope: %+v; raw=%s", env, string(env.RawResult))
+	}
+
+	var full struct {
+		Plan forgetPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Plan.RepositoryID != "local/abc" {
+		t.Errorf("repositoryId: %q", full.Plan.RepositoryID)
+	}
+	if full.Plan.VariantCount != 3 {
+		t.Errorf("variantCount: %d", full.Plan.VariantCount)
+	}
+	if full.Plan.TotalSize != 4096 {
+		t.Errorf("totalSize: %d", full.Plan.TotalSize)
+	}
+	// Registry entries MUST be sorted for deterministic output.
+	if len(full.Plan.RegistryEntries) != 2 ||
+		full.Plan.RegistryEntries[0] != "/wk/a" ||
+		full.Plan.RegistryEntries[1] != "/wk/b" {
+		t.Errorf("registryEntries MUST be sorted, got %+v", full.Plan.RegistryEntries)
+	}
+	if full.Plan.Refusal == "" {
+		t.Errorf("refusal MUST be surfaced when set")
+	}
+}
+
+// TestForgetJSONExecutePopulatesResult pins the executed branch.
+func TestForgetJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalForgetJSON(ForgetJSONInput{
+		Plan:       ForgetPlan{RepositoryID: "local/abc"},
+		Attempted:  true,
+		BytesFreed: 8192,
+		Warnings:   []string{"warning: could not remove /store/x"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted || res.BytesFreed != 8192 {
+		t.Errorf("result: %+v", res)
+	}
+	if len(res.Warnings) != 1 {
+		t.Errorf("warnings: %+v", res.Warnings)
+	}
+}
+
+// ============================================================
+// run
+// ============================================================
+
+// TestRunJSONDryRunEmitsResourceAndCommandCount pins the shape of
+// the run plan projection: resource identity + command count only,
+// no result key in dry-run mode.
+func TestRunJSONDryRunEmitsResourceAndCommandCount(t *testing.T) {
+	plan := RunPlan{
+		Root: "/wk",
+		Resource: config.Resource{
+			Name: "node",
+			Path: "node_modules",
+		},
+		Commands: []config.Command{
+			{Run: "yarn install"},
+			{Run: "yarn build"},
+		},
+	}
+	data, err := MarshalRunJSON(RunJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != "run" || !env.DryRun || len(env.RawResult) != 0 {
+		t.Errorf("envelope: %+v", env)
+	}
+	var full struct {
+		Plan runPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Plan.Resource.Name != "node" || full.Plan.Resource.Path != "node_modules" {
+		t.Errorf("resource: %+v", full.Plan.Resource)
+	}
+	if full.Plan.CommandCount != 2 {
+		t.Errorf("commandCount: got %d want 2", full.Plan.CommandCount)
+	}
+	if full.Plan.VariantPath != "" {
+		t.Errorf("variantPath: empty plan actions MUST yield \"\", got %q", full.Plan.VariantPath)
+	}
+}
+
+// TestRunJSONExecutePopulatesResult pins the executed branch: the
+// caller records BytesFreed / Warnings, marshaler wires them in.
+func TestRunJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalRunJSON(RunJSONInput{
+		Plan:       RunPlan{Resource: config.Resource{Name: "n"}},
+		Attempted:  true,
+		BytesFreed: 42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted || res.BytesFreed != 42 {
+		t.Errorf("result: %+v", res)
+	}
+}
+
+// ============================================================
+// relink
+// ============================================================
+
+// TestRelinkJSONDryRunFlattensActions pins the relink plan projection:
+// the planner.Action union is flattened to one-line descriptions
+// matching the human printer's output. Actions count and description
+// text both surface for machine consumers verifying "what would
+// happen".
+func TestRelinkJSONDryRunFlattensActions(t *testing.T) {
+	plan := planner.Plan{
+		WorkspaceRoot: "/wk",
+		Actions: []planner.PlannedAction{
+			{Action: planner.CreateDirectory{Path: "/store/env"}},
+			{Action: planner.Symlink{Link: "/wk/.env", Target: "/store/env/.env"}},
+		},
+	}
+	data, err := MarshalRelinkJSON(RelinkJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != "relink" || !env.DryRun || len(env.RawResult) != 0 {
+		t.Errorf("envelope: %+v", env)
+	}
+	var full struct {
+		Plan relinkPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Plan.ActionCount != 2 {
+		t.Errorf("actionCount: got %d want 2", full.Plan.ActionCount)
+	}
+	if len(full.Plan.Descriptions) != 2 {
+		t.Fatalf("descriptions: got %d want 2", len(full.Plan.Descriptions))
+	}
+	if !strings.Contains(full.Plan.Descriptions[0], "create directory") {
+		t.Errorf("first description: %q", full.Plan.Descriptions[0])
+	}
+	if !strings.Contains(full.Plan.Descriptions[1], "link") {
+		t.Errorf("second description: %q", full.Plan.Descriptions[1])
+	}
+}
+
+// TestRelinkJSONExecutePopulatesResult pins the executed branch.
+func TestRelinkJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalRelinkJSON(RelinkJSONInput{
+		Attempted:  true,
+		BytesFreed: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted || res.BytesFreed != 10 {
+		t.Errorf("result: %+v", res)
+	}
+}
+
+// TestRelinkJSONEmptyPlanEmitsEmptyDescriptions pins the null-safety
+// contract on the descriptions slice: nil actions serialise as `[]`
+// so consumers iterate without a nil check.
+func TestRelinkJSONEmptyPlanEmitsEmptyDescriptions(t *testing.T) {
+	data, err := MarshalRelinkJSON(RelinkJSONInput{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\"descriptions\": []") {
+		t.Errorf("descriptions MUST serialize as []:\n%s", data)
+	}
+}
+
+// ============================================================
+// relink --isolate
+// ============================================================
+
+// TestRelinkIsolateJSONDryRunSurfacesResources pins the isolate plan
+// projection: each resource entry maps to a {name,path} pair via the
+// shared runResourceJSON shape.
+func TestRelinkIsolateJSONDryRunSurfacesResources(t *testing.T) {
+	plan := IsolatePlan{
+		Root: "/wk",
+		Resources: []config.Resource{
+			{Name: "node", Path: "node_modules"},
+			{Name: "env", Path: ".env"},
+		},
+	}
+	data, err := MarshalRelinkIsolateJSON(RelinkIsolateJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != "relink-isolate" || !env.DryRun || len(env.RawResult) != 0 {
+		t.Errorf("envelope: %+v", env)
+	}
+	var full struct {
+		Plan struct {
+			Resources []runResourceJSON `json:"resources"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Plan.Resources) != 2 {
+		t.Fatalf("resources: got %d want 2", len(full.Plan.Resources))
+	}
+	if full.Plan.Resources[0].Name != "node" || full.Plan.Resources[0].Path != "node_modules" {
+		t.Errorf("first resource: %+v", full.Plan.Resources[0])
+	}
+}
+
+// TestRelinkIsolateJSONExecutePopulatesResult pins the executed
+// branch.
+func TestRelinkIsolateJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalRelinkIsolateJSON(RelinkIsolateJSONInput{
+		Attempted:  true,
+		BytesFreed: 7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted || res.BytesFreed != 7 {
+		t.Errorf("result: %+v", res)
+	}
+}
+
+// ============================================================
+// detach
+// ============================================================
+
+// TestDetachJSONDryRunFlattensActions pins the detach plan projection:
+// same shape as relink so a consumer can share a parser.
+func TestDetachJSONDryRunFlattensActions(t *testing.T) {
+	plan := planner.Plan{
+		WorkspaceRoot: "/wk",
+		Actions: []planner.PlannedAction{
+			{Action: planner.Detach{Link: "/wk/.env"}},
+		},
+	}
+	data, err := MarshalDetachJSON(DetachJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != "detach" || !env.DryRun || len(env.RawResult) != 0 {
+		t.Errorf("envelope: %+v", env)
+	}
+	var full struct {
+		Plan detachPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Plan.ActionCount != 1 {
+		t.Errorf("actionCount: got %d want 1", full.Plan.ActionCount)
+	}
+	if len(full.Plan.Descriptions) != 1 || !strings.Contains(full.Plan.Descriptions[0], "independent copy") {
+		t.Errorf("descriptions: %+v", full.Plan.Descriptions)
+	}
+}
+
+// TestDetachJSONExecutePopulatesResult pins the executed branch.
+func TestDetachJSONExecutePopulatesResult(t *testing.T) {
+	data, err := MarshalDetachJSON(DetachJSONInput{
+		Attempted: true,
+		Warnings:  []string{"warning: something"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	var res resultMirror
+	if err := json.Unmarshal(env.RawResult, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Attempted {
+		t.Errorf("attempted: got false want true")
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0] != "warning: something" {
+		t.Errorf("warnings: %+v", res.Warnings)
 	}
 }

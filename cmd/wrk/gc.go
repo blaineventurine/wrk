@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/blaineventurine/wrk/internal/engine"
 	"github.com/blaineventurine/wrk/internal/progress"
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // gcYes is bound to `--yes`/`-y`. Present so scripts and CI (which
@@ -20,6 +23,7 @@ import (
 var (
 	gcYes   bool
 	gcForce bool
+	gcJSON  bool
 )
 
 var gcCmd = &cobra.Command{
@@ -51,9 +55,25 @@ var gcCmd = &cobra.Command{
 			Stdout:      os.Stdout,
 		}
 
+		// Under --json every executor byte must be captured and
+		// re-emitted inside the JSON envelope's `warnings` array so
+		// the human-facing plain-text stream never mixes with the
+		// machine-readable one. Progress becomes a running total the
+		// result envelope carries as `bytesFreed`.
+		var warningsBuf bytes.Buffer
+		var bytesFreed int64
+		if gcJSON {
+			options.Stdout = &warningsBuf
+			options.Progress = func(n int64) { bytesFreed += n }
+		}
+
 		plan, err := engine.BuildGCPlan(repo, options)
 		if err != nil {
 			return err
+		}
+
+		if gcJSON {
+			return runGCJSON(plan, repo, options, &warningsBuf, &bytesFreed)
 		}
 
 		engine.PrintGCPlan(os.Stdout, plan)
@@ -87,6 +107,51 @@ var gcCmd = &cobra.Command{
 	},
 }
 
+
+// runGCJSON drives the --json path for `wrk gc`. The confirmation
+// prompt still runs (with output suppressed) so a --force override
+// still surfaces as a Proceed decision; a refusal / preview yields
+// an envelope with a nil result field. An empty plan short-circuits
+// to "not attempted", matching the human path's HasNothing() branch.
+func runGCJSON(
+	plan engine.GCPlan,
+	repo *repository.Repository,
+	options engine.Options,
+	warningsBuf *bytes.Buffer,
+	bytesFreed *int64,
+) error {
+	attempted := false
+	if !dryRun && !plan.HasNothing() {
+		dec, err := Confirm(ConfirmOptions{
+			Yes:    gcYes,
+			Force:  gcForce,
+			DryRun: dryRun,
+			Stdin:  os.Stdin,
+			Stdout: io.Discard,
+		})
+		if err != nil {
+			return err
+		}
+		if dec == Proceed {
+			if err := engine.ExecuteGC(repo, plan, options); err != nil {
+				return err
+			}
+			attempted = true
+		}
+	}
+
+	data, err := engine.MarshalGCJSON(engine.GCJSONInput{
+		Plan:       plan,
+		DryRun:     dryRun,
+		Attempted:  attempted,
+		BytesFreed: *bytesFreed,
+		Warnings:   scanWarnings(warningsBuf),
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, data)
+}
 func init() {
 	rootCmd.AddCommand(gcCmd)
 	gcCmd.Flags().BoolVar(&dryRun, "dry-run", false,
@@ -95,4 +160,7 @@ func init() {
 		"Skip the destructive-action confirmation prompt")
 	gcCmd.Flags().BoolVar(&gcForce, "force", false,
 		"Override refusals and skip the prompt")
+	gcCmd.Flags().BoolVar(&gcJSON, "json", false,
+		"Emit machine-readable JSON (plan+result envelope) "+
+			"instead of the human plan and progress output")
 }

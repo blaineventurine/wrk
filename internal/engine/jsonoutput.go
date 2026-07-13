@@ -9,6 +9,7 @@ import (
 
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/location"
+	"github.com/blaineventurine/wrk/internal/planner"
 	"github.com/blaineventurine/wrk/internal/repository"
 	"github.com/blaineventurine/wrk/internal/resolver"
 )
@@ -572,4 +573,651 @@ func nilToEmpty(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// ============================================================
+// destructive-command result envelope
+// ============================================================
+
+// resultEnvelopeJSON is the "what actually happened" projection
+// attached to every destructive command's JSON output when the
+// executor ran. In --dry-run mode, or when the confirmation prompt
+// refused / previewed the plan, the pointer to this struct is nil
+// (and the parent envelope's `result` key is omitted via omitempty).
+//
+// BytesFreed is the running total of bytes fed to Options.Progress
+// during execution. Warnings collects any non-empty line the
+// executor wrote to its Stdout — the CLI redirects Stdout to a
+// bytes.Buffer under --json so the executor's chatter never
+// pollutes the machine-readable stream.
+type resultEnvelopeJSON struct {
+	Attempted  bool     `json:"attempted"`
+	BytesFreed int64    `json:"bytesFreed"`
+	Warnings   []string `json:"warnings"`
+}
+
+// ============================================================
+// workspaces
+// ============================================================
+
+// resourceCountJSON is the JSON projection of a WorkspaceSummary's
+// per-state counts. Every field is emitted verbatim (never elided)
+// so a consumer can read a coherent set of counters without a nil
+// check — zeros are meaningful data, not noise.
+type resourceCountJSON struct {
+	Linked    int `json:"linked"`
+	Detached  int `json:"detached"`
+	Isolated  int `json:"isolated"`
+	Pending   int `json:"pending"`
+	Unhealthy int `json:"unhealthy"`
+	Expected  int `json:"expected"`
+}
+
+// workspaceEntryJSON is the JSON projection of one WorkspaceSummary.
+// State is the workspace-level rollup label (linked / detached /
+// partial / pending / unhealthy / empty).
+type workspaceEntryJSON struct {
+	Root           string            `json:"root"`
+	IsPrimary      bool              `json:"isPrimary"`
+	State          string            `json:"state"`
+	ResourceCounts resourceCountJSON `json:"resourceCounts"`
+}
+
+// workspacesJSON is the top-level shape emitted by
+// `wrk workspaces --json`.
+type workspacesJSON struct {
+	jsonEnvelope
+	Workspaces []workspaceEntryJSON `json:"workspaces"`
+}
+
+// MarshalWorkspacesJSON renders a slice of WorkspaceSummary values
+// as pretty-printed JSON with the shared schema/kind envelope. Nil
+// or empty input yields a stable envelope with `workspaces: []` so
+// consumers can iterate without a nil check.
+//
+// Per-state counts are rolled up under resourceCounts. Unhealthy
+// aggregates every state that would trigger the WorkspaceUnhealthy
+// rollup (conflict, stale, missing, not-linked, absent) so a single
+// counter reflects "resources needing attention", matching the
+// human-readable `wrk workspaces` output.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalWorkspacesJSON(summaries []WorkspaceSummary) ([]byte, error) {
+	out := workspacesJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "workspaces"},
+		Workspaces:   make([]workspaceEntryJSON, 0, len(summaries)),
+	}
+	for _, s := range summaries {
+		out.Workspaces = append(out.Workspaces, workspaceEntryJSON{
+			Root:           s.Root,
+			IsPrimary:      s.IsCurrent,
+			State:          string(s.State),
+			ResourceCounts: workspaceCounts(s.Counts),
+		})
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// workspaceCounts flattens a WorkspaceSummary.Counts map into the
+// fixed-shape counter struct. Unhealthy sums the five states that
+// drive the WorkspaceUnhealthy rollup so consumers get a single
+// "problems" gauge rather than five near-empty fields.
+func workspaceCounts(counts map[State]int) resourceCountJSON {
+	return resourceCountJSON{
+		Linked:   counts[StateLinked],
+		Detached: counts[StateDetached],
+		Isolated: counts[StateIsolated],
+		Pending:  counts[StatePending],
+		Unhealthy: counts[StateConflict] +
+			counts[StateStale] +
+			counts[StateMissing] +
+			counts[StateNotLinked] +
+			counts[StateAbsent],
+		Expected: counts[StateExpected],
+	}
+}
+
+// ============================================================
+// gc
+// ============================================================
+
+// gcVariantJSON is the JSON projection of one on-disk variant slated
+// for removal. Fingerprint is the empty string for un-fingerprinted
+// resources (a single-variant resource has no digest to distinguish).
+type gcVariantJSON struct {
+	Resource    string `json:"resource"`
+	Fingerprint string `json:"fingerprint"`
+	StoragePath string `json:"storagePath"`
+	SizeBytes   int64  `json:"sizeBytes"`
+}
+
+// gcPendingSwapJSON is the JSON projection of one mid-swap-crash
+// recovery: the executor completes the Rename(Provisioning, Real)
+// so on-disk state matches the last user-visible commit.
+type gcPendingSwapJSON struct {
+	Provisioning string `json:"provisioning"`
+	Real         string `json:"real"`
+}
+
+// gcOrphanedIsolationJSON is the JSON projection of one isolation-
+// registry entry whose workspace root is gone from disk. Cleared
+// via clearIsolation.
+type gcOrphanedIsolationJSON struct {
+	WorkspaceRoot string `json:"workspaceRoot"`
+	ResourcePath  string `json:"resourcePath"`
+}
+
+// gcPlanJSON is the JSON projection of a GCPlan. Every slice field is
+// emitted verbatim (never elided) so consumers see `[]` instead of
+// `null` on an empty sweep. The un-fingerprinted variants surface with
+// an empty Fingerprint string.
+type gcPlanJSON struct {
+	VariantsToRemove         []gcVariantJSON           `json:"variantsToRemove"`
+	GhostWorkspacesToPrune   []string                  `json:"ghostWorkspacesToPrune"`
+	OrphanedLocks            []string                  `json:"orphanedLocks"`
+	StaleProvisioning        []string                  `json:"staleProvisioning"`
+	StaleDeleting            []string                  `json:"staleDeleting"`
+	StaleForgetting          []string                  `json:"staleForgetting"`
+	PendingSwaps             []gcPendingSwapJSON       `json:"pendingSwaps"`
+	OrphanedIsolationEntries []gcOrphanedIsolationJSON `json:"orphanedIsolationEntries"`
+	OrphanRegistry           []string                  `json:"orphanRegistry"`
+	UnreachableWorkspaces    []string                  `json:"unreachableWorkspaces"`
+	TotalBytesToFree         int64                     `json:"totalBytesToFree"`
+}
+
+// gcJSON is the top-level shape emitted by `wrk gc --json`. Result
+// is a pointer so `omitempty` elides it entirely in --dry-run mode
+// or when the operator refused / previewed the plan.
+type gcJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   gcPlanJSON          `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// GCJSONInput bundles the pieces MarshalGCJSON needs. Attempted flips
+// the result envelope on: false means dry-run or refused (result key
+// omitted); true means the executor ran and BytesFreed / Warnings
+// carry the running tally.
+type GCJSONInput struct {
+	Plan       GCPlan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalGCJSON renders a GCPlan and optional execution result as
+// pretty-printed JSON with the shared schema/kind envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalGCJSON(in GCJSONInput) ([]byte, error) {
+	out := gcJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "gc"},
+		DryRun:       in.DryRun,
+		Plan:         projectGCPlan(in.Plan),
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// projectGCPlan flattens a GCPlan into its JSON shape, materialising
+// empty slices in place of nil so the marshalled output emits `[]`
+// rather than `null`.
+func projectGCPlan(p GCPlan) gcPlanJSON {
+	variants := make([]gcVariantJSON, 0, len(p.DeleteVariants))
+	for _, v := range p.DeleteVariants {
+		variants = append(variants, gcVariantJSON{
+			Resource:    v.Resource,
+			Fingerprint: v.Fingerprint,
+			StoragePath: v.StoragePath,
+			SizeBytes:   v.Size,
+		})
+	}
+
+	swaps := make([]gcPendingSwapJSON, 0, len(p.PendingSwaps))
+	for _, s := range p.PendingSwaps {
+		swaps = append(swaps, gcPendingSwapJSON{
+			Provisioning: s.Provisioning,
+			Real:         s.Real,
+		})
+	}
+
+	iso := make([]gcOrphanedIsolationJSON, 0, len(p.OrphanedIsolationEntries))
+	for _, e := range p.OrphanedIsolationEntries {
+		iso = append(iso, gcOrphanedIsolationJSON{
+			WorkspaceRoot: e.WorkspaceRoot,
+			ResourcePath:  e.ResourcePath,
+		})
+	}
+
+	return gcPlanJSON{
+		VariantsToRemove:         variants,
+		GhostWorkspacesToPrune:   nilToEmpty(p.Ghosts),
+		OrphanedLocks:            nilToEmpty(p.OrphanedLocks),
+		StaleProvisioning:        nilToEmpty(p.StaleProvisioning),
+		StaleDeleting:            nilToEmpty(p.StaleDeleting),
+		StaleForgetting:          nilToEmpty(p.StaleForgetting),
+		PendingSwaps:             swaps,
+		OrphanedIsolationEntries: iso,
+		OrphanRegistry:           nilToEmpty(p.OrphanRegistry),
+		UnreachableWorkspaces:    nilToEmpty(p.UnreachableWorkspaces),
+		TotalBytesToFree:         p.TotalBytesFreed,
+	}
+}
+
+// ============================================================
+// remove
+// ============================================================
+
+// removePlanJSON is the JSON projection of a RemovePlan. Refusal
+// carries `omitempty` because it is meaningful only when the plan
+// carries a soft refusal reason; the empty case would otherwise
+// pollute the payload with an always-empty string.
+type removePlanJSON struct {
+	Target             string   `json:"target"`
+	Backend            string   `json:"backend"`
+	VCSCommand         string   `json:"vcsCommand"`
+	UncommittedChanges int      `json:"uncommittedChanges"`
+	DetachedPaths      []string `json:"detachedPaths"`
+	TotalBytesToFree   int64    `json:"totalBytesToFree"`
+	Refusal            string   `json:"refusal,omitempty"`
+	IsGhost            bool     `json:"isGhost"`
+}
+
+// removeJSON is the top-level shape emitted by `wrk remove --json`.
+type removeJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   removePlanJSON      `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// RemoveJSONInput bundles the pieces MarshalRemoveJSON needs.
+type RemoveJSONInput struct {
+	Plan       RemovePlan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalRemoveJSON renders a RemovePlan and optional execution
+// result as pretty-printed JSON with the shared schema/kind
+// envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalRemoveJSON(in RemoveJSONInput) ([]byte, error) {
+	out := removeJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "remove"},
+		DryRun:       in.DryRun,
+		Plan: removePlanJSON{
+			Target:             in.Plan.Target,
+			Backend:            in.Plan.Backend,
+			VCSCommand:         in.Plan.VCSCommand,
+			UncommittedChanges: in.Plan.UncommittedChanges,
+			DetachedPaths:      nilToEmpty(in.Plan.DetachedPaths),
+			TotalBytesToFree:   in.Plan.TotalBytes,
+			Refusal:            in.Plan.Refusal,
+			IsGhost:            in.Plan.IsGhost,
+		},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// ============================================================
+// forget
+// ============================================================
+
+// forgetPlanJSON is the JSON projection of a ForgetPlan. RegistryEntries
+// carries the sorted list of workspace roots that still hold detach
+// entries — the underlying map is collapsed to a flat slice so consumers
+// see stable ordering across runs.
+type forgetPlanJSON struct {
+	RepositoryID    string   `json:"repositoryId"`
+	StoragePath     string   `json:"storagePath"`
+	VariantCount    int      `json:"variantCount"`
+	ResourceCount   int      `json:"resourceCount"`
+	TotalSize       int64    `json:"totalSize"`
+	RegistryEntries []string `json:"registryEntries"`
+	Refusal         string   `json:"refusal,omitempty"`
+}
+
+// forgetJSON is the top-level shape emitted by `wrk forget --json`.
+type forgetJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   forgetPlanJSON      `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// ForgetJSONInput bundles the pieces MarshalForgetJSON needs.
+type ForgetJSONInput struct {
+	Plan       ForgetPlan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalForgetJSON renders a ForgetPlan and optional execution
+// result as pretty-printed JSON with the shared schema/kind
+// envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalForgetJSON(in ForgetJSONInput) ([]byte, error) {
+	roots := make([]string, 0, len(in.Plan.RegistryEntries))
+	for root := range in.Plan.RegistryEntries {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+
+	out := forgetJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "forget"},
+		DryRun:       in.DryRun,
+		Plan: forgetPlanJSON{
+			RepositoryID:    in.Plan.RepositoryID,
+			StoragePath:     in.Plan.StoragePath,
+			VariantCount:    in.Plan.VariantCount,
+			ResourceCount:   in.Plan.ResourceCount,
+			TotalSize:       in.Plan.TotalSize,
+			RegistryEntries: roots,
+			Refusal:         in.Plan.Refusal,
+		},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// ============================================================
+// run
+// ============================================================
+
+// runResourceJSON is the JSON projection of one resource-scoped
+// destructive command target. Reused across `wrk run` and
+// `wrk relink --isolate` — both surface a resource identity with
+// nothing else worth transmitting.
+type runResourceJSON struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// runPlanJSON is the JSON projection of a RunPlan. CommandCount is
+// the hook's Commands length hoisted here so consumers can display
+// "N commands" without inspecting a nested structure.
+type runPlanJSON struct {
+	Resource     runResourceJSON `json:"resource"`
+	VariantPath  string          `json:"variantPath"`
+	CommandCount int             `json:"commandCount"`
+}
+
+// runJSON is the top-level shape emitted by `wrk run --json`.
+type runJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   runPlanJSON         `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// RunJSONInput bundles the pieces MarshalRunJSON needs.
+type RunJSONInput struct {
+	Plan       RunPlan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalRunJSON renders a RunPlan and optional execution result as
+// pretty-printed JSON with the shared schema/kind envelope. The
+// resolved variant path is best-effort: for a non-fingerprinted
+// resource the plan's first action's Instance carries it; when no
+// actions were built (empty resource set) VariantPath is empty.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalRunJSON(in RunJSONInput) ([]byte, error) {
+	out := runJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "run"},
+		DryRun:       in.DryRun,
+		Plan: runPlanJSON{
+			Resource: runResourceJSON{
+				Name: in.Plan.Resource.Name,
+				Path: in.Plan.Resource.Path,
+			},
+			VariantPath:  runVariantPath(in.Plan),
+			CommandCount: len(in.Plan.Commands),
+		},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// runVariantPath extracts the resolved shared-storage path from a
+// RunPlan's first action, or "" if the plan carries no actions or
+// the first action is not an InitializeResource. The executor is
+// the ultimate authority on which variant a run touches, but the
+// plan-time resolved path (Context.Shared) is the same value and is
+// safe to surface for preview purposes.
+func runVariantPath(plan RunPlan) string {
+	if len(plan.Actions) == 0 {
+		return ""
+	}
+	init, ok := plan.Actions[0].Action.(planner.InitializeResource)
+	if !ok {
+		return ""
+	}
+	return init.Context.Shared
+}
+
+// ============================================================
+// relink
+// ============================================================
+
+// relinkPlanJSON is the JSON projection of a plain relink plan. The
+// planner.Action union is intentionally flattened to one-line
+// descriptions — a machine consumer verifying "what would happen"
+// gets the exact strings the human path prints, without coupling to
+// the internal action shape.
+type relinkPlanJSON struct {
+	ActionCount  int      `json:"actionCount"`
+	Descriptions []string `json:"descriptions"`
+}
+
+// relinkJSON is the top-level shape emitted by `wrk relink --json`.
+type relinkJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   relinkPlanJSON      `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// RelinkJSONInput bundles the pieces MarshalRelinkJSON needs.
+type RelinkJSONInput struct {
+	Plan       planner.Plan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalRelinkJSON renders a relink planner.Plan and optional
+// execution result as pretty-printed JSON with the shared
+// schema/kind envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalRelinkJSON(in RelinkJSONInput) ([]byte, error) {
+	out := relinkJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "relink"},
+		DryRun:       in.DryRun,
+		Plan: relinkPlanJSON{
+			ActionCount:  len(in.Plan.Actions),
+			Descriptions: actionDescriptions(in.Plan.Actions),
+		},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// ============================================================
+// relink --isolate
+// ============================================================
+
+// relinkIsolatePlanJSON is the JSON projection of an IsolatePlan.
+// Reuses runResourceJSON so `wrk relink --isolate --json` and
+// `wrk run --json` speak the same resource shape.
+type relinkIsolatePlanJSON struct {
+	Resources []runResourceJSON `json:"resources"`
+}
+
+// relinkIsolateJSON is the top-level shape emitted by
+// `wrk relink --isolate --json`.
+type relinkIsolateJSON struct {
+	jsonEnvelope
+	DryRun bool                  `json:"dryRun"`
+	Plan   relinkIsolatePlanJSON `json:"plan"`
+	Result *resultEnvelopeJSON   `json:"result,omitempty"`
+}
+
+// RelinkIsolateJSONInput bundles the pieces
+// MarshalRelinkIsolateJSON needs.
+type RelinkIsolateJSONInput struct {
+	Plan       IsolatePlan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalRelinkIsolateJSON renders an IsolatePlan and optional
+// execution result as pretty-printed JSON with the shared
+// schema/kind envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalRelinkIsolateJSON(in RelinkIsolateJSONInput) ([]byte, error) {
+	resources := make([]runResourceJSON, 0, len(in.Plan.Resources))
+	for _, r := range in.Plan.Resources {
+		resources = append(resources, runResourceJSON{
+			Name: r.Name,
+			Path: r.Path,
+		})
+	}
+
+	out := relinkIsolateJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "relink-isolate"},
+		DryRun:       in.DryRun,
+		Plan:         relinkIsolatePlanJSON{Resources: resources},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// ============================================================
+// detach
+// ============================================================
+
+// detachPlanJSON is the JSON projection of a detach planner.Plan.
+// Shape matches relinkPlanJSON so consumers can share a parser for
+// the two default-flow destructive commands.
+type detachPlanJSON struct {
+	ActionCount  int      `json:"actionCount"`
+	Descriptions []string `json:"descriptions"`
+}
+
+// detachJSON is the top-level shape emitted by `wrk detach --json`.
+type detachJSON struct {
+	jsonEnvelope
+	DryRun bool                `json:"dryRun"`
+	Plan   detachPlanJSON      `json:"plan"`
+	Result *resultEnvelopeJSON `json:"result,omitempty"`
+}
+
+// DetachJSONInput bundles the pieces MarshalDetachJSON needs.
+type DetachJSONInput struct {
+	Plan       planner.Plan
+	DryRun     bool
+	Attempted  bool
+	BytesFreed int64
+	Warnings   []string
+}
+
+// MarshalDetachJSON renders a detach planner.Plan and optional
+// execution result as pretty-printed JSON with the shared
+// schema/kind envelope.
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalDetachJSON(in DetachJSONInput) ([]byte, error) {
+	out := detachJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "detach"},
+		DryRun:       in.DryRun,
+		Plan: detachPlanJSON{
+			ActionCount:  len(in.Plan.Actions),
+			Descriptions: actionDescriptions(in.Plan.Actions),
+		},
+	}
+	if in.Attempted {
+		out.Result = &resultEnvelopeJSON{
+			Attempted:  true,
+			BytesFreed: in.BytesFreed,
+			Warnings:   nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// actionDescriptions renders each PlannedAction's Action using the
+// same describeAction helper the human printer uses, dropping the
+// "warn" bit. Returns an empty (non-nil) slice for a nil / empty
+// action list so the JSON output emits `[]` rather than `null`.
+func actionDescriptions(actions []planner.PlannedAction) []string {
+	descriptions := make([]string, 0, len(actions))
+	for _, pa := range actions {
+		desc, _ := describeAction(pa.Action)
+		descriptions = append(descriptions, desc)
+	}
+	return descriptions
 }
