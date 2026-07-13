@@ -85,3 +85,23 @@ else
   echo "FAIL: K.4 dry-run created worktree at $CHILD" | tee -a "$TRANSCRIPT"
   _mark_fail
 fi
+
+subsec "K.5: destination already exists → refuse"
+D=$SCRATCH/K5/main
+minsetup "$D"
+mkdir -p "$SCRATCH/K5/K5-taken"
+( cd "$D" && expect_exit 2 "$WRK new K5-taken" )
+( cd "$D" && expect_contains "already exists" "$WRK new K5-taken 2>&1" )
+
+subsec "K.6: destination nested inside an existing workspace → refuse"
+D=$SCRATCH/K6/main
+minsetup "$D"
+( cd "$D" && expect_exit 2 "$WRK new ./inside" )
+( cd "$D" && expect_contains "inside existing workspace" "$WRK new ./inside 2>&1" )
+if [ ! -e "$D/inside" ]; then
+  echo "PASS: K.6 no nested worktree created" | tee -a "$TRANSCRIPT"
+  _mark_pass
+else
+  echo "FAIL: K.6 nested worktree materialized" | tee -a "$TRANSCRIPT"
+  _mark_fail
+fi

@@ -164,3 +164,20 @@ else
   printf '  FAIL: wrk run --yes did not refresh the variant (got: %s)\n' \
     "$(cat "$D/node_modules/output.txt" 2>/dev/null || echo '<missing>')" | tee -a "$TRANSCRIPT"
 fi
+
+subsec "H.6: wrk run refuses a detached resource"
+D=$SCRATCH/H6
+mkrepo git "$D"
+seed "$D"
+run_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/H6
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S detach --yes" )
+( cd "$D" && expect_exit 2 "$WRK --storage $S run node --yes" )
+( cd "$D" && expect_contains "detached" "$WRK --storage $S run node --yes 2>&1" )
+
+subsec "H.7: wrk run refuses an isolated resource"
+( cd "$D" && expect_exit 0 "$WRK --storage $S relink --isolate --yes" )
+( cd "$D" && expect_exit 2 "$WRK --storage $S run node --yes" )
+( cd "$D" && expect_contains "isolated" "$WRK --storage $S run node --yes 2>&1" )

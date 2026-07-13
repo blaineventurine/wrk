@@ -25,6 +25,20 @@ type detection struct {
 	kind string
 }
 
+// InitPreview computes what `wrk init` would generate for root without
+// writing anything: the human-readable names of the detected project
+// layouts and the full rendered .wrk.yml content. Used by the CLI's
+// --json path so the envelope can carry the same information the
+// human dry-run prints.
+func InitPreview(root string) (detected []string, content string) {
+	detections := detect(root)
+	names := make([]string, 0, len(detections))
+	for _, d := range detections {
+		names = append(names, humanKind(d.kind))
+	}
+	return names, render(root, detections)
+}
+
 // Init generates a starter .wrk.yml at options.Root by inspecting the
 // directory for well-known project files.
 func Init(options InitOptions) error {

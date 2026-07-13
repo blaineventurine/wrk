@@ -220,6 +220,7 @@ func TestRelinkNoOpWhenNothingDetached(t *testing.T) {
 		t.Errorf("no-op Relink emitted a destructive marker; plan output was:\n%s", out.String())
 	}
 }
+
 // TestExecuteRelinkClearsDetachedAfterSuccess pins the CLI-facing
 // split: ExecuteRelink applies a pre-built plan AND clears the
 // detach registry, WITHOUT printing the plan preview (the CLI
@@ -276,5 +277,81 @@ func TestExecuteRelinkClearsDetachedAfterSuccess(t *testing.T) {
 	// And no plan-preview output from Execute — CLI already printed.
 	if out.Len() != 0 {
 		t.Errorf("ExecuteRelink wrote to stdout (double-print risk):\n%s", out.String())
+	}
+}
+
+// TestBuildRelinkPlanDetachedWorkspaceHasNoIsolationExits pins the
+// classification boundary of the new RelinkPlan return type: a plain
+// detached resource (real copy in the workspace, no isolation-registry
+// entry) reconnects via ordinary planner actions and MUST NOT be
+// reported as an isolation exit. Exits are rendered with a destructive
+// ⚠ banner and delete a storage directory during ExecuteRelink — a
+// misclassification here would threaten (and then delete) a fingerprint
+// variant that peer worktrees still share.
+func TestBuildRelinkPlanDetachedWorkspaceHasNoIsolationExits(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename, "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo.Root, ".env"), "shared\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := Detach(repo, opts); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+
+	plan, err := BuildRelinkPlan(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatalf("BuildRelinkPlan: %v", err)
+	}
+
+	if len(plan.IsolationExits) != 0 {
+		t.Errorf("detached-only workspace produced isolation exits: %+v", plan.IsolationExits)
+	}
+	if len(plan.SkippedIsolation) != 0 {
+		t.Errorf("empty isolation registry produced skipped entries: %v", plan.SkippedIsolation)
+	}
+	// The reconnect itself still counts as work: discard the copy,
+	// restore the symlink.
+	if !plan.HasWork() {
+		t.Errorf("HasWork() = false for a detached workspace; relink would no-op")
+	}
+	if len(plan.Plan.Actions) == 0 {
+		t.Errorf("no planner actions for a detached resource; expected Remove+Symlink")
+	}
+}
+
+// TestBuildRelinkPlanLinkedWorkspaceHasNoWork pins the CLI's
+// nothing-to-do gate on the new return type: a fully linked workspace
+// with no isolation entries yields HasWork() == false, so `wrk relink`
+// can exit without a confirmation prompt. A regression that always
+// planned a Remove+Symlink cycle (or invented an exit) would drag
+// users through a destructive confirmation for a no-op.
+func TestBuildRelinkPlanLinkedWorkspaceHasNoWork(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename, "resources:\n  - name: env\n    path: .env\n")
+	writeFile(t, filepath.Join(repo.Root, ".env"), "shared\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	plan, err := BuildRelinkPlan(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatalf("BuildRelinkPlan: %v", err)
+	}
+
+	if plan.HasWork() {
+		t.Errorf("HasWork() = true for an already-linked workspace: actions=%d exits=%d",
+			len(plan.Plan.Actions), len(plan.IsolationExits))
+	}
+	if plan.Plan.HasConflicts() {
+		t.Errorf("linked workspace produced conflicts: %+v", plan.Plan.Conflicts)
 	}
 }

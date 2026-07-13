@@ -305,8 +305,18 @@ func TestExecuteGCInvokesProgress(t *testing.T) {
 //   - .wrk-provisioning/ is gone (renamed)
 //   - .wrk-deleting/ is gone (swept)
 func TestExecuteGCCompletesMidSwapCrash(t *testing.T) {
+	// The resource must actually be configured (fingerprinted, so
+	// abc123 reads as a variant subdir): since the orphaned-storage
+	// sweep landed, an UNCONFIGURED node_modules subtree would be
+	// classified as orphaned and deleted right after the promotion —
+	// a correct end-state for unclaimed storage, but not what this
+	// test pins (promotion ordering vs the bookkeeping sweep).
 	repo := newTestRepoWithHead(t, map[string]string{
-		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n",
 	})
 	storage := storageIn(t, repo.Root)
 

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -25,13 +26,13 @@ func (gitBackend) commonDir(root string) (string, error) {
 	return filepath.Join(root, path), nil
 }
 
-func (gitBackend) createWorkspace(root, dest, base string) error {
+func (gitBackend) createWorkspace(root, dest, base string, stdout io.Writer) error {
 	// "--" separates options from the (absolute) destination path so a
 	// destination beginning with "-" cannot be reparsed as a flag.
 	// resolveDestination already yields an absolute path, but the
 	// separator is defensive: cheap, and pins the invariant in code.
 	if base == "" {
-		return passthrough(root, "git", "worktree", "add", "--", dest)
+		return passthroughTo(stdout, root, "git", "worktree", "add", "--", dest)
 	}
 	// With --base, always fork a fresh branch off <base> named after
 	// the destination basename. Never check out <base> directly: git's
@@ -52,7 +53,7 @@ func (gitBackend) createWorkspace(root, dest, base string) error {
 			branch, branch,
 		)
 	}
-	return passthrough(root, "git", "worktree", "add", "-b", branch, "--", dest, base)
+	return passthroughTo(stdout, root, "git", "worktree", "add", "-b", branch, "--", dest, base)
 }
 
 func (gitBackend) workspaces(root string) ([]string, error) {

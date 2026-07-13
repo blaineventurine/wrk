@@ -68,26 +68,10 @@ func TestLinkSkipsIsolatedResource(t *testing.T) {
 	}
 }
 
-// TestRelinkSkipsIsolatedResource: `wrk relink` (no --isolate flag) is
-// the "reconnect to shared storage" path. On an already-isolated
-// resource it MUST no-op — un-isolation is a separate flow that Task
-// 3.4 does not implement.
-func TestRelinkSkipsIsolatedResource(t *testing.T) {
-	repo, storage, target := seedIsolatedResource(t)
-
-	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
-	if err := Relink(repo, opts); err != nil {
-		t.Fatalf("Relink after isolate: %v", err)
-	}
-
-	got, err := os.Readlink(filepath.Join(repo.Root, "node_modules"))
-	if err != nil {
-		t.Fatalf("readlink post-Relink: %v", err)
-	}
-	if got != target {
-		t.Errorf("workspace symlink retargeted by Relink: got %q, want %q", got, target)
-	}
-}
+// TestRelinkSkipsIsolatedResource was deleted with the relink
+// isolation-exit feature: `wrk relink` now EXITS isolation instead of
+// skipping it. The replacement contract (exit + reconnect roundtrip)
+// is pinned in relink_exit_test.go.
 
 // TestDetachSkipsIsolatedResource: `wrk detach` on an already-isolated
 // resource must skip. Detaching would replace the symlink with a real

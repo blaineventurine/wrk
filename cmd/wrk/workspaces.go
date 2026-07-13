@@ -72,6 +72,7 @@ func formatCounts(counts map[engine.State]int) string {
 		engine.StateLinked,
 		engine.StateExpected,
 		engine.StateDetached,
+		engine.StateIsolated,
 		engine.StatePending,
 		engine.StateMissing,
 		engine.StateNotLinked,

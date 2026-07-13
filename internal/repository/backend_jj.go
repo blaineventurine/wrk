@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,7 @@ func (jjBackend) commonDir(root string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func (jjBackend) createWorkspace(root, dest, base string) error {
+func (jjBackend) createWorkspace(root, dest, base string, stdout io.Writer) error {
 	// "--" separates options from the (absolute) destination path so a
 	// destination beginning with "-" cannot be reparsed as a flag.
 	// resolveDestination already yields an absolute path, but the
@@ -43,7 +44,7 @@ func (jjBackend) createWorkspace(root, dest, base string) error {
 		args = append(args, "--revision", base)
 	}
 	args = append(args, "--", dest)
-	return passthrough(root, "jj", args...)
+	return passthroughTo(stdout, root, "jj", args...)
 }
 
 func (jjBackend) workspaces(root string) ([]string, error) {

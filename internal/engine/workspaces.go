@@ -18,8 +18,12 @@ const (
 	// WorkspaceDetached: every resource has been intentionally detached.
 	WorkspaceDetached WorkspaceState = "detached"
 
-	// WorkspacePartial: some resources are linked, some are detached — a
-	// deliberate mix.
+	// WorkspaceIsolated: every resource is pinned to a private
+	// per-workspace variant via `wrk relink --isolate`.
+	WorkspaceIsolated WorkspaceState = "isolated"
+
+	// WorkspacePartial: a mix of linked, detached, and isolated
+	// resources — a deliberate mid-state.
 	WorkspacePartial WorkspaceState = "partial"
 
 	// WorkspacePending: no resources need attention, but at least one is
@@ -121,15 +125,21 @@ func rollup(rows []ResourceStatus, counts map[State]int) WorkspaceState {
 		return WorkspacePending
 	}
 
-	// Healthy states only from here.
+	// Healthy resting states only from here. `expected` rides with
+	// linked (both mean "nothing to do, shared model intact");
+	// detached and isolated are their own resting states; any mix of
+	// the three families is a deliberate partial.
 	linked := counts[StateLinked] + counts[StateExpected]
 	detached := counts[StateDetached]
+	isolated := counts[StateIsolated]
 
 	switch {
-	case detached == 0:
+	case detached == 0 && isolated == 0:
 		return WorkspaceLinked
-	case linked == 0:
+	case linked == 0 && isolated == 0:
 		return WorkspaceDetached
+	case linked == 0 && detached == 0:
+		return WorkspaceIsolated
 	default:
 		return WorkspacePartial
 	}

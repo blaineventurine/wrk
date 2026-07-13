@@ -46,7 +46,7 @@ func scanVariants(repo *repository.Repository, options Options) ([]variant, erro
 	var variants []variant
 
 	for _, resource := range cfg.Resources {
-		instances, err := resolver.Resolve(repo.Root, resource)
+		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +201,7 @@ func pinnedVariantsForRoots(
 		for _, resource := range cfg.Resources {
 			// Use the workspace's OWN root so {root}-anchored globs and
 			// paths expand against the workspace under inspection.
-			instances, err := resolver.Resolve(workspaceRoot, resource)
+			instances, err := resolver.ResolveWithStorage(workspaceRoot, storageRepoRoot(repo, options), resource)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -526,7 +526,6 @@ type GCPlan struct {
 	// why DeleteVariants may be smaller than the user expects.
 	UnreachableWorkspaces []string
 
-
 	// PendingSwaps carries mid-swap-crash recoveries the executor
 	// runs BEFORE the standard sweep. See bookkeepingCleanup for the
 	// crash fingerprint. Empty for the vast majority of gc runs.
@@ -537,7 +536,19 @@ type GCPlan struct {
 	// clearIsolation, sequentially, under the shared registry flock.
 	OrphanedIsolationEntries []orphanedIsolation
 
-	// TotalBytesFreed is the sum of DeleteVariants[*].Size.
+	// OrphanedStorage lists storage subtrees no live workspace's
+	// configuration claims — leftovers of resources removed or
+	// renamed in .wrk.yml. The executor deletes each under the same
+	// lock/re-check/rename-then-remove discipline as variants.
+	OrphanedStorage []orphanedTree
+
+	// OrphanedStorageNotes explains a skipped orphaned-storage sweep
+	// (unreadable config in some workspace, unreadable isolation
+	// registry). Informational; never counts toward HasNothing.
+	OrphanedStorageNotes []string
+
+	// TotalBytesFreed is the sum of DeleteVariants[*].Size plus
+	// OrphanedStorage[*].Size.
 	TotalBytesFreed int64
 }
 
@@ -554,7 +565,8 @@ func (p GCPlan) HasNothing() bool {
 		len(p.StaleDeleting) == 0 &&
 		len(p.StaleForgetting) == 0 &&
 		len(p.PendingSwaps) == 0 &&
-		len(p.OrphanedIsolationEntries) == 0
+		len(p.OrphanedIsolationEntries) == 0 &&
+		len(p.OrphanedStorage) == 0
 }
 
 // BuildGCPlan runs the read-only detection sweeps and composes them
@@ -632,6 +644,24 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 		plan.TotalBytesFreed += v.Size
 	}
 
+	// Orphaned-storage sweep: unclaimed subtrees under this repo's
+	// storage. Skipped (with a note) when any workspace was
+	// unreachable — the config union would be incomplete, and
+	// deleting storage on a partial view risks data loss.
+	if len(unreachable) > 0 {
+		plan.OrphanedStorageNotes = append(plan.OrphanedStorageNotes,
+			"orphaned-storage sweep skipped: some workspaces were unreachable")
+	} else {
+		orphanTrees, notes, err := detectOrphanedStorage(repo, options, liveRoots)
+		if err != nil {
+			return GCPlan{}, err
+		}
+		plan.OrphanedStorageNotes = append(plan.OrphanedStorageNotes, notes...)
+		plan.OrphanedStorage = orphanTrees
+		for _, t := range orphanTrees {
+			plan.TotalBytesFreed += t.Size
+		}
+	}
 	return plan, nil
 }
 

@@ -137,7 +137,7 @@ func BuildRunPlan(
 		return RunPlan{}, err
 	}
 
-	instances, err := resolver.Resolve(repo.Root, *target)
+	instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), *target)
 	if err != nil {
 		return RunPlan{}, err
 	}

@@ -32,47 +32,6 @@ func Link(repo *repository.Repository, options Options) error {
 	return nil
 }
 
-// Relink reconnects the current workspace to shared storage, discarding any
-// independent local copies created by a previous `detach`.
-//
-// Relink is the plan-then-execute wrapper preserved for backward
-// compatibility. It prints the plan before executing. CLI callers that
-// need to interpose confirmation should call BuildRelinkPlan +
-// ExecuteRelink directly instead — Relink would double-print.
-func Relink(repo *repository.Repository, options Options) error {
-	plan, err := BuildRelinkPlan(repo, options)
-	if err != nil {
-		return err
-	}
-	if err := printPlan(options.Stdout, plan); err != nil {
-		return err
-	}
-	return ExecuteRelink(repo, plan, options)
-}
-
-// ExecuteRelink runs a pre-built relink plan without printing it. On
-// success (and outside dry-run) the workspace's detach-registry entry
-// is cleared so `wrk status` no longer reports the resources as
-// detached.
-//
-// Callers that print the plan themselves — e.g. the CLI's Build ->
-// Print -> Confirm -> Execute flow — must use this instead of Relink
-// to avoid a double-print.
-func ExecuteRelink(repo *repository.Repository, plan planner.Plan, options Options) error {
-	if err := executePlan(plan, options); err != nil {
-		return err
-	}
-
-	if options.DryRun {
-		return nil
-	}
-
-	if err := clearDetached(repo); err != nil {
-		return fmt.Errorf("relink succeeded but failed to clear detach record: %w", err)
-	}
-	return nil
-}
-
 // runPlan prints, validates, and (unless dry-run) executes a plan.
 // Kept for callers (currently `Link`, `Run`, and the monolithic
 // `Detach`/`Relink` wrappers above) that want the classic

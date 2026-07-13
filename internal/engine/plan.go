@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"path/filepath"
+
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/location"
 	"github.com/blaineventurine/wrk/internal/planner"
@@ -8,6 +10,15 @@ import (
 	"github.com/blaineventurine/wrk/internal/resolver"
 	"github.com/blaineventurine/wrk/internal/workspace"
 )
+
+// storageRepoRoot returns the shared-storage subtree for repo —
+// `<storage>/<repo-id>` — handed to resolver.ResolveWithStorage so glob
+// resources also match relpaths that peer workspaces have already
+// provisioned into storage (a fresh worktree has no on-disk glob
+// matches of its own yet).
+func storageRepoRoot(repo *repository.Repository, options Options) string {
+	return filepath.Join(options.StorageRoot, repo.RepositoryID)
+}
 
 // resourcePlanner builds the plan for a single resolved resource instance.
 type resourcePlanner func(
@@ -50,7 +61,7 @@ func buildPlan(
 
 	var plan planner.Plan
 	for _, resource := range cfg.Resources {
-		instances, err := resolver.Resolve(repo.Root, resource)
+		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return planner.Plan{}, err
 		}
@@ -58,10 +69,13 @@ func buildPlan(
 		for _, instance := range instances {
 			// Skip isolated resources: this workspace has explicitly
 			// pinned a private per-workspace variant via
-			// `wrk relink --isolate`. Link/relink/detach must leave
-			// it alone — repointing the symlink would silently undo
-			// the user's isolation, and detaching would clobber the
-			// isolated bytes with a workspace copy.
+			// `wrk relink --isolate`. Link and detach must leave it
+			// alone — repointing the symlink would silently undo the
+			// user's isolation, and detaching would clobber the
+			// isolated bytes with a workspace copy. (Relink is the
+			// documented exit: it builds its own plan in
+			// BuildRelinkPlan, which handles isolated resources via
+			// IsolationExits instead of this skip.)
 			if _, isolated := isIsolated(iso, repo.Root, instance.RelativePath); isolated {
 				continue
 			}

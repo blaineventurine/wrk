@@ -55,7 +55,7 @@ func TestJJBackendCreateWorkspace(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	dest := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, dest, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, dest, "", nil); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestJJBackendCreateWorkspaceWithBase(t *testing.T) {
 	}
 
 	dest := filepath.Join(parent, "secondary")
-	if err := (jjBackend{}).createWorkspace(root, dest, baseChange); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, dest, baseChange, nil); err != nil {
 		t.Fatalf("createWorkspace with base: %v", err)
 	}
 	if _, err := os.Stat(dest); err != nil {
@@ -154,7 +154,7 @@ func TestJJBackendCreateWorkspaceEmptyBasePreservesLegacyBehavior(t *testing.T) 
 	initColocatedJJRepo(t, root)
 
 	dest := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, dest, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, dest, "", nil); err != nil {
 		t.Fatalf("createWorkspace empty base: %v", err)
 	}
 	if _, err := os.Stat(dest); err != nil {
@@ -189,7 +189,7 @@ func TestJJBackendWorkspacesListsAll(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, "", nil); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestJJBackendCreateWorkspaceErrorsOutsideRepo(t *testing.T) {
 	root := canonPath(t, t.TempDir())
 	dest := filepath.Join(filepath.Dir(root), "would-be-workspace")
 
-	err := (jjBackend{}).createWorkspace(root, dest, "")
+	err := (jjBackend{}).createWorkspace(root, dest, "", nil)
 	if err == nil {
 		t.Fatal("createWorkspace outside jj repo: expected error")
 	}
@@ -331,7 +331,7 @@ func TestJJBackendDetectGhostsFindsRemoved(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, "", nil); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -391,7 +391,7 @@ func TestJJBackendPruneGhostsForgetsAndReports(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	secondary := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, secondary, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, secondary, "", nil); err != nil {
 		t.Fatalf("createWorkspace secondary: %v", err)
 	}
 	if err := os.RemoveAll(secondary); err != nil {
@@ -503,7 +503,7 @@ func TestJJBackendRemoveWorkspace(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, feature, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, feature, "", nil); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 	// Sanity: directory exists after add so a failed RemoveAll
@@ -573,7 +573,7 @@ func TestJJBackendRemoveWorkspaceFiresProgress(t *testing.T) {
 	initColocatedJJRepo(t, root)
 
 	feature := filepath.Join(parent, "feature")
-	if err := (jjBackend{}).createWorkspace(root, feature, ""); err != nil {
+	if err := (jjBackend{}).createWorkspace(root, feature, "", nil); err != nil {
 		t.Fatalf("createWorkspace: %v", err)
 	}
 	// Fixed-size seed so the lower-bound assertion is stable.

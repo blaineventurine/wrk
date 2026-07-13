@@ -183,7 +183,7 @@ func TestCreateWorkspaceFullFlow(t *testing.T) {
 		t.Fatalf("Detect(primary): %v", err)
 	}
 
-	newRepo, err := repo.CreateWorkspace("feature", "")
+	newRepo, err := repo.CreateWorkspace("feature", "", nil)
 	if err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCreateWorkspaceRefusesNesting(t *testing.T) {
 	// "./inside" is an explicit relative path so it stays under the
 	// primary — resolveDestination treats it literally, and then the
 	// containingWorkspace check MUST fire.
-	_, err = repo.CreateWorkspace("./inside", "")
+	_, err = repo.CreateWorkspace("./inside", "", nil)
 	if err == nil {
 		t.Fatal("CreateWorkspace(./inside): expected nesting error")
 	}
@@ -282,7 +282,7 @@ func TestCreateWorkspaceRefusesExistingDestination(t *testing.T) {
 		t.Fatalf("Detect: %v", err)
 	}
 
-	_, err = repo.CreateWorkspace("feature", "")
+	_, err = repo.CreateWorkspace("feature", "", nil)
 	if err == nil {
 		t.Fatal("CreateWorkspace(feature): expected 'already exists' error")
 	}
@@ -321,7 +321,7 @@ func TestRepositoryWorkspacesReturnsAllLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if _, err := repo.CreateWorkspace("feature", ""); err != nil {
+	if _, err := repo.CreateWorkspace("feature", "", nil); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestCreateWorkspaceBackendFailurePropagates(t *testing.T) {
 		t.Fatalf("Detect: %v", err)
 	}
 
-	newRepo, err := repo.CreateWorkspace("existing", "")
+	newRepo, err := repo.CreateWorkspace("existing", "", nil)
 	if err == nil {
 		t.Fatalf("CreateWorkspace: got %v, want error from branch conflict",
 			newRepo)
@@ -478,7 +478,7 @@ func TestCreateWorkspaceWithBaseThreadsToBackend(t *testing.T) {
 		t.Fatalf("Detect: %v", err)
 	}
 
-	newRepo, err := repo.CreateWorkspace("secondary", "feature-base")
+	newRepo, err := repo.CreateWorkspace("secondary", "feature-base", nil)
 	if err != nil {
 		t.Fatalf("CreateWorkspace with base: %v", err)
 	}

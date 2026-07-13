@@ -17,9 +17,9 @@ import (
 // statusJSONMirror decodes MarshalStatusJSON output for assertions without
 // coupling tests to the marshaller's own struct types.
 type statusJSONMirror struct {
-	Schema     int                        `json:"schema"`
-	Kind       string                     `json:"kind"`
-	Sources    []string                   `json:"sources"`
+	Schema     int                         `json:"schema"`
+	Kind       string                      `json:"kind"`
+	Sources    []string                    `json:"sources"`
 	Workspaces []statusJSONWorkspaceMirror `json:"workspaces"`
 }
 
@@ -342,9 +342,9 @@ func TestRollupStatePriorityOrder(t *testing.T) {
 // listJSONMirror decodes MarshalListJSON output for assertions without
 // coupling tests to the marshaller's own struct types.
 type listJSONMirror struct {
-	Schema    int                     `json:"schema"`
-	Kind      string                  `json:"kind"`
-	Root      string                  `json:"root"`
+	Schema    int                      `json:"schema"`
+	Kind      string                   `json:"kind"`
+	Root      string                   `json:"root"`
 	Resources []listJSONResourceMirror `json:"resources"`
 }
 
@@ -1650,7 +1650,7 @@ func TestRelinkJSONDryRunFlattensActions(t *testing.T) {
 			{Action: planner.Symlink{Link: "/wk/.env", Target: "/store/env/.env"}},
 		},
 	}
-	data, err := MarshalRelinkJSON(RelinkJSONInput{Plan: plan, DryRun: true})
+	data, err := MarshalRelinkJSON(RelinkJSONInput{Plan: RelinkPlan{Plan: plan}, DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1703,16 +1703,84 @@ func TestRelinkJSONExecutePopulatesResult(t *testing.T) {
 	}
 }
 
+// TestRelinkJSONSurfacesIsolationExits pins the isolation projection
+// added when RelinkJSONInput.Plan became engine.RelinkPlan: each
+// planned isolation exit surfaces as {resource,path,storagePath} and
+// each unmanageable registry entry as a skippedIsolation string —
+// the machine-readable counterpart of the human printer's ⚠ block.
+// A consumer gating a destructive confirmation on this array would
+// silently destroy isolated variants if the exits were dropped from
+// the wire shape.
+func TestRelinkJSONSurfacesIsolationExits(t *testing.T) {
+	plan := RelinkPlan{
+		Plan: planner.Plan{
+			WorkspaceRoot: "/wk",
+			Actions: []planner.PlannedAction{
+				{Action: planner.Symlink{
+					Link:   "/wk/node_modules",
+					Target: "/store/repo/node_modules/abc123",
+				}},
+			},
+		},
+		IsolationExits: []IsolationExit{
+			{
+				ResourceName: "node",
+				ResourcePath: "node_modules",
+				StoragePath:  "/store/repo/node_modules/isolated-ab12",
+			},
+		},
+		SkippedIsolation: []string{"gone/path"},
+	}
+	data, err := MarshalRelinkJSON(RelinkJSONInput{Plan: plan, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env destructiveEnvelopeMirror
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Schema != 1 || env.Kind != "relink" {
+		t.Errorf("envelope changed: schema=%d kind=%q, want 1/relink", env.Schema, env.Kind)
+	}
+	var full struct {
+		Plan struct {
+			IsolationExits []struct {
+				Resource    string `json:"resource"`
+				Path        string `json:"path"`
+				StoragePath string `json:"storagePath"`
+			} `json:"isolationExits"`
+			SkippedIsolation []string `json:"skippedIsolation"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Plan.IsolationExits) != 1 {
+		t.Fatalf("isolationExits: got %d want 1", len(full.Plan.IsolationExits))
+	}
+	e := full.Plan.IsolationExits[0]
+	if e.Resource != "node" || e.Path != "node_modules" ||
+		e.StoragePath != "/store/repo/node_modules/isolated-ab12" {
+		t.Errorf("isolationExits[0]: %+v", e)
+	}
+	if len(full.Plan.SkippedIsolation) != 1 || full.Plan.SkippedIsolation[0] != "gone/path" {
+		t.Errorf("skippedIsolation: %v, want [gone/path]", full.Plan.SkippedIsolation)
+	}
+}
+
 // TestRelinkJSONEmptyPlanEmitsEmptyDescriptions pins the null-safety
-// contract on the descriptions slice: nil actions serialise as `[]`
-// so consumers iterate without a nil check.
+// contract on every array in the relink plan projection: nil slices
+// serialise as `[]`, never `null`, so consumers iterate without a
+// nil check.
 func TestRelinkJSONEmptyPlanEmitsEmptyDescriptions(t *testing.T) {
 	data, err := MarshalRelinkJSON(RelinkJSONInput{DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "\"descriptions\": []") {
-		t.Errorf("descriptions MUST serialize as []:\n%s", data)
+	for _, key := range []string{"descriptions", "isolationExits", "skippedIsolation"} {
+		if !strings.Contains(string(data), "\""+key+"\": []") {
+			t.Errorf("%s MUST serialize as []:\n%s", key, data)
+		}
 	}
 }
 

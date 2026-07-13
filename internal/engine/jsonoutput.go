@@ -271,7 +271,7 @@ func MarshalListJSON(repo *repository.Repository, options Options, withSize bool
 	}
 
 	for _, resource := range cfg.Resources {
-		instances, err := resolver.Resolve(repo.Root, resource)
+		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err
 		}
@@ -732,6 +732,15 @@ type gcOrphanedIsolationJSON struct {
 	ResourcePath  string `json:"resourcePath"`
 }
 
+// gcOrphanedStorageJSON is the JSON projection of one orphaned storage
+// subtree: unclaimed by any live workspace's configuration and slated
+// for removal.
+type gcOrphanedStorageJSON struct {
+	Path        string `json:"path"`
+	StoragePath string `json:"storagePath"`
+	SizeBytes   int64  `json:"sizeBytes"`
+}
+
 // gcPlanJSON is the JSON projection of a GCPlan. Every slice field is
 // emitted verbatim (never elided) so consumers see `[]` instead of
 // `null` on an empty sweep. The un-fingerprinted variants surface with
@@ -746,6 +755,8 @@ type gcPlanJSON struct {
 	PendingSwaps             []gcPendingSwapJSON       `json:"pendingSwaps"`
 	OrphanedIsolationEntries []gcOrphanedIsolationJSON `json:"orphanedIsolationEntries"`
 	OrphanRegistry           []string                  `json:"orphanRegistry"`
+	OrphanedStorage          []gcOrphanedStorageJSON   `json:"orphanedStorage"`
+	OrphanedStorageNotes     []string                  `json:"orphanedStorageNotes"`
 	UnreachableWorkspaces    []string                  `json:"unreachableWorkspaces"`
 	TotalBytesToFree         int64                     `json:"totalBytesToFree"`
 }
@@ -809,17 +820,20 @@ func projectGCPlan(p GCPlan) gcPlanJSON {
 
 	swaps := make([]gcPendingSwapJSON, 0, len(p.PendingSwaps))
 	for _, s := range p.PendingSwaps {
-		swaps = append(swaps, gcPendingSwapJSON{
-			Provisioning: s.Provisioning,
-			Real:         s.Real,
-		})
+		swaps = append(swaps, gcPendingSwapJSON(s))
 	}
 
 	iso := make([]gcOrphanedIsolationJSON, 0, len(p.OrphanedIsolationEntries))
 	for _, e := range p.OrphanedIsolationEntries {
-		iso = append(iso, gcOrphanedIsolationJSON{
-			WorkspaceRoot: e.WorkspaceRoot,
-			ResourcePath:  e.ResourcePath,
+		iso = append(iso, gcOrphanedIsolationJSON(e))
+	}
+
+	orphanStorage := make([]gcOrphanedStorageJSON, 0, len(p.OrphanedStorage))
+	for _, t := range p.OrphanedStorage {
+		orphanStorage = append(orphanStorage, gcOrphanedStorageJSON{
+			Path:        t.RelPath,
+			StoragePath: t.StoragePath,
+			SizeBytes:   t.Size,
 		})
 	}
 
@@ -833,6 +847,8 @@ func projectGCPlan(p GCPlan) gcPlanJSON {
 		PendingSwaps:             swaps,
 		OrphanedIsolationEntries: iso,
 		OrphanRegistry:           nilToEmpty(p.OrphanRegistry),
+		OrphanedStorage:          orphanStorage,
+		OrphanedStorageNotes:     nilToEmpty(p.OrphanedStorageNotes),
 		UnreachableWorkspaces:    nilToEmpty(p.UnreachableWorkspaces),
 		TotalBytesToFree:         p.TotalBytesFreed,
 	}
@@ -1072,14 +1088,27 @@ func runVariantPath(plan RunPlan) string {
 // relink
 // ============================================================
 
+// relinkIsolationExitJSON is the JSON projection of one isolation
+// exit: the isolated variant relink discards while reconnecting the
+// resource to shared storage.
+type relinkIsolationExitJSON struct {
+	Resource    string `json:"resource"`
+	Path        string `json:"path"`
+	StoragePath string `json:"storagePath"`
+}
+
 // relinkPlanJSON is the JSON projection of a plain relink plan. The
 // planner.Action union is intentionally flattened to one-line
 // descriptions — a machine consumer verifying "what would happen"
 // gets the exact strings the human path prints, without coupling to
-// the internal action shape.
+// the internal action shape. IsolationExits and SkippedIsolation are
+// emitted verbatim (never elided) so consumers can iterate without a
+// nil check.
 type relinkPlanJSON struct {
-	ActionCount  int      `json:"actionCount"`
-	Descriptions []string `json:"descriptions"`
+	ActionCount      int                       `json:"actionCount"`
+	Descriptions     []string                  `json:"descriptions"`
+	IsolationExits   []relinkIsolationExitJSON `json:"isolationExits"`
+	SkippedIsolation []string                  `json:"skippedIsolation"`
 }
 
 // relinkJSON is the top-level shape emitted by `wrk relink --json`.
@@ -1092,26 +1121,36 @@ type relinkJSON struct {
 
 // RelinkJSONInput bundles the pieces MarshalRelinkJSON needs.
 type RelinkJSONInput struct {
-	Plan       planner.Plan
+	Plan       RelinkPlan
 	DryRun     bool
 	Attempted  bool
 	BytesFreed int64
 	Warnings   []string
 }
 
-// MarshalRelinkJSON renders a relink planner.Plan and optional
-// execution result as pretty-printed JSON with the shared
-// schema/kind envelope.
+// MarshalRelinkJSON renders a RelinkPlan and optional execution
+// result as pretty-printed JSON with the shared schema/kind envelope.
 //
 // The returned bytes carry no trailing newline; callers add one if
 // the stream needs it.
 func MarshalRelinkJSON(in RelinkJSONInput) ([]byte, error) {
+	exits := make([]relinkIsolationExitJSON, 0, len(in.Plan.IsolationExits))
+	for _, e := range in.Plan.IsolationExits {
+		exits = append(exits, relinkIsolationExitJSON{
+			Resource:    e.ResourceName,
+			Path:        e.ResourcePath,
+			StoragePath: e.StoragePath,
+		})
+	}
+
 	out := relinkJSON{
 		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "relink"},
 		DryRun:       in.DryRun,
 		Plan: relinkPlanJSON{
-			ActionCount:  len(in.Plan.Actions),
-			Descriptions: actionDescriptions(in.Plan.Actions),
+			ActionCount:      len(in.Plan.Plan.Actions),
+			Descriptions:     actionDescriptions(in.Plan.Plan.Actions),
+			IsolationExits:   exits,
+			SkippedIsolation: nilToEmpty(in.Plan.SkippedIsolation),
 		},
 	}
 	if in.Attempted {
@@ -1249,4 +1288,146 @@ func actionDescriptions(actions []planner.PlannedAction) []string {
 		descriptions = append(descriptions, desc)
 	}
 	return descriptions
+}
+
+// ============================================================
+// new
+// ============================================================
+
+// newPlanJSON is the JSON projection of a `wrk new` invocation: the
+// resolved destination, the base ref (when given), and the primary
+// workspace's link plan (wrk new links the primary first).
+type newPlanJSON struct {
+	Destination         string   `json:"destination"`
+	Base                string   `json:"base,omitempty"`
+	PrimaryActionCount  int      `json:"primaryActionCount"`
+	PrimaryDescriptions []string `json:"primaryDescriptions"`
+}
+
+// newResultJSON reports what `wrk new` actually did. WorkspaceRoot is
+// the created workspace's root; empty when nothing was created.
+type newResultJSON struct {
+	Created       bool     `json:"created"`
+	WorkspaceRoot string   `json:"workspaceRoot,omitempty"`
+	Warnings      []string `json:"warnings"`
+}
+
+// newJSON is the top-level shape emitted by `wrk new --json`.
+type newJSON struct {
+	jsonEnvelope
+	DryRun bool           `json:"dryRun"`
+	Plan   newPlanJSON    `json:"plan"`
+	Result *newResultJSON `json:"result,omitempty"`
+}
+
+// NewJSONInput bundles the pieces MarshalNewJSON needs.
+type NewJSONInput struct {
+	Destination string
+	Base        string
+	PrimaryPlan planner.Plan
+	DryRun      bool
+	Created     bool
+	Warnings    []string
+}
+
+// MarshalNewJSON renders a `wrk new` invocation as pretty-printed JSON
+// with the shared schema/kind envelope. Result is omitted in dry-run
+// mode (nothing was attempted).
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalNewJSON(in NewJSONInput) ([]byte, error) {
+	out := newJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "new"},
+		DryRun:       in.DryRun,
+		Plan: newPlanJSON{
+			Destination:         in.Destination,
+			Base:                in.Base,
+			PrimaryActionCount:  len(in.PrimaryPlan.Actions),
+			PrimaryDescriptions: actionDescriptions(in.PrimaryPlan.Actions),
+		},
+	}
+	if !in.DryRun {
+		root := ""
+		if in.Created {
+			root = in.Destination
+		}
+		out.Result = &newResultJSON{
+			Created:       in.Created,
+			WorkspaceRoot: root,
+			Warnings:      nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// ============================================================
+// init
+// ============================================================
+
+// initPlanJSON is the JSON projection of a `wrk init` invocation: the
+// target path, the project layouts detected, whether a config already
+// exists, and (dry-run only) the full generated content.
+type initPlanJSON struct {
+	Path     string   `json:"path"`
+	Detected []string `json:"detected"`
+	Exists   bool     `json:"exists"`
+	Content  string   `json:"content,omitempty"`
+}
+
+// initResultJSON reports whether the file was written.
+type initResultJSON struct {
+	Wrote    bool     `json:"wrote"`
+	Warnings []string `json:"warnings"`
+}
+
+// initJSON is the top-level shape emitted by `wrk init --json`.
+type initJSON struct {
+	jsonEnvelope
+	DryRun bool            `json:"dryRun"`
+	Plan   initPlanJSON    `json:"plan"`
+	Result *initResultJSON `json:"result,omitempty"`
+}
+
+// InitJSONInput bundles the pieces MarshalInitJSON needs. Content is
+// only emitted in dry-run mode — on a real write the file itself is
+// the artifact and duplicating it in the envelope just bloats logs.
+type InitJSONInput struct {
+	Path     string
+	Detected []string
+	Exists   bool
+	Content  string
+	DryRun   bool
+	Wrote    bool
+	Warnings []string
+}
+
+// MarshalInitJSON renders a `wrk init` invocation as pretty-printed
+// JSON with the shared schema/kind envelope. Result is omitted in
+// dry-run mode (nothing was attempted).
+//
+// The returned bytes carry no trailing newline; callers add one if
+// the stream needs it.
+func MarshalInitJSON(in InitJSONInput) ([]byte, error) {
+	content := ""
+	if in.DryRun {
+		content = in.Content
+	}
+	out := initJSON{
+		jsonEnvelope: jsonEnvelope{Schema: jsonSchema, Kind: "init"},
+		DryRun:       in.DryRun,
+		Plan: initPlanJSON{
+			Path:     in.Path,
+			Detected: nilToEmpty(in.Detected),
+			Exists:   in.Exists,
+			Content:  content,
+		},
+	}
+	if !in.DryRun {
+		out.Result = &initResultJSON{
+			Wrote:    in.Wrote,
+			Warnings: nilToEmpty(in.Warnings),
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
 }

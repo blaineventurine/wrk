@@ -55,7 +55,7 @@ func List(
 	var listings []ResourceListing
 
 	for _, resource := range cfg.Resources {
-		instances, err := resolver.Resolve(repo.Root, resource)
+		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err
 		}
@@ -140,6 +140,19 @@ func countVariants(subtree string, fingerprinted bool) int {
 	return count
 }
 
+// isBookkeeping reports whether name is executor/gc scratch rather
+// than user-visible storage. KEEP IN SYNC with
+// resolver.bookkeepingSuffixes — same set, duplicated because
+// resolver must not import engine.
+//
+// `.wrk-provisioning` matters doubly: without it an in-flight hook's
+// scratch directory is (a) enumerated as a fingerprint variant by
+// scanVariants and (b) classified as an orphaned subtree by the
+// orphaned-storage sweep — both of which would let `wrk gc` delete a
+// hook's output mid-run under a lock file (`<scratch>.wrk-lock`) the
+// provisioner does not hold. The bookkeeping sweep, which DOES probe
+// the provisioner's real lock, is the only gc path allowed to touch
+// scratch.
 func isBookkeeping(name string) bool {
 	switch {
 	case name == ".wrk-lock",
@@ -147,7 +160,8 @@ func isBookkeeping(name string) bool {
 		strings.HasSuffix(name, ".wrk-tmp"),
 		strings.HasSuffix(name, ".wrk-backup"),
 		strings.HasSuffix(name, ".wrk-deleting"),
-		strings.HasSuffix(name, ".wrk-forgetting"):
+		strings.HasSuffix(name, ".wrk-forgetting"),
+		strings.HasSuffix(name, ".wrk-provisioning"):
 		return true
 	}
 	return false

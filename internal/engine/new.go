@@ -52,7 +52,7 @@ func NewWorkspace(
 		return nil
 	}
 
-	newRepo, err := repo.CreateWorkspace(destination, base)
+	newRepo, err := repo.CreateWorkspace(destination, base, options.Stdout)
 	if err != nil {
 		return err
 	}

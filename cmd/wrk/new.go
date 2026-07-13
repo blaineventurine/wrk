@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -8,7 +9,10 @@ import (
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
-var newBase string
+var (
+	newBase string
+	newJSON bool
+)
 
 var newCmd = &cobra.Command{
 	Use:   "new <name-or-path>",
@@ -31,19 +35,65 @@ var newCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if newJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
-		return engine.NewWorkspace(
-			repo,
-			args[0],
-			newBase,
-			engine.Options{
-				StorageRoot: storageRoot,
+		options := engine.Options{
+			StorageRoot: storageRoot,
+			DryRun:      dryRun,
+			Stdout:      os.Stdout,
+		}
+
+		if !newJSON {
+			return engine.NewWorkspace(repo, args[0], newBase, options)
+		}
+
+		// --json: resolve the destination and preview the primary link
+		// plan up front (both read-only) so the envelope carries them,
+		// then run with stdout captured — plain-text chatter surfaces
+		// in the envelope's warnings array instead of polluting the
+		// machine-readable stream. `wrk new` never prompts (it creates
+		// rather than destroys), so no --yes gate applies.
+		runNew := func() error {
+			dest, err := repo.ResolveDestination(args[0])
+			if err != nil {
+				return err
+			}
+
+			primaryPlan, err := engine.BuildLinkPlan(repo, options)
+			if err != nil {
+				return err
+			}
+
+			var warningsBuf bytes.Buffer
+			options.Stdout = &warningsBuf
+
+			if err := engine.NewWorkspace(repo, args[0], newBase, options); err != nil {
+				return err
+			}
+
+			data, err := engine.MarshalNewJSON(engine.NewJSONInput{
+				Destination: dest,
+				Base:        newBase,
+				PrimaryPlan: primaryPlan,
 				DryRun:      dryRun,
-				Stdout:      os.Stdout,
-			},
-		)
+				Created:     !dryRun,
+				Warnings:    scanWarnings(&warningsBuf),
+			})
+			if err != nil {
+				return err
+			}
+			return writeJSON(os.Stdout, data)
+		}
+		if err := runNew(); err != nil {
+			emitJSONError(os.Stderr, err)
+			return exitCode{code: 2}
+		}
+		return nil
 	},
 }
 
@@ -61,5 +111,11 @@ func init() {
 		"base",
 		"",
 		"Ref/commit/tag to fork the new worktree off (default: current HEAD/@)",
+	)
+	newCmd.Flags().BoolVar(
+		&newJSON,
+		"json",
+		false,
+		"Emit a machine-readable JSON envelope (plan+result) instead of human output",
 	)
 }

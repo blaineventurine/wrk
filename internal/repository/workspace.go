@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,13 +18,18 @@ import (
 // is forwarded verbatim to `git worktree add -b <basename> <base>` /
 // `jj workspace add --revision <base>`. See backend.createWorkspace
 // for the per-backend semantics.
-func (r *Repository) CreateWorkspace(destination, base string) (*Repository, error) {
+//
+// stdout receives the underlying VCS command's standard output
+// (checkout notices and the like). Callers that must keep the process
+// stdout machine-readable (`wrk new --json`) pass their capture
+// buffer; nil falls back to os.Stdout.
+func (r *Repository) CreateWorkspace(destination, base string, stdout io.Writer) (*Repository, error) {
 	dest, err := r.ResolveDestination(destination)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := r.backend.createWorkspace(r.Root, dest, base); err != nil {
+	if err := r.backend.createWorkspace(r.Root, dest, base, stdout); err != nil {
 		return nil, err
 	}
 

@@ -68,7 +68,7 @@ func Status(
 	report := &StatusReport{Sources: cfg.Sources}
 
 	for _, resource := range cfg.Resources {
-		instances, err := resolver.Resolve(repo.Root, resource)
+		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err
 		}

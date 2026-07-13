@@ -248,3 +248,85 @@ else
 fi
 
 fi  # jj availability guard
+
+section T "wrk remove — soft refusals (git backend)"
+
+# t_config writes a single hook-provisioned resource so detach/isolate
+# refusals have something to register.
+t_config() {
+  local root="$1"
+  cat > "$root/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p '{shared}' && touch '{shared}/.installed'"
+YAML
+}
+
+subsec "T.1: uncommitted changes → refuse; --force overrides"
+D=$SCRATCH/T1
+mkrepo git "$D"
+remove_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+( cd "$D" && "$WRK" new t1feature > /dev/null 2>&1 )
+FEATURE=$SCRATCH/t1feature
+if [ ! -d "$FEATURE" ]; then
+  echo "FAIL: T.1 setup failed" | tee -a "$TRANSCRIPT"; _mark_fail
+else
+  printf 'dirty\n' > "$FEATURE/uncommitted.txt"
+  ( cd "$D" && expect_contains "uncommitted" "$WRK remove t1feature --yes 2>&1" )
+  if [ -d "$FEATURE" ]; then
+    _mark_pass; echo "  PASS: T.1 refusal left the worktree" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail; echo "  FAIL: T.1 refusal still removed" | tee -a "$TRANSCRIPT"
+  fi
+  ( cd "$D" && expect_exit 0 "$WRK remove t1feature --yes --force" )
+  if [ ! -e "$FEATURE" ]; then
+    _mark_pass; echo "  PASS: T.1 --force removed the dirty worktree" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail; echo "  FAIL: T.1 --force did not remove" | tee -a "$TRANSCRIPT"
+  fi
+fi
+
+subsec "T.2: detached files → refuse naming the copies; --force overrides"
+D=$SCRATCH/T2/main
+mkdir -p "$D"
+mkrepo git "$D"
+seed "$D"
+t_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/T2
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S new t2feature" )
+FEATURE=$SCRATCH/T2/t2feature
+( cd "$FEATURE" && expect_exit 0 "$WRK --storage $S detach --yes" )
+( cd "$D" && expect_contains "independent local copies" "$WRK --storage $S remove t2feature --yes 2>&1" )
+if [ -d "$FEATURE/node_modules" ]; then
+  _mark_pass; echo "  PASS: T.2 refusal preserved the detached copy" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: T.2 detached copy gone after refusal" | tee -a "$TRANSCRIPT"
+fi
+( cd "$D" && expect_exit 0 "$WRK --storage $S remove t2feature --yes --force" )
+
+subsec "T.3: isolated variants → refuse; --force orphans them for gc"
+D=$SCRATCH/T3/main
+mkdir -p "$D"
+mkrepo git "$D"
+seed "$D"
+t_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/T3
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S new t3feature" )
+FEATURE=$SCRATCH/T3/t3feature
+( cd "$FEATURE" && expect_exit 0 "$WRK --storage $S detach --yes" )
+( cd "$FEATURE" && expect_exit 0 "$WRK --storage $S relink --isolate --yes" )
+ISO_TARGET=$(readlink "$FEATURE/node_modules")
+( cd "$D" && expect_contains "isolated" "$WRK --storage $S remove t3feature --yes 2>&1" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S remove t3feature --yes --force" )
+# The orphaned isolated variant is now gc's to sweep.
+( cd "$D" && expect_contains "$(basename "$ISO_TARGET")" "$WRK --storage $S gc --dry-run" )

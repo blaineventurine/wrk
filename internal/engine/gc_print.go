@@ -13,6 +13,12 @@ import (
 func PrintGCPlan(w io.Writer, plan GCPlan) {
 	if plan.HasNothing() {
 		fmt.Fprint(w, "Nothing to do.\n")
+		// A skipped orphaned-storage sweep is worth a line even when
+		// every other sweep came back empty — silence would read as
+		// "storage fully checked".
+		for _, note := range plan.OrphanedStorageNotes {
+			fmt.Fprintf(w, "! %s\n", note)
+		}
 		return
 	}
 
@@ -83,6 +89,27 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 		}
 	}
 
+	// Orphaned storage — subtrees no live workspace's config claims.
+	if len(plan.OrphanedStorage) > 0 {
+		sb.WriteString("\nOrphaned storage (")
+		sb.WriteString(pluralInt(len(plan.OrphanedStorage)))
+		sb.WriteString(", not referenced by any live workspace's config):\n")
+		for _, t := range plan.OrphanedStorage {
+			sb.WriteString("  ✗ ")
+			sb.WriteString(t.RelPath)
+			sb.WriteString("\t")
+			sb.WriteString(HumanSize(t.Size))
+			sb.WriteString("\n")
+		}
+	}
+
+	// Notes explaining a skipped orphaned-storage sweep.
+	for _, note := range plan.OrphanedStorageNotes {
+		sb.WriteString("\n! ")
+		sb.WriteString(note)
+		sb.WriteString("\n")
+	}
+
 	// Variant tables grouped by resource
 	variantsByResource := groupVariantsByResource(plan.DeleteVariants, plan.KeepVariants)
 	if len(variantsByResource) > 0 {
@@ -95,16 +122,16 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 			var allVariants []variantLine
 			for _, v := range resourceGroup.DeleteVariants {
 				allVariants = append(allVariants, variantLine{
-					marker:      "✗",
-					v:           v,
-					isKept:      false,
+					marker: "✗",
+					v:      v,
+					isKept: false,
 				})
 			}
 			for _, v := range resourceGroup.KeepVariants {
 				allVariants = append(allVariants, variantLine{
-					marker:      "✓",
-					v:           v,
-					isKept:      true,
+					marker: "✓",
+					v:      v,
+					isKept: true,
 				})
 			}
 
@@ -178,6 +205,11 @@ func PrintGCPlan(w io.Writer, plan GCPlan) {
 		totalParts = append(totalParts, pluralInt(len(plan.OrphanedIsolationEntries))+" isolation entr")
 	}
 
+	// Orphaned storage subtrees removed
+	if len(plan.OrphanedStorage) > 0 {
+		totalParts = append(totalParts, pluralInt(len(plan.OrphanedStorage))+" orphaned subtree")
+	}
+
 	if len(totalParts) > 0 {
 		sb.WriteString(" ")
 		sb.WriteString(strings.Join(totalParts, "; "))
@@ -194,9 +226,9 @@ type variantLine struct {
 }
 
 type resourceGroup struct {
-	Path            string
-	DeleteVariants  []variant
-	KeepVariants    []variant
+	Path           string
+	DeleteVariants []variant
+	KeepVariants   []variant
 }
 
 // groupVariantsByResource organizes variants by resource name + path.

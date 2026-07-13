@@ -160,10 +160,12 @@ run() {
 expect_exit() {
   local expected="$1"; shift
   local cmd="$*"
-  local ec
+  local ec out err
 
+  out="$(mktemp)"
+  err="$(mktemp)"
   printf '$ %s   # expect exit=%d\n' "$cmd" "$expected" | tee -a "$TRANSCRIPT"
-  eval "$cmd" > /tmp/wrk-mt-out 2> /tmp/wrk-mt-err
+  eval "$cmd" > "$out" 2> "$err"
   ec=$?
   if [ "$ec" -eq "$expected" ]; then
     _mark_pass
@@ -171,16 +173,16 @@ expect_exit() {
   else
     _mark_fail
     printf '  FAIL (expected exit=%d, got %d)\n' "$expected" "$ec" | tee -a "$TRANSCRIPT"
-    if [ -s /tmp/wrk-mt-out ]; then
+    if [ -s "$out" ]; then
       printf '  stdout:\n' | tee -a "$TRANSCRIPT"
-      sed 's/^/    /' /tmp/wrk-mt-out | tee -a "$TRANSCRIPT"
+      sed 's/^/    /' "$out" | tee -a "$TRANSCRIPT"
     fi
-    if [ -s /tmp/wrk-mt-err ]; then
+    if [ -s "$err" ]; then
       printf '  stderr:\n' | tee -a "$TRANSCRIPT"
-      sed 's/^/    /' /tmp/wrk-mt-err | tee -a "$TRANSCRIPT"
+      sed 's/^/    /' "$err" | tee -a "$TRANSCRIPT"
     fi
   fi
-  rm -f /tmp/wrk-mt-out /tmp/wrk-mt-err
+  rm -f "$out" "$err"
   return "$ec"
 }
 
@@ -202,4 +204,89 @@ expect_contains() {
     printf '  output:\n' | tee -a "$TRANSCRIPT"
     printf '%s\n' "$combined" | sed 's/^/    /' | tee -a "$TRANSCRIPT"
   fi
+}
+
+# expect_json <kind> <cmd...> — run cmd and record PASS/FAIL based on
+# its STDOUT being a single, pure JSON envelope of the given kind:
+#   1. stdout is non-empty and its first byte is '{' (purity — no
+#      human chatter, VCS output, or plan text may precede it),
+#   2. it parses as JSON (via python3 when available; skipped
+#      otherwise), and
+#   3. it carries "kind": "<kind>" and "schema": 1.
+# stderr is deliberately ignored: progress noise may go there.
+expect_json() {
+  local kind="$1"; shift
+  local cmd="$*"
+  local out ec
+
+  out="$(mktemp)"
+  printf '$ %s   # expect pure JSON envelope kind=%s\n' "$cmd" "$kind" | tee -a "$TRANSCRIPT"
+  eval "$cmd" > "$out" 2> /dev/null
+  ec=$?
+
+  local first
+  first="$(head -c 1 "$out")"
+  if [ "$first" != "{" ]; then
+    _mark_fail
+    printf '  FAIL (stdout does not start with "{" — envelope impure or missing)\n' | tee -a "$TRANSCRIPT"
+    printf '  stdout:\n' | tee -a "$TRANSCRIPT"
+    sed 's/^/    /' "$out" | tee -a "$TRANSCRIPT"
+    rm -f "$out"
+    return "$ec"
+  fi
+
+  if command -v python3 > /dev/null 2>&1; then
+    if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" 2> /dev/null; then
+      _mark_fail
+      printf '  FAIL (stdout is not valid JSON)\n' | tee -a "$TRANSCRIPT"
+      sed 's/^/    /' "$out" | tee -a "$TRANSCRIPT"
+      rm -f "$out"
+      return "$ec"
+    fi
+  fi
+
+  if grep -qF "\"kind\": \"$kind\"" "$out" && grep -qF '"schema": 1' "$out"; then
+    _mark_pass
+    printf '  PASS (kind=%s, schema=1, pure stdout)\n' "$kind" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail
+    printf '  FAIL (kind/schema not found in envelope)\n' | tee -a "$TRANSCRIPT"
+    sed 's/^/    /' "$out" | tee -a "$TRANSCRIPT"
+  fi
+  rm -f "$out"
+  return "$ec"
+}
+
+# expect_stderr_code <code> <cmd...> — run cmd expecting exit 2, an
+# EMPTY stdout, and a structured error envelope on stderr carrying the
+# given stable error code. This is the `--json` failure contract.
+expect_stderr_code() {
+  local code="$1"; shift
+  local cmd="$*"
+  local out err ec
+
+  out="$(mktemp)"
+  err="$(mktemp)"
+  printf '$ %s   # expect exit=2, empty stdout, stderr error code=%s\n' "$cmd" "$code" | tee -a "$TRANSCRIPT"
+  eval "$cmd" > "$out" 2> "$err"
+  ec=$?
+
+  local ok=1
+  [ "$ec" -eq 2 ] || { ok=0; printf '  exit=%d, want 2\n' "$ec" | tee -a "$TRANSCRIPT"; }
+  [ ! -s "$out" ] || { ok=0; printf '  stdout not empty\n' | tee -a "$TRANSCRIPT"; }
+  grep -qF "\"code\":\"$code\"" "$err" || grep -qF "\"code\": \"$code\"" "$err" || {
+    ok=0; printf '  stderr missing error code %s\n' "$code" | tee -a "$TRANSCRIPT"
+  }
+
+  if [ "$ok" -eq 1 ]; then
+    _mark_pass
+    printf '  PASS (exit=2, clean stdout, code=%s)\n' "$code" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail
+    printf '  FAIL\n' | tee -a "$TRANSCRIPT"
+    printf '  stdout:\n' | tee -a "$TRANSCRIPT"; sed 's/^/    /' "$out" | tee -a "$TRANSCRIPT"
+    printf '  stderr:\n' | tee -a "$TRANSCRIPT"; sed 's/^/    /' "$err" | tee -a "$TRANSCRIPT"
+  fi
+  rm -f "$out" "$err"
+  return "$ec"
 }

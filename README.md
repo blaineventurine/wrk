@@ -111,8 +111,12 @@ resources:
 ### Local overrides
 
 You can create a `.wrk.local.yml` alongside `.wrk.yml` to add or override
-resources for your own machine. It is never committed — `wrk` automatically
-ignores it via repository-local ignore rules.
+resources for your own machine. It is never committed — `wrk` maintains a
+managed block in the repository-local exclude file (`.git/info/exclude`,
+shared by colocated Jujutsu repos) covering it and every configured
+resource path. The block is rewritten on each `wrk link`, so patterns for
+resources you remove from the config are pruned automatically; your own
+rules outside the block are never touched.
 
 **Adding a personal-only resource:**
 
@@ -165,7 +169,7 @@ worked example.
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Human-readable identifier used in output. |
-| `path` | string | Workspace-relative path of the resource (file or directory). |
+| `path` | string | Workspace-relative path of the resource (file or directory). May be a glob pattern (`packages/*/node_modules`): every match becomes its own instance, and matches that peer workspaces have already provisioned into shared storage are linked even in a fresh workspace where the paths don't exist on disk yet. |
 | `fingerprint` | list | Optional. Files whose contents determine which shared variant is used. See [Fingerprinting](#fingerprinting). |
 | `hooks.initialize` | list | Optional. Commands run once to create the shared resource. See [Command execution](#command-execution). |
 | `create` | bool | Optional; defaults to `true`. When `false`, `wrk` treats a missing resource as **intentional** — nothing is provisioned, no hook runs, and `wrk status` reports it as `expected` instead of `absent`. Use this when the file is provided by an external tool (a secrets manager, `direnv`, `1Password`, `sops`) rather than by wrk. |
@@ -319,12 +323,14 @@ including monorepo `workspaces` layouts, `Gemfile`, `pyproject.toml` +
 `uv.lock`/`poetry.lock`, `Pipfile.lock`, `requirements.txt`, `Cargo.toml`,
 `.env.example`/`.env.sample`) and writes a `.wrk.yml` seeded with sensible
 defaults for each detected layout. It refuses to overwrite an existing
-`.wrk.yml` unless you pass `--force`, and `--dry-run` prints the generated
-file to stdout without touching disk.
+`.wrk.yml` unless you pass `--force`; overwriting prompts for
+confirmation on an interactive terminal (skip with `--yes`), and
+`--dry-run` prints the generated file to stdout without touching disk.
 
 ```bash
 wrk init --dry-run       # preview only
-wrk init --force         # overwrite an existing .wrk.yml
+wrk init --force         # overwrite an existing .wrk.yml (prompts; --yes skips)
+wrk init --json          # machine-readable envelope (see Machine-readable output)
 ```
 
 With nothing detected, `wrk init` still writes a commented template so you
@@ -392,6 +398,12 @@ The primary workspace's link plan is printed, along with the resolved
 destination. Nothing is written and no `git worktree add` / `jj workspace add`
 runs — safe to try when the destination or nesting rules are unclear.
 
+Add `--json` for a machine-readable envelope (`kind: "new"`): the plan
+carries the resolved destination, base, and the primary link plan; the
+result reports `created` and `workspaceRoot`. The underlying
+`git worktree add` / `jj workspace add` chatter is captured into the
+envelope's `warnings` array so stdout stays pure JSON.
+
 ### Independence and reconnection
 
 Detach the current workspace from shared resources (creates independent
@@ -407,6 +419,13 @@ independent copies created by `detach`:
 ```bash
 wrk relink
 ```
+
+`wrk relink` is also the exit from isolation: any resource pinned to a
+private `isolated-*` variant via `wrk relink --isolate` is reconnected
+to its regular fingerprint variant (provisioning it if needed) and the
+isolated variant is **deleted**. The plan lists each exit with a ⚠
+before you confirm. Isolation entries whose resource is no longer in
+`.wrk.yml` are left untouched and called out in the plan.
 
 > `wrk link` is intentionally conservative: it will never destroy a local
 > copy. Use `wrk relink` when you explicitly want to throw away independent
@@ -428,7 +447,7 @@ wrk gc --yes          # skip the prompt (e.g. cron / CI)
 wrk gc --dry-run      # show the plan, do nothing
 ```
 
-`wrk gc` runs three sweeps against the current repository:
+`wrk gc` runs four sweeps against the current repository:
 
 - **Ghost workspaces** — worktrees whose working directory is gone but
   VCS metadata still references them. `wrk gc` runs `git worktree prune`
@@ -440,6 +459,14 @@ wrk gc --dry-run      # show the plan, do nothing
   resource path resolves under it; detached workspaces don't pin their
   previous variant. Concurrent `wrk link` operations are respected: a
   variant whose lock is currently held is skipped with a warning.
+- **Orphaned storage** — subtrees under `<storage>/<repo-id>/` that no
+  live workspace's configuration claims: the leftovers of resources
+  removed or renamed in `.wrk.yml`. Every live workspace's own config
+  (including `.wrk.local.yml`) is consulted, and isolated variants stay
+  pinned via the isolation registry. If any workspace is unreachable or
+  its config is unreadable, this sweep is skipped with a note rather
+  than guessed at, and each deletion re-checks its claim at execute
+  time.
 - **Stale bookkeeping** — orphaned `.wrk-lock` files, `.wrk-provisioning`
   scratch dirs whose lock is free, `.wrk-deleting` markers left by a
   previous crashed `wrk gc`, and `.wrk-forgetting/` markers left by a
@@ -472,6 +499,9 @@ Soft refusals (overridable with `--force`):
 - Uncommitted VCS changes in the target.
 - Detached files (`wrk detach` was run in the target — the independent
   local copies would be lost).
+- Isolated variants (`wrk relink --isolate` was run in the target — the
+  private variants would become unreferenced and swept by the next
+  `wrk gc`).
 
 Ghost workspaces route the user to `wrk gc`:
 
@@ -498,9 +528,11 @@ new fingerprints are computed against the current manifests, initialize
 hooks re-run, symlinks are re-created.
 
 `wrk forget` refuses without `--force` when any workspace has detached
-files, since forgetting shared storage while local copies exist would
-leave those workspaces stranded. Reconnect them first with `wrk relink
---yes`, or pass `--force` to proceed anyway.
+files or isolated variants: forgetting shared storage while independent
+copies exist would leave those workspaces stranded, and isolated
+variants hold per-workspace content that hooks cannot reproduce. Run
+`wrk relink --yes` in each affected workspace first, or pass `--force`
+to proceed anyway.
 
 Removal is atomic: `<storage>/<repo-id>/` is renamed to
 `<storage>/<repo-id>.wrk-forgetting/` (single rename), then removed.
@@ -559,11 +591,11 @@ Every row of `wrk status` reports one of these per-resource states:
 | `linked` | The workspace path is a symlink pointing at the correct shared copy. | Nothing — this is the healthy state. |
 | `expected` | Nothing exists locally, and the resource is `create: false`. Provided out-of-band (e.g. `direnv`, a secrets manager). | Nothing — the missing file is intentional. |
 | `detached` | You ran `wrk detach`; the workspace path is now an independent local copy. Recorded on purpose. | `wrk link` to reunite with shared storage (keeping local edits requires manual merge), or `wrk relink` to discard local edits and reconnect. |
-| `isolated` | You ran `wrk relink --isolate`; the workspace path is a symlink into a per-workspace variant that no fingerprint maps to. Peer workspaces don't see its content. | To exit isolation, remove the entry from `<metadata>/wrk/isolated.json` manually (a `wrk` command is coming). |
+| `isolated` | You ran `wrk relink --isolate`; the workspace path is a symlink into a per-workspace variant that no fingerprint maps to. Peer workspaces don't see its content. | `wrk relink` — reconnects to the regular fingerprint variant and **deletes** the isolated copy (confirm-gated). `wrk link` and `wrk detach` leave isolated resources untouched. |
 | `pending` | Nothing exists yet, but an `initialize` hook is configured. | `wrk link` — the hook runs, then the symlink is installed. |
 | `missing` | The shared copy exists but the workspace symlink is not in place. | `wrk link`. |
 | `not-linked` | A real local copy exists but no shared copy yet. | `wrk link` — the local copy moves into shared storage and a symlink takes its place. |
-| `stale` | The workspace *is* a symlink, but it points at the wrong shared target. Almost always because a fingerprint input (e.g. `package.json`, `Gemfile.lock`) changed since the last `wrk link`, so a new shared variant now applies. | `wrk link` — the symlink is repointed to the current variant. |
+| `stale` | The workspace *is* a symlink, but it points at the wrong shared target. Almost always because a fingerprint input (e.g. `package.json`, `Gemfile.lock`) changed since the last `wrk link`, so a new shared variant now applies. A symlink you created yourself (pointing outside wrk's storage) also reports as `stale`. | `wrk link` — the symlink is repointed to the current variant. For a self-made symlink, `wrk link` refuses with a conflict instead of overwriting it. |
 | `conflict` | Both a real local copy AND a shared copy exist. `wrk link` refuses to clobber either. | Decide which one is authoritative. Delete the workspace copy and run `wrk link` to accept the shared copy, or run `wrk detach` to accept the workspace copy and keep it independent. |
 | `absent` | Nothing exists anywhere, no `initialize` hook is configured, and `create` is `true`. wrk has no way to produce it. | Provide the file, add a hook, or (if the file is provided externally) set `create: false`. |
 
@@ -665,11 +697,12 @@ failure) and 2 as a hard failure to alert on.
 
 ### Machine-readable output (`--json`)
 
-Every read-only introspection command and every destructive command
-supports `--json`. Output is a single JSON object with:
+Every read-only introspection command, every destructive command, and
+the workspace/config creators (`wrk new`, `wrk init`) support `--json`.
+Output is a single JSON object with:
 
 - `schema` — integer version (currently `1`)
-- `kind` — command name (`status`, `list`, `fingerprint`, `doctor`, `workspaces`, `gc`, `remove`, `forget`, `run`, `relink`, `relink-isolate`, `detach`)
+- `kind` — command name (`status`, `list`, `fingerprint`, `doctor`, `workspaces`, `gc`, `remove`, `forget`, `run`, `relink`, `relink-isolate`, `detach`, `new`, `init`)
 - Command-specific top-level fields
 
 Destructive commands additionally carry:
@@ -677,6 +710,11 @@ Destructive commands additionally carry:
 - `dryRun` — boolean
 - `plan` — the full plan structure
 - `result` — populated after execute (`null` in `--dry-run` mode). Fields: `attempted: bool`, `bytesFreed: int64`, `warnings: string[]`. For `wrk remove` on the git backend, `bytesFreed` reports the plan's pre-computed size (git deletes inside its own process, so wrk cannot measure the sweep directly).
+
+`wrk new` and `wrk init` create rather than destroy; their `result`
+carries command-specific fields instead: `created`/`workspaceRoot`
+(new) and `wrote` (init), plus the shared `warnings` array. In
+`--dry-run` mode the `result` key is omitted entirely.
 
 Errors under `--json` are emitted on STDERR (STDOUT stays clean) as:
 
@@ -704,6 +742,7 @@ Stable error codes agents can switch on:
 | `config_invalid`            | `.wrk.yml` failed to load or validate |
 | `not_a_repository`          | Current directory is not inside a supported VCS repo |
 | `confirm_declined`          | Interactive prompt got "no" (or EOF without `--yes`/`--force`) |
+| `json_requires_yes`         | `--json` on a prompting command needs `--yes` (or `--force --yes` for `wrk init` overwrites) |
 | `unknown`                   | Fallback for any untyped error |
 
 Combined `--json --yes` (with `--force` where required) is the agent
@@ -735,8 +774,12 @@ wrk link --storage /path/to/storage
 | `{match}` | Matched workspace path |
 | `{shared}` | Shared storage path |
 
-Unknown placeholders (typos like `{shred}` for `{shared}`) are rejected
-at load time so a misspelled path never silently ships to disk.
+Unknown placeholders in **fingerprint** entries (typos like `{shred}`
+for `{shared}`) are rejected when the resource is resolved, so a
+misspelled fingerprint input never silently changes the cache key.
+Hook fields (`run`, `cwd`, and `env` values) are currently expanded
+leniently: an unknown placeholder passes through to the hook as
+literal text, so double-check spelling there.
 
 ### `{shared}` in initialize hooks
 

@@ -38,6 +38,33 @@ func PrintPlan(w io.Writer, plan planner.Plan) error {
 	return printPlan(w, plan)
 }
 
+// PrintRelinkPlan renders a RelinkPlan: the ordinary planner diagnostic
+// block followed by the isolation exits (destructive — flagged with ⚠)
+// and any isolation entries relink cannot manage because the resource
+// left the config.
+func PrintRelinkPlan(w io.Writer, plan RelinkPlan) error {
+	if err := printPlan(w, plan.Plan); err != nil {
+		return err
+	}
+
+	out := &writer{w: w}
+
+	if len(plan.IsolationExits) > 0 {
+		out.println("\nIsolation exits:")
+		for _, e := range plan.IsolationExits {
+			out.printf("  ⚠ [%s] discard isolated variant %s and reconnect to shared storage\n",
+				e.ResourceName, e.StoragePath)
+		}
+		out.println("\n⚠ Isolated variants hold per-workspace content that hooks cannot reproduce; discarding is permanent.")
+	}
+
+	for _, p := range plan.SkippedIsolation {
+		out.printf("\n! isolation entry for %q references a resource missing from .wrk.yml; left untouched\n", p)
+	}
+
+	return out.err
+}
+
 func printPlan(w io.Writer, plan planner.Plan) error {
 	out := &writer{w: w}
 

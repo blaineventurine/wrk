@@ -3,6 +3,7 @@ package repository
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -23,7 +24,11 @@ type backend interface {
 	// off that ref (git branch/tag/commit, or jj revset) rather than
 	// the invoking worktree's HEAD/@. Empty base preserves the
 	// backend's default: git checks out HEAD, jj starts @ on top of @.
-	createWorkspace(root, dest, base string) error
+	//
+	// stdout receives the child's standard output; nil falls back to
+	// os.Stdout. Callers that must keep the process stdout clean
+	// (`--json`) pass a capture buffer.
+	createWorkspace(root, dest, base string, stdout io.Writer) error
 
 	// workspaces returns the roots of every live workspace/worktree.
 	workspaces(root string) ([]string, error)
@@ -96,15 +101,28 @@ func capture(dir, name string, args ...string) (string, error) {
 }
 
 // passthrough runs a command in dir with stdio wired to the process,
-// for user-facing commands (git worktree add, jj workspace add).
+// for user-facing commands (git worktree remove, jj workspace forget).
 // stdin is passed through so interactive prompts work; stderr is
 // already visible so wrapExecError only records what failed and where.
 // Unlike capture, the child inherits the parent's full environment.
 func passthrough(dir, name string, args ...string) error {
+	return passthroughTo(nil, dir, name, args...)
+}
+
+// passthroughTo is passthrough with the child's standard output routed
+// to stdout (nil falls back to os.Stdout). Mutating commands whose
+// callers must keep the process stdout machine-readable (`wrk new
+// --json` capturing `git worktree add`'s checkout notice) pass their
+// buffer; stderr always stays on the process stderr so progress noise
+// and prompts remain visible.
+func passthroughTo(stdout io.Writer, dir, name string, args ...string) error {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {

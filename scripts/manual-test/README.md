@@ -21,23 +21,28 @@ symlinks, real config parsing.
 ```
 scripts/manual-test/
 ├── README.md            # this file
-├── lib.sh               # shared helpers (mkrepo, seed, run, subsec, ...)
+├── lib.sh               # shared helpers (mkrepo, seed, run, expect_*, ...)
 ├── run.sh               # orchestrator: pick a group or run all
 └── groups/
     ├── init.sh          # `wrk init` variants
-    ├── new.sh           # `wrk new` edge cases
-    ├── link.sh          # `wrk link` core + config errors
-    ├── detach-relink.sh # `wrk detach` / `wrk relink`
-    ├── status.sh        # `wrk status` / `wrk workspaces`
-    ├── fingerprint.sh   # fingerprint variant behaviour
-    ├── interference.sh  # external interference (worktree remove, hacks)
-    ├── jj.sh            # jj-specific paths
-    ├── concurrency.sh   # cross-workspace concurrency
-    ├── errors.sh        # error surface
-    ├── local.sh         # .wrk.local.yml scenarios
-    ├── gc.sh            # `wrk gc` (once implemented)
-    ├── remove.sh        # `wrk remove` (once implemented)
-    └── forget.sh        # `wrk forget` (once implemented)
+    ├── new.sh           # `wrk new` — --base, refusals
+    ├── link.sh          # `wrk link` core: adoption, conflicts, states,
+    │                    #   config validation, managed ignore block
+    ├── detach-relink.sh # `wrk detach` / `wrk relink`, incl. the
+    │                    #   isolation exit (plain relink un-isolates)
+    ├── isolate.sh       # `wrk relink --isolate` entry path
+    ├── run.sh           # `wrk run` — hook re-runs, crash recovery,
+    │                    #   detached/isolated refusals
+    ├── multiworkspace.sh# variant coexistence, gc pin survival,
+    │                    #   flock race, storage-side glob provisioning
+    ├── gc.sh            # `wrk gc` — variants, ghosts, bookkeeping
+    ├── gc-orphans.sh    # `wrk gc` — orphaned-storage sweep
+    ├── remove.sh        # `wrk remove` — refusals (git + jj), ghosts
+    ├── forget.sh        # `wrk forget`
+    ├── jj.sh            # jj backend: colocation requirement, lifecycle,
+    │                    #   exclude-file contract
+    ├── local.sh         # `.wrk.local.yml` overlays and origins
+    └── json.sh          # `--json` envelope + error-code contract
 ```
 
 ## Prerequisites
@@ -112,6 +117,8 @@ Helpers:
 | `subsec <title>` | Sub-heading |
 | `expect_exit <expected> <cmd>` | Asserts a specific exit code, records pass/fail |
 | `expect_contains <needle> <cmd>` | Asserts stdout/stderr contains a substring |
+| `expect_json <kind> <cmd>` | Asserts stdout is ONE pure JSON envelope of the given kind (schema=1) |
+| `expect_stderr_code <code> <cmd>` | Asserts exit 2, empty stdout, and a structured stderr error envelope with the stable code |
 
 `expect_*` helpers turn scenarios from "human eyeballs the transcript"
 into "harness exits non-zero on regression". Prefer them for stable

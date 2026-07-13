@@ -126,7 +126,7 @@ func FingerprintOne(
 			"resource %q is not fingerprinted", resourceName)
 	}
 
-	instances, err := resolver.Resolve(repo.Root, *target)
+	instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), *target)
 	if err != nil {
 		return nil, err
 	}

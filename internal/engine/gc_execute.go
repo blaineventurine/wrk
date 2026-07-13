@@ -117,6 +117,13 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 		deleteVariant(repo, v, options, recordErr)
 	}
 
+	// Step 5b: Delete orphaned storage subtrees — unclaimed by any
+	// live workspace's config. Same per-tree lock + execute-time
+	// re-check + rename-then-remove discipline as deleteVariant.
+	for _, t := range plan.OrphanedStorage {
+		deleteOrphanedTree(repo, t, options, recordErr)
+	}
+
 	// Step 6: Sweep bookkeeping cruft. Failures are surfaced but do
 	// not abort the sweep — a leftover .wrk-lock is a cosmetic wart
 	// the next gc will pick up.

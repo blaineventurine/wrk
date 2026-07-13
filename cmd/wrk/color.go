@@ -72,7 +72,7 @@ func stateColor(s engine.State) string {
 	switch s {
 	case engine.StateLinked, engine.StateExpected:
 		return ansiGreen
-	case engine.StateDetached, engine.StatePending:
+	case engine.StateDetached, engine.StateIsolated, engine.StatePending:
 		return ansiYellow
 	case engine.StateStale,
 		engine.StateConflict,
@@ -88,7 +88,10 @@ func workspaceStateColor(s engine.WorkspaceState) string {
 	switch s {
 	case engine.WorkspaceLinked:
 		return ansiGreen
-	case engine.WorkspaceDetached, engine.WorkspacePending, engine.WorkspacePartial:
+	case engine.WorkspaceDetached,
+		engine.WorkspaceIsolated,
+		engine.WorkspacePending,
+		engine.WorkspacePartial:
 		return ansiYellow
 	case engine.WorkspaceUnhealthy:
 		return ansiRed

@@ -126,7 +126,7 @@ func runRelinkPlain(repo *repository.Repository, options engine.Options) error {
 		return err
 	}
 
-	if err := engine.PrintPlan(os.Stdout, plan); err != nil {
+	if err := engine.PrintRelinkPlan(os.Stdout, plan); err != nil {
 		return err
 	}
 
