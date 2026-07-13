@@ -852,6 +852,7 @@ type removePlanJSON struct {
 	VCSCommand         string   `json:"vcsCommand"`
 	UncommittedChanges int      `json:"uncommittedChanges"`
 	DetachedPaths      []string `json:"detachedPaths"`
+	IsolatedPaths      []string `json:"isolatedPaths"`
 	TotalBytesToFree   int64    `json:"totalBytesToFree"`
 	Refusal            string   `json:"refusal,omitempty"`
 	IsGhost            bool     `json:"isGhost"`
@@ -890,6 +891,7 @@ func MarshalRemoveJSON(in RemoveJSONInput) ([]byte, error) {
 			VCSCommand:         in.Plan.VCSCommand,
 			UncommittedChanges: in.Plan.UncommittedChanges,
 			DetachedPaths:      nilToEmpty(in.Plan.DetachedPaths),
+			IsolatedPaths:      nilToEmpty(in.Plan.IsolatedPaths),
 			TotalBytesToFree:   in.Plan.TotalBytes,
 			Refusal:            in.Plan.Refusal,
 			IsGhost:            in.Plan.IsGhost,
@@ -912,7 +914,8 @@ func MarshalRemoveJSON(in RemoveJSONInput) ([]byte, error) {
 // forgetPlanJSON is the JSON projection of a ForgetPlan. RegistryEntries
 // carries the sorted list of workspace roots that still hold detach
 // entries — the underlying map is collapsed to a flat slice so consumers
-// see stable ordering across runs.
+// see stable ordering across runs. IsolatedEntries carries the plan's
+// pre-sorted "<workspaceRoot>: <resourcePath>" lines.
 type forgetPlanJSON struct {
 	RepositoryID    string   `json:"repositoryId"`
 	StoragePath     string   `json:"storagePath"`
@@ -920,6 +923,7 @@ type forgetPlanJSON struct {
 	ResourceCount   int      `json:"resourceCount"`
 	TotalSize       int64    `json:"totalSize"`
 	RegistryEntries []string `json:"registryEntries"`
+	IsolatedEntries []string `json:"isolatedEntries"`
 	Refusal         string   `json:"refusal,omitempty"`
 }
 
@@ -963,6 +967,7 @@ func MarshalForgetJSON(in ForgetJSONInput) ([]byte, error) {
 			ResourceCount:   in.Plan.ResourceCount,
 			TotalSize:       in.Plan.TotalSize,
 			RegistryEntries: roots,
+			IsolatedEntries: nilToEmpty(in.Plan.IsolatedEntries),
 			Refusal:         in.Plan.Refusal,
 		},
 	}

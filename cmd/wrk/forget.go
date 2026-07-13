@@ -183,6 +183,13 @@ func printForgetPlan(w *os.File, plan engine.ForgetPlan) {
 		}
 	}
 
+	if len(plan.IsolatedEntries) > 0 {
+		fmt.Fprintf(w, "\n  Isolated variants: %d\n", len(plan.IsolatedEntries))
+		for _, entry := range plan.IsolatedEntries {
+			fmt.Fprintf(w, "    %s\n", entry)
+		}
+	}
+
 	if plan.Refusal != "" {
 		fmt.Fprintf(w, "\nRefusal: %s\n\n(--force overrides, then proceeds)\n", plan.Refusal)
 	}

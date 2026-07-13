@@ -90,3 +90,27 @@ S=$SCRATCH/storage/I3
 # preflight loop reaches the "not detached" branch instead of the
 # empty-names "no detached resources to isolate" branch.
 ( cd "$D" && expect_contains "not detached" "$WRK --storage $S relink --isolate --yes node" )
+
+subsec "I.4: forget refuses when isolated variants exist, --force proceeds"
+D=$SCRATCH/I4
+mkrepo git "$D"
+seed "$D"
+iso_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/I4
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S detach --yes" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S relink --isolate --yes" )
+# forget without --force must refuse and mention the isolated variant.
+( cd "$D" && expect_contains "isolated" "$WRK --storage $S forget --yes 2>&1" )
+# Refusal blocked execution: the isolated variant is still on disk.
+target=$(readlink "$D/node_modules" 2>/dev/null || echo NONE)
+if [ "$target" != "NONE" ] && [ -d "$target" ]; then
+  _mark_pass
+  printf '  PASS: isolated variant survived the refused forget\n' | tee -a "$TRANSCRIPT"
+else
+  _mark_fail
+  printf '  FAIL: isolated variant gone after refused forget (target=%s)\n' "$target" | tee -a "$TRANSCRIPT"
+fi
+# --force overrides the refusal and proceeds.
+( cd "$D" && expect_exit 0 "$WRK --storage $S forget --yes --force" )

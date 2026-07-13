@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gofrs/flock"
+
+	"github.com/blaineventurine/wrk/internal/repository"
 )
 
 // TestExecuteGCDeletesUnpinnedVariant: after Link mints a second
@@ -526,5 +528,119 @@ func TestGCKeepsIsolatedVariantForLiveWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(isolated); err != nil {
 		t.Errorf("live isolated variant did not survive gc: %v", err)
+	}
+}
+
+// repinnedGCFixture builds the two-variant setup shared by the pin
+// re-check tests: Link mints v1, a manifest change plus re-Link mints
+// v2, so the plan slates v1 for deletion while the workspace symlink
+// pins v2. Returns the plan and v1's storage path.
+func repinnedGCFixture(t *testing.T) (repo *repository.Repository, plan GCPlan, storage, doomed string) {
+	t.Helper()
+	r := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n" +
+			"    hooks:\n" +
+			"      initialize:\n" +
+			"        - run: sh -c 'mkdir -p \"{shared}\" && touch \"{shared}/.installed\"'\n",
+		"package.json": `{"v":1}`,
+	})
+	storage = storageIn(t, r.Root)
+
+	if err := Link(r, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v1: %v", err)
+	}
+	writeFile(t, filepath.Join(r.Root, "package.json"), `{"v":2}`)
+	_ = os.Remove(filepath.Join(r.Root, "node_modules"))
+	if err := Link(r, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link v2: %v", err)
+	}
+
+	plan, err := BuildGCPlan(r, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.DeleteVariants) != 1 {
+		t.Fatalf("expected 1 variant to delete, got %d", len(plan.DeleteVariants))
+	}
+	return r, plan, storage, plan.DeleteVariants[0].StoragePath
+}
+
+// TestDeleteVariantSkipsRepinnedVariant pins the TOCTOU fix: a plan
+// marks a variant for deletion, then a `wrk link` completing during
+// the Confirm prompt re-pins it (simulated by pointing the workspace
+// symlink back at the doomed variant). ExecuteGC MUST re-verify the
+// pin under the variant lock and skip the deletion — deleting would
+// dangle a live workspace symlink and destroy user mutations.
+func TestDeleteVariantSkipsRepinnedVariant(t *testing.T) {
+	repo, plan, storage, doomed := repinnedGCFixture(t)
+
+	// Re-pin AFTER plan build: point the workspace symlink back at
+	// the doomed variant, exactly what a `wrk link` after a branch
+	// switch back would do during the unbounded prompt window.
+	link := filepath.Join(repo.Root, "node_modules")
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("removing workspace symlink: %v", err)
+	}
+	if err := os.Symlink(doomed, link); err != nil {
+		t.Fatalf("re-pinning symlink: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	if _, err := os.Stat(doomed); err != nil {
+		t.Errorf("re-pinned variant was deleted out from under the workspace: %v", err)
+	}
+	if !strings.Contains(out.String(), "re-pinned") {
+		t.Errorf("skip not reported on stdout, got: %q", out.String())
+	}
+}
+
+// TestDeleteVariantIsolationRecheck: an isolation entry recorded AFTER
+// plan build must pin the variant at execute time. The registry is the
+// authoritative claim even when no workspace symlink resolves into the
+// variant.
+func TestDeleteVariantIsolationRecheck(t *testing.T) {
+	repo, plan, storage, doomed := repinnedGCFixture(t)
+
+	if err := recordIsolation(repo, repo.Root, "node_modules", doomed); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	if _, err := os.Stat(doomed); err != nil {
+		t.Errorf("isolation-pinned variant was deleted: %v", err)
+	}
+	if !strings.Contains(out.String(), "re-pinned") {
+		t.Errorf("skip not reported on stdout, got: %q", out.String())
+	}
+}
+
+// TestDeleteVariantStillDeletesUnpinned is the counter-case: the pin
+// re-check must not turn gc into a no-op. A genuinely unpinned variant
+// still gets deleted.
+func TestDeleteVariantStillDeletesUnpinned(t *testing.T) {
+	repo, plan, storage, doomed := repinnedGCFixture(t)
+
+	var out bytes.Buffer
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &out}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	if _, err := os.Stat(doomed); !os.IsNotExist(err) {
+		t.Errorf("unpinned variant survived deletion: %s", doomed)
+	}
+	if strings.Contains(out.String(), "re-pinned") {
+		t.Errorf("spurious re-pin skip reported: %q", out.String())
 	}
 }

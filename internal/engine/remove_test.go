@@ -549,3 +549,133 @@ func TestBuildRemovePlanUnknownDestinationCarriesTypedErrorCode(t *testing.T) {
 		t.Errorf("code = %q, want %q", wrkErr.Code, ErrNotLiveWorkspace)
 	}
 }
+
+// TestBuildRemovePlanIsolatedVariantsRefuse: a workspace with
+// isolation-registry entries surfaces a soft refusal — removing the
+// workspace orphans the isolated variants, whose content hooks cannot
+// reproduce, and the next `wrk gc` sweeps it. IsolatedPaths carries
+// the exact sorted list for the print layer.
+func TestBuildRemovePlanIsolatedVariantsRefuse(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	if err := recordIsolation(repo, feature, "node_modules", "/store/x/isolated-abc"); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if len(plan.IsolatedPaths) != 1 || plan.IsolatedPaths[0] != "node_modules" {
+		t.Errorf("IsolatedPaths = %v, want [node_modules]", plan.IsolatedPaths)
+	}
+	if plan.Refusal == "" {
+		t.Fatal("expected refusal for isolated variants")
+	}
+	if !strings.Contains(plan.Refusal, "isolated") {
+		t.Errorf("Refusal = %q, want mention of 'isolated'", plan.Refusal)
+	}
+}
+
+// TestExecuteRemoveClearsIsolationEntries: after a forced removal the
+// isolation registry must no longer carry the target's entries — a
+// stale entry would keep pinning a variant no workspace references
+// until the next gc's orphan sweep.
+func TestExecuteRemoveClearsIsolationEntries(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	if err := recordIsolation(repo, feature, "node_modules", "/store/x/isolated-abc"); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if err := ExecuteRemove(repo, plan, true, Options{}); err != nil {
+		t.Fatalf("ExecuteRemove --force: %v", err)
+	}
+
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation: %v", err)
+	}
+	if _, ok := iso[feature]; ok {
+		t.Errorf("isolation entries survived removal: %v", iso[feature])
+	}
+}
+
+// TestBuildRemovePlanNoIsolationNoRefusal is the regression guard
+// against over-refusing: a clean workspace with no isolation entries
+// must produce an empty Refusal and no IsolatedPaths.
+func TestBuildRemovePlanNoIsolationNoRefusal(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan: %v", err)
+	}
+	if plan.Refusal != "" {
+		t.Errorf("clean workspace should have no refusal, got %q", plan.Refusal)
+	}
+	if len(plan.IsolatedPaths) != 0 {
+		t.Errorf("IsolatedPaths = %v, want empty", plan.IsolatedPaths)
+	}
+}
+
+// TestBuildRemovePlanNotLiveHintsAtLeftoverDir pins the G4 hint split:
+// when the not-live target EXISTS on disk, the hint routes the user at
+// the leftover directory (interrupted-removal fingerprint); when it
+// does not exist, the generic "wrk workspaces" hint stays. The message
+// string is identical in both cases.
+func TestBuildRemovePlanNotLiveHintsAtLeftoverDir(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+
+	leftover := filepath.Join(filepath.Dir(repo.Root), "leftover-dir")
+	if err := os.MkdirAll(leftover, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := BuildRemovePlan(repo, leftover, Options{})
+	if err == nil {
+		t.Fatal("expected error for a non-workspace directory")
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrNotLiveWorkspace {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrNotLiveWorkspace)
+	}
+	if !strings.Contains(wrkErr.Hint, "remove it manually") {
+		t.Errorf("Hint = %q, want leftover-directory guidance", wrkErr.Hint)
+	}
+
+	// Counter: a target that does NOT exist on disk keeps the
+	// generic listing hint.
+	_, err = BuildRemovePlan(repo, "/nonexistent/never-a-worktree-xyz-123", Options{})
+	if err == nil {
+		t.Fatal("expected error for a nonexistent target")
+	}
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if !strings.Contains(wrkErr.Hint, "wrk workspaces") {
+		t.Errorf("Hint = %q, want the generic 'wrk workspaces' hint", wrkErr.Hint)
+	}
+}

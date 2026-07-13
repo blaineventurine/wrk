@@ -206,6 +206,9 @@ func printRemovePlan(w *os.File, plan engine.RemovePlan) {
 	if len(plan.DetachedPaths) > 0 {
 		fmt.Fprintf(w, "  Detached files: %s\n", strings.Join(plan.DetachedPaths, ", "))
 	}
+	if len(plan.IsolatedPaths) > 0 {
+		fmt.Fprintf(w, "  Isolated variants: %s\n", strings.Join(plan.IsolatedPaths, ", "))
+	}
 	if plan.Refusal != "" {
 		fmt.Fprintf(w, "\nRefusal: %s\n\n(--force overrides, then proceeds)\n", plan.Refusal)
 	}

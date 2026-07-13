@@ -367,3 +367,78 @@ func TestExecuteForgetRecoveryPathInvokesProgress(t *testing.T) {
 		t.Errorf("progress total = %d, want >= 512 (leftover blob)", total)
 	}
 }
+
+// TestBuildForgetPlanRefusesOnIsolatedVariants: any isolation-registry
+// entry must trigger a refusal — isolated variants hold per-workspace
+// content that hooks cannot reproduce, so forgetting them without
+// --force silently destroys unrecoverable data. The refusal keys on
+// registry content, not disk state: the workspace root here is fake.
+func TestBuildForgetPlanRefusesOnIsolatedVariants(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+
+	if err := recordIsolation(repo, "/wk/feature", "node_modules", "/store/x/isolated-abc"); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storageIn(t, repo.Root)})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if len(plan.IsolatedEntries) != 1 {
+		t.Fatalf("IsolatedEntries = %v, want 1 entry", plan.IsolatedEntries)
+	}
+	if got, want := plan.IsolatedEntries[0], "/wk/feature: node_modules"; got != want {
+		t.Errorf("IsolatedEntries[0] = %q, want %q", got, want)
+	}
+	if plan.Refusal == "" {
+		t.Fatal("expected refusal for isolated variants")
+	}
+	if !strings.Contains(plan.Refusal, "isolated") {
+		t.Errorf("Refusal = %q, want mention of 'isolated'", plan.Refusal)
+	}
+	if !strings.Contains(plan.Refusal, "node_modules") {
+		t.Errorf("Refusal = %q, want mention of the resource path", plan.Refusal)
+	}
+}
+
+// TestExecuteForgetClearsIsolationRegistry: after ExecuteForget the
+// isolation registry must be empty AND the storage subtree gone — a
+// stale isolated.json would make the next `wrk link` believe a
+// destroyed variant is still claimed.
+func TestExecuteForgetClearsIsolationRegistry(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n  - name: env\n    path: .env\n",
+	})
+	storage := storageIn(t, repo.Root)
+	writeFile(t, filepath.Join(repo.Root, ".env"), "seed\n")
+	if err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	target := filepath.Join(storage, repo.RepositoryID, ".env")
+	if err := recordIsolation(repo, repo.Root, ".env", target); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildForgetPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildForgetPlan: %v", err)
+	}
+	if plan.Refusal == "" {
+		t.Fatal("expected refusal (isolated entry present) — the CLI's --force gate is what reaches ExecuteForget")
+	}
+	if err := ExecuteForget(repo, plan, Options{StorageRoot: storage}); err != nil {
+		t.Fatalf("ExecuteForget: %v", err)
+	}
+
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation: %v", err)
+	}
+	if len(iso) != 0 {
+		t.Errorf("isolation registry not cleared: %v", iso)
+	}
+	if _, err := os.Stat(plan.StoragePath); !os.IsNotExist(err) {
+		t.Errorf("storage tree survived: %v", err)
+	}
+}

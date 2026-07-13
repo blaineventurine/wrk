@@ -2090,3 +2090,66 @@ func TestRelinkIsolateJSONTopLevelKeysWithResult(t *testing.T) {
 	}
 	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
 }
+
+// TestForgetPlanJSONCarriesIsolatedEntries pins the isolatedEntries
+// projection: a populated plan surfaces the pre-sorted entries; an
+// empty plan emits `[]`, never null, so consumers can iterate without
+// a nil check.
+func TestForgetPlanJSONCarriesIsolatedEntries(t *testing.T) {
+	data, err := MarshalForgetJSON(ForgetJSONInput{Plan: ForgetPlan{
+		RepositoryID:    "local/abc",
+		IsolatedEntries: []string{"/wk/a: node_modules", "/wk/b: vendor/bundle"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var full struct {
+		Plan forgetPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Plan.IsolatedEntries) != 2 ||
+		full.Plan.IsolatedEntries[0] != "/wk/a: node_modules" ||
+		full.Plan.IsolatedEntries[1] != "/wk/b: vendor/bundle" {
+		t.Errorf("isolatedEntries: %+v", full.Plan.IsolatedEntries)
+	}
+
+	empty, err := MarshalForgetJSON(ForgetJSONInput{Plan: ForgetPlan{RepositoryID: "local/abc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(empty), "\"isolatedEntries\": []") {
+		t.Errorf("empty plan MUST emit isolatedEntries as []:\n%s", empty)
+	}
+}
+
+// TestRemovePlanJSONCarriesIsolatedPaths is the remove-side mirror:
+// isolatedPaths is always an array, populated or `[]`.
+func TestRemovePlanJSONCarriesIsolatedPaths(t *testing.T) {
+	data, err := MarshalRemoveJSON(RemoveJSONInput{Plan: RemovePlan{
+		Target:        "/wk/feature",
+		Backend:       "git",
+		IsolatedPaths: []string{"node_modules"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var full struct {
+		Plan removePlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Plan.IsolatedPaths) != 1 || full.Plan.IsolatedPaths[0] != "node_modules" {
+		t.Errorf("isolatedPaths: %+v", full.Plan.IsolatedPaths)
+	}
+
+	empty, err := MarshalRemoveJSON(RemoveJSONInput{Plan: RemovePlan{Target: "/wk/f", Backend: "git"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(empty), "\"isolatedPaths\": []") {
+		t.Errorf("empty plan MUST emit isolatedPaths as []:\n%s", empty)
+	}
+}

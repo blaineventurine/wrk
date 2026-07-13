@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/blaineventurine/wrk/internal/repository"
@@ -15,9 +16,9 @@ import (
 // applies it.
 //
 // Refusal is the composed, human-readable reason a soft refusal
-// applies (uncommitted changes and/or detached files). Multiple
-// reasons are joined by "; " so a single string suffices for the
-// CLI's --force decision.
+// applies (uncommitted changes, detached files, and/or isolated
+// variants). Multiple reasons are joined by "; " so a single string
+// suffices for the CLI's --force decision.
 type RemovePlan struct {
 	// Target is the resolved, canonicalized absolute path of the
 	// workspace to remove. Registry lookups and Workspaces()
@@ -43,6 +44,14 @@ type RemovePlan struct {
 	// as detached in the registry for Target. Empty when the
 	// workspace has no detach entry.
 	DetachedPaths []string
+
+	// IsolatedPaths is the workspace-relative resource paths the
+	// isolation registry records for Target. Removing the workspace
+	// orphans these entries: the variants' content — by definition
+	// not reproducible by hooks — becomes unreferenced and the next
+	// `wrk gc` sweeps it. Empty when the workspace has no isolation
+	// entries.
+	IsolatedPaths []string
 
 	// IsGhost is true when Target is NOT in Workspaces() but the
 	// detach registry still carries an entry keyed by it — a stale
@@ -83,8 +92,10 @@ type RemovePlan struct {
 //     override.
 //  6. Detached-file registry entries  → soft refusal, --force may
 //     override.
+//  7. Isolation registry entries      → soft refusal, --force may
+//     override.
 //
-// Cases 5 and 6 can coexist; both reasons accumulate into Refusal
+// Cases 5–7 can coexist; the reasons accumulate into Refusal
 // separated by "; ".
 //
 // destination follows the same sibling-default policy as `wrk new`:
@@ -201,8 +212,17 @@ func BuildRemovePlan(
 			)
 			return plan, nil
 		}
-		return RemovePlan{}, Newf(ErrNotLiveWorkspace,
-			"run 'wrk workspaces' to list live workspaces",
+		hint := "run 'wrk workspaces' to list live workspaces"
+		if _, statErr := os.Stat(target); statErr == nil {
+			// The directory is on disk but neither the VCS nor the
+			// registry knows it — the fingerprint of an interrupted
+			// removal (VCS metadata dropped, directory sweep never
+			// finished). Route the user at the leftover instead of a
+			// generic listing hint.
+			hint = "the directory exists on disk but is not a registered workspace — " +
+				"a previous removal may have been interrupted; remove it manually if it is a leftover"
+		}
+		return RemovePlan{}, Newf(ErrNotLiveWorkspace, hint,
 			"%s is not a live workspace of this repo", target)
 	}
 
@@ -238,6 +258,27 @@ func BuildRemovePlan(
 			fmt.Sprintf("workspace has independent local copies: %s",
 				strings.Join(paths, ", ")),
 		)
+	}
+
+	// 6c. Isolated variants. Removing the workspace orphans its
+	// isolation entries; the variants' content — by definition not
+	// reproducible by hooks — becomes unreferenced and the next
+	// `wrk gc` sweeps it. The user must know BEFORE the workspace
+	// vanishes.
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return RemovePlan{}, err
+	}
+	if entries := iso[target]; len(entries) > 0 {
+		paths := make([]string, 0, len(entries))
+		for resourcePath := range entries {
+			paths = append(paths, resourcePath)
+		}
+		sort.Strings(paths)
+		plan.IsolatedPaths = paths
+		reasons = append(reasons, fmt.Sprintf(
+			"workspace has isolated variant(s) whose content will become unreferenced and swept by `wrk gc`: %s",
+			strings.Join(paths, ", ")))
 	}
 
 	if len(reasons) > 0 {
@@ -297,8 +338,9 @@ func renderRemoveCommand(vcs repository.VCS, target string) string {
 
 // ExecuteRemove tears down plan.Target: runs the VCS remove command
 // (idempotent per backend contract) then clears any detach-registry
-// entry keyed by the target. Callers must have already applied the
-// safety gates from BuildRemovePlan / Confirm.
+// entry keyed by the target and the isolation entries snapshotted on
+// plan.IsolatedPaths. Callers must have already applied the safety
+// gates from BuildRemovePlan / Confirm.
 //
 // options.Progress, if non-nil, is fired for each regular file
 // removed by the wrk-side directory sweep. Only the jj backend
@@ -309,7 +351,7 @@ func ExecuteRemove(repo *repository.Repository, plan RemovePlan, force bool, opt
 	if err := repo.RemoveWorkspace(plan.Target, force, options.Progress); err != nil {
 		return err
 	}
-	return withRegistryLock(repo, func() error {
+	if err := withRegistryLock(repo, func() error {
 		reg, err := loadRegistry(repo)
 		if err != nil {
 			return err
@@ -319,5 +361,17 @@ func ExecuteRemove(repo *repository.Repository, plan RemovePlan, force bool, opt
 		}
 		delete(reg, plan.Target)
 		return saveRegistry(repo, reg)
-	})
+	}); err != nil {
+		return err
+	}
+	// Clear the isolation entries only AFTER the workspace removal
+	// succeeded — on failure the workspace still exists and the
+	// entries must survive. Clearing here keeps the registry honest
+	// immediately instead of waiting for the next gc's orphan sweep.
+	for _, resourcePath := range plan.IsolatedPaths {
+		if err := clearIsolation(repo, plan.Target, resourcePath); err != nil {
+			return err
+		}
+	}
+	return nil
 }

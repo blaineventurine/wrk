@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/gofrs/flock"
 
@@ -113,7 +114,7 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 	// long DeleteVariants slice would hold every lock until we
 	// return.
 	for _, v := range plan.DeleteVariants {
-		deleteVariant(v, options, recordErr)
+		deleteVariant(repo, v, options, recordErr)
 	}
 
 	// Step 6: Sweep bookkeeping cruft. Failures are surfaced but do
@@ -131,7 +132,7 @@ func ExecuteGC(repo *repository.Repository, plan GCPlan, options Options) error 
 // flock. See ExecuteGC step 3 for the ordering guarantees this
 // depends on. A held lock is a warning, not an error: a concurrent
 // wrk link is provisioning and we defer to it.
-func deleteVariant(v variant, options Options, recordErr func(error)) {
+func deleteVariant(repo *repository.Repository, v variant, options Options, recordErr func(error)) {
 	lockPath := v.StoragePath + ".wrk-lock"
 	l := flock.New(lockPath)
 
@@ -152,6 +153,24 @@ func deleteVariant(v variant, options Options, recordErr func(error)) {
 		_ = l.Unlock()
 		_ = os.Remove(lockPath)
 	}()
+
+	// Re-verify the pin AFTER acquiring the lock: the plan's pin walk
+	// ran before the Confirm prompt, and a `wrk link` completing in
+	// that window can legitimately re-pin this variant (branch
+	// switched back). Deleting a re-pinned variant would dangle a live
+	// workspace symlink and destroy any user mutations in the variant.
+	pinned, err := variantStillPinned(repo, v)
+	if err != nil {
+		// Conservative: verification failure keeps the variant.
+		recordErr(fmt.Errorf("pin re-check for %s: %w (variant kept)", v.StoragePath, err))
+		return
+	}
+	if pinned {
+		fmt.Fprintf(options.Stdout,
+			"skipping %s: re-pinned by a workspace since the plan was built\n",
+			v.StoragePath)
+		return
+	}
 
 	deletingPath := v.StoragePath + ".wrk-deleting"
 
@@ -179,6 +198,74 @@ func deleteVariant(v variant, options Options, recordErr func(error)) {
 	if err := executor.RemoveAllProgress(deletingPath, options.Progress); err != nil {
 		recordErr(err)
 	}
+}
+
+// variantStillPinned re-runs the pin check for a single variant
+// against the CURRENT filesystem state. Mirrors pinnedVariantsForRoots'
+// logic (Lstat → EvalSymlinks → isPathInside, plus the isolation-
+// registry pin) but scoped to one variant so the recheck is
+// O(workspaces), not O(workspaces × variants).
+//
+// Edge policy, matching pinnedVariantsForRoots:
+//   - unreadable isolation registry / Workspaces() failure → pinned
+//     (conservative: never delete on unverifiable state)
+//   - workspace root Stat fails with IsNotExist → not a pin (ghost;
+//     already pruned by ExecuteGC step 2)
+//   - workspace root Stat fails otherwise → pinned (unreachable —
+//     mirrors the unreachable-workspace semantics of the plan walk)
+//   - resource path is not a symlink / missing → not a pin from
+//     that workspace
+func variantStillPinned(repo *repository.Repository, v variant) (bool, error) {
+	// Fresh isolation check — one map lookup per workspace entry. An
+	// isolate cannot re-pin a fingerprint variant today, but the
+	// recheck is cheap and makes the invariant airtight.
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return true, err // conservative: unreadable registry keeps the variant
+	}
+	for _, entries := range iso {
+		for _, entry := range entries {
+			if entry.StoragePath == v.StoragePath {
+				return true, nil
+			}
+		}
+	}
+
+	workspaces, err := repo.Workspaces()
+	if err != nil {
+		return true, err // conservative
+	}
+	// Canonicalize BOTH sides before isPathInside — EvalSymlinks
+	// resolves /var → /private/var on macOS and the workspace-side
+	// resolution below goes through the same canonicalization.
+	canonVariant, err := filepath.EvalSymlinks(v.StoragePath)
+	if err != nil {
+		canonVariant = v.StoragePath
+	}
+	for _, ws := range workspaces {
+		if _, err := os.Stat(ws); err != nil {
+			if os.IsNotExist(err) {
+				continue // ghost — not a pin
+			}
+			return true, err // unreachable — conservative
+		}
+		wsResource := filepath.Join(ws, v.Path)
+		target, err := os.Readlink(wsResource)
+		if err != nil {
+			continue // not a symlink — not a pin from this workspace
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(wsResource), target)
+		}
+		resolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			resolved = filepath.Clean(target)
+		}
+		if isPathInside(canonVariant, resolved) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // sweepBookkeeping removes each path best-effort. Missing paths are

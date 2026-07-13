@@ -15,10 +15,12 @@ import (
 // read-only output of BuildForgetPlan: no mutation has occurred yet.
 // The CLI (Task 3.3) prints it and the executor (Task 3.2) applies it.
 //
-// Refusal is set when any detach-registry entry exists for this repo:
-// forgetting a repo whose managed resources have been materialized as
-// independent local copies would leave the workspace pointing at a
-// dead symlink target. `wrk forget --force` is the escape hatch.
+// Refusal is set when any detach-registry OR isolation-registry entry
+// exists for this repo: forgetting a repo whose managed resources have
+// been materialized as independent local copies would leave the
+// workspace pointing at a dead symlink target, and forgetting isolated
+// variants destroys per-workspace content that hooks cannot reproduce.
+// `wrk forget --force` is the escape hatch.
 type ForgetPlan struct {
 	RepositoryID    string              // <repo-id> segment
 	StoragePath     string              // absolute path to <storage>/<repo-id>
@@ -26,7 +28,8 @@ type ForgetPlan struct {
 	VariantCount    int                 // number of variant subdirs on disk
 	ResourceCount   int                 // number of distinct resource paths on disk
 	RegistryEntries map[string][]string // workspace root -> detached paths (snapshot)
-	Refusal         string              // set when any registry entry exists; --force overrides
+	IsolatedEntries []string            // "<workspaceRoot>: <resourcePath>" per isolation entry, sorted
+	Refusal         string              // set when any registry or isolation entry exists; --force overrides
 }
 
 // BuildForgetPlan produces a read-only snapshot of what `wrk forget`
@@ -50,10 +53,11 @@ type ForgetPlan struct {
 //     the on-disk subtree from StoragePath. Only os.Stat errors that are
 //     NOT IsNotExist surface — those signal a filesystem-level problem
 //     (permission denied, I/O error) worth aborting on.
-//  3. loadRegistry snapshots the detach registry. Any entry triggers
-//     Refusal with the list of workspace roots so the CLI can present
-//     a single-line summary. The map is copied so callers cannot
-//     mutate the on-disk view through the returned plan.
+//  3. loadRegistry snapshots the detach registry and loadIsolation the
+//     isolation registry. Any entry in either triggers Refusal (reasons
+//     joined by "; ") so the CLI can present a single-line summary. The
+//     detach map is copied so callers cannot mutate the on-disk view
+//     through the returned plan.
 func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, error) {
 	plan := ForgetPlan{
 		RepositoryID: repo.RepositoryID,
@@ -97,6 +101,8 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 		return ForgetPlan{}, err
 	}
 
+	var reasons []string
+
 	if len(reg) > 0 {
 		// Defensive copy: RegistryEntries is documented as a snapshot,
 		// and loadRegistry-then-return-directly would leak the live
@@ -110,11 +116,40 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 			roots = append(roots, root)
 		}
 		sort.Strings(roots)
-		plan.Refusal = fmt.Sprintf(
+		reasons = append(reasons, fmt.Sprintf(
 			"%d workspace(s) have detached files: %s. Run 'wrk relink --yes' in each workspace to reconnect, then re-run 'wrk forget'.",
 			len(roots),
 			strings.Join(roots, ", "),
-		)
+		))
+	}
+
+	// Isolated variants hold per-workspace content that hooks cannot
+	// reproduce — forgetting the repo destroys them permanently. The
+	// registry file is repo-scoped, so entries across ALL workspaces
+	// count. Refusal keys on registry content, not disk state: even
+	// if the variant directory is already gone, the entry says a
+	// workspace still expects it.
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return ForgetPlan{}, err
+	}
+	for wsRoot, entries := range iso {
+		for resourcePath := range entries {
+			plan.IsolatedEntries = append(plan.IsolatedEntries,
+				fmt.Sprintf("%s: %s", wsRoot, resourcePath))
+		}
+	}
+	if len(plan.IsolatedEntries) > 0 {
+		sort.Strings(plan.IsolatedEntries)
+		reasons = append(reasons, fmt.Sprintf(
+			"%d isolated variant(s) hold per-workspace content that hooks cannot reproduce: %s",
+			len(plan.IsolatedEntries),
+			strings.Join(plan.IsolatedEntries, ", "),
+		))
+	}
+
+	if len(reasons) > 0 {
+		plan.Refusal = strings.Join(reasons, "; ")
 	}
 
 	return plan, nil
@@ -135,9 +170,11 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 //  2. os.RemoveAll(<repo-id>.wrk-forgetting/). A crash mid-RemoveAll
 //     leaves the marker on disk; the next ExecuteForget's recovery
 //     branch below finishes the sweep.
-//  3. Under withRegistryLock, clear every detach-registry entry.
-//     Writing {} matches clearDetached's convention (loadRegistry
-//     round-trips {} back to an empty map).
+//  3. Under withRegistryLock, clear every detach-registry entry and
+//     every isolation-registry entry. Writing {} matches
+//     clearDetached's convention (loadRegistry round-trips {} back to
+//     an empty map); the isolation clear follows the same
+//     skip-save-when-empty policy.
 //
 // The idempotent-recovery branch that runs BEFORE step 1 finishes a
 // prior crash's RemoveAll. A prior crash leaves either:
@@ -192,15 +229,30 @@ func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options
 		if err != nil {
 			return err
 		}
-		if len(reg) == 0 {
-			// Nothing to clear — skip the save so we do not create an
-			// empty {} file where none existed. Matches
-			// pruneOrphanRegistryEntries' behaviour.
+		if len(reg) > 0 {
+			for k := range reg {
+				delete(reg, k)
+			}
+			if err := saveRegistry(repo, reg); err != nil {
+				return err
+			}
+		}
+
+		// Isolation registry: the storage sweep above just destroyed
+		// every isolated variant, so the entries are dead. Same
+		// skip-save-when-empty convention as the detach clear —
+		// recordIsolation shares this flock, so a concurrent isolate
+		// cannot interleave with the load-clear-save.
+		iso, err := loadIsolation(repo)
+		if err != nil {
+			return err
+		}
+		if len(iso) == 0 {
 			return nil
 		}
-		for k := range reg {
-			delete(reg, k)
+		for k := range iso {
+			delete(iso, k)
 		}
-		return saveRegistry(repo, reg)
+		return saveIsolation(repo, iso)
 	})
 }
