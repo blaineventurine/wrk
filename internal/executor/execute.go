@@ -283,12 +283,11 @@ func runInitialize(action planner.InitializeResource) error {
 			// Drop partial scratch so next Link re-runs. Force=true
 			// keeps `real` intact — swap-aside hasn't happened yet.
 			_ = os.RemoveAll(tmp)
-			return fmt.Errorf(
-				"hook command failed: %s (in %s): %w",
-				strings.Join(command.Args, " "),
-				command.Cwd,
-				err,
-			)
+			return &HookError{
+				Command: strings.Join(command.Args, " "),
+				Cwd:     command.Cwd,
+				Err:     err,
+			}
 		}
 	}
 
@@ -413,3 +412,37 @@ func fileKind(info os.FileInfo) string {
 		return "other"
 	}
 }
+
+// HookError is returned by runInitialize when a user-configured
+// initialize hook command exits non-zero. Callers use errors.As to
+// distinguish hook failures from other executor errors and route
+// accordingly — most notably the engine layer wraps HookError into
+// engine.ErrHookCommandFailed so `wrk <cmd> --json` surfaces a
+// stable code instead of the "unknown" fallback.
+//
+// Command is the resolved command line the executor tried to run
+// (space-joined for a compact display); Cwd is the working directory
+// the hook was configured with; Err is the underlying exec error the
+// child process produced (typically *exec.ExitError with the exit
+// status).
+type HookError struct {
+	Command string
+	Cwd     string
+	Err     error
+}
+
+// Error preserves the exact wording the previous fmt.Errorf produced
+// so tests, log output, and human stderr messages that grep for
+// "hook command failed" continue to work verbatim across the typed-
+// error transition.
+func (e *HookError) Error() string {
+	return fmt.Sprintf(
+		"hook command failed: %s (in %s): %v",
+		e.Command, e.Cwd, e.Err,
+	)
+}
+
+// Unwrap exposes the wrapped exec error so errors.Is / errors.As
+// traverse into whatever the child process's exit produced (e.g. an
+// *exec.ExitError).
+func (e *HookError) Unwrap() error { return e.Err }

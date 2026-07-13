@@ -45,6 +45,11 @@ var gcCmd = &cobra.Command{
 		"alone with a warning. --dry-run prints the plan and exits " +
 		"without touching anything.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// H1: reject a hang-prone shape before touching anything —
+		// see refuseJSONInteractive.
+		if err := refuseJSONInteractive(gcJSON, dryRun, gcYes, gcForce); err != nil {
+			return err
+		}
 		repo, err := currentRepository()
 		if err != nil {
 			if gcJSON {

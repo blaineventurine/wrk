@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/blaineventurine/wrk/internal/engine"
@@ -98,4 +99,32 @@ func emitJSONError(w io.Writer, err error) {
 	}
 	_, _ = w.Write(data)
 	_, _ = w.Write([]byte("\n"))
+}
+
+// refuseJSONInteractive short-circuits the --json execution branch of
+// destructive commands when the caller has NOT told wrk it's okay to
+// proceed. Under --json the CLI redirects stdout to a bytes.Buffer so
+// the plain-text stream never mixes with the machine-readable one;
+// but that same redirect means the Confirm prompt writes into the
+// buffer and then blocks on stdin waiting for a "yes" that will never
+// come. The result on a non-TTY invocation is a silent hang.
+//
+// Returns nil (no refusal) when --json is off, when --dry-run is on
+// (nothing gets written so the prompt would never trigger anyway), or
+// when --yes / --force has explicitly consented to the destructive
+// path. Otherwise emits a structured refusal to stderr and returns a
+// non-nil exitCode so cobra surfaces exit 2.
+//
+// Callers pass every relevant flag literally (jsonMode, dryRun, yes,
+// force). Commands without a --force flag (e.g. `wrk run` in some
+// versions) may pass false for the force slot; the check still works.
+func refuseJSONInteractive(jsonMode, dryRun, yes, force bool) error {
+	if !jsonMode || dryRun || yes || force {
+		return nil
+	}
+	err := engine.Newf(engine.ErrJSONRequiresYes,
+		"combine --json with --yes to execute, or --dry-run to preview",
+		"--json on a destructive command requires --yes to skip the confirmation prompt")
+	emitJSONError(os.Stderr, err)
+	return exitCode{code: 2}
 }

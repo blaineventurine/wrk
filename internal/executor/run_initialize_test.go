@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -411,5 +412,59 @@ func TestExecuteInitializeResourceForceReplacesExistingVariant(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(shared, "peer-content")); !os.IsNotExist(err) {
 		t.Errorf("peer-content survived Force: err=%v", err)
+	}
+}
+
+// TestRunInitializeHookFailureReturnsHookError pins the typed-error
+// contract runInitialize gives its callers: a failing hook surfaces
+// via *HookError so the engine layer's errors.As can route the
+// failure to engine.ErrHookCommandFailed under `wrk <cmd> --json`.
+// Untyped `fmt.Errorf` here would fall back to the "unknown" code and
+// break the machine-readable envelope.
+//
+// Contract pinned:
+//   - errors.As extracts *HookError.
+//   - Command carries the resolved command line (`false` in this case).
+//   - Cwd carries the configured Cwd verbatim so operators can locate
+//     the failing hook by directory.
+//   - Err is a non-nil child exit error and Unwrap surfaces it so
+//     errors.Is against exec-layer sentinels still works.
+//   - Error() preserves the human-facing prefix "hook command failed"
+//     so pre-typed log-scraping tests continue to pass.
+func TestRunInitializeHookFailureReturnsHookError(t *testing.T) {
+	root := t.TempDir()
+
+	action := initializeAction(root,
+		config.Command{Run: "false", Cwd: root},
+	)
+
+	err := runInitialize(action)
+	if err == nil {
+		t.Fatal("expected runInitialize to surface the failing hook, got nil")
+	}
+
+	var hookErr *HookError
+	if !errors.As(err, &hookErr) {
+		t.Fatalf("errors.As should recover *HookError, got %T: %v", err, err)
+	}
+	if hookErr.Command != "false" {
+		t.Errorf("Command = %q, want %q", hookErr.Command, "false")
+	}
+	if hookErr.Cwd != root {
+		t.Errorf("Cwd = %q, want %q", hookErr.Cwd, root)
+	}
+	if hookErr.Err == nil {
+		t.Error("Err is nil; want the wrapped child exit error")
+	}
+	// Unwrap keeps the child error reachable so callers that keep
+	// their own sentinel on the exec side stay reachable via
+	// errors.Is.
+	if got := errors.Unwrap(hookErr); got == nil {
+		t.Error("Unwrap returned nil; want the wrapped child exit error")
+	}
+	// Human-facing text: pre-typed message prefix preserved so
+	// grep-on-message log-scraping tests do not break.
+	if !strings.Contains(hookErr.Error(), "hook command failed") {
+		t.Errorf("Error() = %q, missing legacy prefix", hookErr.Error())
 	}
 }

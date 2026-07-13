@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/engine"
@@ -137,5 +139,88 @@ func TestEmitJSONErrorWithNilNoop(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("nil error wrote %q, want empty", buf.String())
+	}
+}
+
+// TestRefuseJSONInteractiveNilCases pins the "no refusal" contract:
+// every combination that either turns --json off, opts into a preview
+// (--dry-run), or explicitly consents (--yes / --force) MUST return
+// nil so the caller falls through to the real RunE body.
+//
+// Regression bait: an off-by-one on the guard would either silently
+// hang a `wrk gc --json --yes` invocation (blocking on Confirm) or
+// force every non-JSON caller through the refusal path.
+func TestRefuseJSONInteractiveNilCases(t *testing.T) {
+	cases := []struct {
+		name                        string
+		jsonMode, dryRun, yes, force bool
+	}{
+		{"json off", false, false, false, false},
+		{"json off with yes", false, false, true, false},
+		{"json off with force", false, false, false, true},
+		{"json + dry-run", true, true, false, false},
+		{"json + yes", true, false, true, false},
+		{"json + force", true, false, false, true},
+		{"json + dry-run + yes + force", true, true, true, true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			err := refuseJSONInteractive(c.jsonMode, c.dryRun, c.yes, c.force)
+			if err != nil {
+				t.Errorf("got %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestRefuseJSONInteractiveRefusalCarriesExitCodeAndJSONEnvelope
+// pins the primary refusal contract: `--json` alone (no consent flag,
+// not --dry-run) returns exitCode{2} AND writes a structured error
+// envelope to stderr whose code is `json_requires_yes`. Under a
+// stderr-capturing redirect, the payload must be parseable JSON so
+// downstream agent tooling sees the same shape production does.
+func TestRefuseJSONInteractiveRefusalCarriesExitCodeAndJSONEnvelope(t *testing.T) {
+	// Redirect os.Stderr to a pipe so we can capture the payload. The
+	// helper writes directly to os.Stderr to match every other JSON
+	// error emitter in the CLI package.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	got := refuseJSONInteractive(true, false, false, false)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+
+	if got == nil {
+		t.Fatal("got nil, want exitCode")
+	}
+	var ec exitCode
+	if !errors.As(got, &ec) {
+		t.Fatalf("errors.As should recover exitCode, got %T: %v", got, got)
+	}
+	if ec.code != 2 {
+		t.Errorf("exit code = %d, want 2", ec.code)
+	}
+
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	code, message, hint := decodeErrorEnvelope(t, buf)
+	if code != string(engine.ErrJSONRequiresYes) {
+		t.Errorf("code = %q, want %q", code, engine.ErrJSONRequiresYes)
+	}
+	if message == "" {
+		t.Error("message is empty")
+	}
+	if hint == "" {
+		t.Error("hint is empty")
 	}
 }

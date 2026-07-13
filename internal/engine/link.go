@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blaineventurine/wrk/internal/executor"
@@ -100,5 +101,24 @@ func executePlan(plan planner.Plan, options Options) error {
 		return nil
 	}
 
-	return executor.Execute(plan)
+	if err := executor.Execute(plan); err != nil {
+		// A failing initialize hook is the single most common
+		// destructive-command failure mode; route it to a stable
+		// code so `wrk <cmd> --json` surfaces `hook_command_failed`
+		// instead of the fallback `unknown`. errors.As traverses
+		// through fmt.Errorf wraps, so future callers that add
+		// context via %w on either side stay routable. The wrap
+		// preserves the executor's wording verbatim in Message
+		// (Wrapf collapses the mirror case in *Error.Error) and
+		// keeps HookError on the Unwrap chain so downstream
+		// errors.As on *HookError still works.
+		var hookErr *executor.HookError
+		if errors.As(err, &hookErr) {
+			return Wrapf(ErrHookCommandFailed,
+				"check the hook's stderr above for details",
+				err, "%s", err.Error())
+		}
+		return err
+	}
+	return nil
 }

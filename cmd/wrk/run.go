@@ -51,6 +51,11 @@ var runCmd = &cobra.Command{
 		"touching anything.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// H1: reject a hang-prone shape before touching anything —
+		// see refuseJSONInteractive.
+		if err := refuseJSONInteractive(runJSON, dryRun, runYes, runForce); err != nil {
+			return err
+		}
 		repo, err := currentRepository()
 		if err != nil {
 			if runJSON {

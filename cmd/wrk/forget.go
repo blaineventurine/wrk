@@ -39,6 +39,11 @@ var forgetCmd = &cobra.Command{
 		"--force to override. --dry-run prints the plan and exits without " +
 		"touching anything.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// H1: reject a hang-prone shape before touching anything —
+		// see refuseJSONInteractive.
+		if err := refuseJSONInteractive(forgetJSON, dryRun, forgetYes, forgetForce); err != nil {
+			return err
+		}
 		repo, err := currentRepository()
 		if err != nil {
 			if forgetJSON {

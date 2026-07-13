@@ -63,6 +63,11 @@ var relinkCmd = &cobra.Command{
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// H1: reject a hang-prone shape before touching anything —
+		// see refuseJSONInteractive.
+		if err := refuseJSONInteractive(relinkJSON, dryRun, relinkYes, relinkForce); err != nil {
+			return err
+		}
 		repo, err := currentRepository()
 		if err != nil {
 			if relinkJSON {

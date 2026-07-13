@@ -2,12 +2,14 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/config"
+	"github.com/blaineventurine/wrk/internal/executor"
 )
 
 // TestLinkHookFailureReturnsError pins the failure contract for
@@ -185,5 +187,60 @@ func TestLinkHookFailureRetryableAfterFix(t *testing.T) {
 	// on stale state.
 	if _, err := os.Stat(filepath.Join(sharedPath, ".fixed")); err != nil {
 		t.Errorf("fixed-hook marker missing: %v", err)
+	}
+}
+
+// TestLinkHookFailureSurfacesAsTypedHookCommandFailed pins the H3
+// wrap: when the executor's runInitialize returns *executor.HookError,
+// the engine's executePlan wraps it into a typed *Error carrying
+// ErrHookCommandFailed. That is what routes `wrk <cmd> --json` to
+// emit `code: "hook_command_failed"` instead of the fallback
+// `code: "unknown"`.
+//
+// The Unwrap chain must still reach *executor.HookError so downstream
+// callers can extract the Command / Cwd / Err trio if they need to.
+func TestLinkHookFailureSurfacesAsTypedHookCommandFailed(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: node\n"+
+			"    path: node_modules\n"+
+			"    hooks:\n"+
+			"      initialize:\n"+
+			"        - run: sh -c 'exit 7'\n",
+	)
+
+	err := Link(repo, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}})
+	if err == nil {
+		t.Fatal("Link succeeded despite failing initialize hook")
+	}
+
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("errors.As should recover *Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrHookCommandFailed {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrHookCommandFailed)
+	}
+
+	// The underlying HookError must still be reachable so callers
+	// can extract the Command / Cwd trio when they need to.
+	var hookErr *executor.HookError
+	if !errors.As(err, &hookErr) {
+		t.Fatalf("errors.As should recover *executor.HookError, got %T: %v", err, err)
+	}
+	if hookErr.Command == "" {
+		t.Error("HookError.Command is empty")
+	}
+
+	// Existing message-grep contract still passes: the wrapped
+	// executor text is preserved so hook_failure_test's older
+	// assertions on "hook command failed" and the exit status
+	// remain valid.
+	if msg := err.Error(); !strings.Contains(msg, "hook command failed") ||
+		!strings.Contains(msg, "exit status 7") {
+		t.Errorf("Error() = %q, missing legacy message parts", msg)
 	}
 }

@@ -84,6 +84,16 @@ const (
 	// EOF on stdin without --yes / --force).
 	ErrConfirmDeclined ErrorCode = "confirm_declined"
 
+	// ErrJSONRequiresYes: a destructive command refused to enter its
+	// --json execution branch because no consent flag was set. The
+	// human path would have opened a Confirm prompt; under --json the
+	// CLI redirects stdout to a bytes.Buffer so the prompt would write
+	// into that buffer and then block on stdin waiting for a "yes"
+	// that never comes. Fix: pass --yes (or --force) to skip the
+	// prompt, or --dry-run to preview the plan without touching
+	// anything.
+	ErrJSONRequiresYes ErrorCode = "json_requires_yes"
+
 	// ErrUnknown is the fallback code for any error that is not a
 	// typed *Error. emitJSONError attaches it when errors.As fails.
 	ErrUnknown ErrorCode = "unknown"
@@ -121,10 +131,18 @@ type Error struct {
 // lost when the value is stringified (typical of a `%v` in log or
 // stderr output).
 func (e *Error) Error() string {
-	if e.Wrapped != nil {
-		return e.Message + ": " + e.Wrapped.Error()
+	if e.Wrapped == nil {
+		return e.Message
 	}
-	return e.Message
+	wrapped := e.Wrapped.Error()
+	// When Message is empty or already restates the wrapped cause
+	// (typical of Wrapf callers passing "%s", err.Error()), skip the
+	// duplicate join — the wire form must never double the underlying
+	// text.
+	if e.Message == "" || e.Message == wrapped {
+		return wrapped
+	}
+	return e.Message + ": " + wrapped
 }
 
 // Unwrap exposes the wrapped cause so `errors.Is` and `errors.As`
@@ -145,5 +163,28 @@ func Newf(code ErrorCode, hint, format string, args ...any) *Error {
 		Code:    code,
 		Message: fmt.Sprintf(format, args...),
 		Hint:    hint,
+	}
+}
+
+// Wrapf constructs a typed *Error that both surfaces a formatted
+// message and preserves an underlying error in the Unwrap chain so
+// errors.Is and errors.As traverse into whatever caller-side sentinel
+// the wrapped error carries. Callers use this at engine-layer error
+// sites (e.g. wrapping config.Load failures) to route the machine-
+// readable envelope onto a stable code without losing the wrapped
+// cause.
+//
+// The format+args pair populates Message via fmt.Sprintf (same
+// contract as Newf); pass "%s", err.Error() to mirror the wrapped
+// error's text verbatim — Error() collapses that mirror case so the
+// human-visible form never doubles the underlying string.
+//
+// hint is optional — pass "" to omit.
+func Wrapf(code ErrorCode, hint string, err error, format string, args ...any) *Error {
+	return &Error{
+		Code:    code,
+		Message: fmt.Sprintf(format, args...),
+		Hint:    hint,
+		Wrapped: err,
 	}
 }

@@ -38,7 +38,9 @@ type variant struct {
 func scanVariants(repo *repository.Repository, options Options) ([]variant, error) {
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return nil, err
+		return nil, Wrapf(ErrConfigInvalid,
+			"check .wrk.yml for syntax errors or invalid resource paths",
+			err, "%s", err.Error())
 	}
 
 	var variants []variant
@@ -170,7 +172,9 @@ func pinnedVariantsForRoots(
 
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Wrapf(ErrConfigInvalid,
+			"check .wrk.yml for syntax errors or invalid resource paths",
+			err, "%s", err.Error())
 	}
 
 	pinned := make(map[string]bool)

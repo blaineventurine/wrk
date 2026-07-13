@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1778,4 +1779,251 @@ func TestDetachJSONExecutePopulatesResult(t *testing.T) {
 	if len(res.Warnings) != 1 || res.Warnings[0] != "warning: something" {
 		t.Errorf("warnings: %+v", res.Warnings)
 	}
+}
+
+// ============================================================
+// T1: envelope stability tests
+// ============================================================
+//
+// One test per JSON-emitting command locks the top-level key set of
+// its output. These tests are cheap to add (no VCS setup for the
+// pure-marshaler variants) and catch accidental additions or removals
+// of top-level fields — the wire contract downstream tooling
+// dispatches on. Renaming or dropping a key is a breaking API change
+// that MUST update the expected list here so a reviewer sees it.
+//
+// The destructive commands cover both branches: dry-run / refused
+// (result key ABSENT via omitempty) and attempted (result key
+// PRESENT). Both matter to consumers because they route on presence.
+
+// assertTopLevelKeys decodes data as a JSON object and pins the exact
+// set of top-level keys against want. Order-independent.
+func assertTopLevelKeys(t *testing.T, data []byte, want []string) {
+	t.Helper()
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	got := make([]string, 0, len(raw))
+	for k := range raw {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	sortedWant := make([]string, len(want))
+	copy(sortedWant, want)
+	sort.Strings(sortedWant)
+	if !reflect.DeepEqual(got, sortedWant) {
+		t.Errorf("top-level keys = %v, want %v", got, sortedWant)
+	}
+}
+
+// TestStatusJSONTopLevelKeys locks the top-level shape of
+// `wrk status --json`. Adding or dropping a key is a breaking
+// change to the machine-readable contract.
+func TestStatusJSONTopLevelKeys(t *testing.T) {
+	data, err := MarshalStatusJSON(&StatusReport{}, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "sources", "workspaces"})
+}
+
+// TestListJSONTopLevelKeys locks the top-level shape of
+// `wrk list --json`.
+func TestListJSONTopLevelKeys(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources: []\n",
+	})
+	data, err := MarshalListJSON(repo, Options{StorageRoot: storageIn(t, repo.Root)}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "root", "resources"})
+}
+
+// TestWorkspacesJSONTopLevelKeys locks the top-level shape of
+// `wrk workspaces --json`.
+func TestWorkspacesJSONTopLevelKeys(t *testing.T) {
+	data, err := MarshalWorkspacesJSON(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "workspaces"})
+}
+
+// TestFingerprintJSONTopLevelKeys locks the top-level shape of
+// `wrk fingerprint --json`.
+func TestFingerprintJSONTopLevelKeys(t *testing.T) {
+	data, err := MarshalFingerprintJSON(&FingerprintReport{
+		Resource: config.Resource{Name: "node", Path: "node_modules"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{
+		"schema", "kind", "resource", "current", "pinned", "changed",
+	})
+}
+
+// TestDoctorJSONTopLevelKeys locks the top-level shape of
+// `wrk doctor --json`.
+func TestDoctorJSONTopLevelKeys(t *testing.T) {
+	data, err := MarshalDoctorJSON(&DoctorReport{
+		Root:         "/repo",
+		RepositoryID: "local/abc",
+		VCS:          "git",
+		Checks:       DoctorChecks{ConfigValid: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{
+		"schema", "kind", "root", "repositoryId", "vcs", "checks", "issues",
+	})
+}
+
+// TestGCJSONTopLevelKeysDryRunOmitsResult pins the omitempty contract:
+// in --dry-run mode the `result` key is absent.
+func TestGCJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalGCJSON(GCJSONInput{Plan: GCPlan{}, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestGCJSONTopLevelKeysWithResult pins the executed branch: Attempted
+// flips the `result` key on.
+func TestGCJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalGCJSON(GCJSONInput{Plan: GCPlan{}, Attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestRemoveJSONTopLevelKeysDryRunOmitsResult pins the omitempty
+// contract on `wrk remove --json --dry-run`.
+func TestRemoveJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalRemoveJSON(RemoveJSONInput{
+		Plan: RemovePlan{Target: "/wk/f", Backend: "git"}, DryRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestRemoveJSONTopLevelKeysWithResult pins the executed branch.
+func TestRemoveJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalRemoveJSON(RemoveJSONInput{
+		Plan: RemovePlan{Target: "/wk/f", Backend: "git"}, Attempted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestForgetJSONTopLevelKeysDryRunOmitsResult pins the omitempty
+// contract on `wrk forget --json --dry-run`.
+func TestForgetJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalForgetJSON(ForgetJSONInput{
+		Plan: ForgetPlan{RepositoryID: "local/abc"}, DryRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestForgetJSONTopLevelKeysWithResult pins the executed branch.
+func TestForgetJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalForgetJSON(ForgetJSONInput{
+		Plan: ForgetPlan{RepositoryID: "local/abc"}, Attempted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestRunJSONTopLevelKeysDryRunOmitsResult pins the omitempty
+// contract on `wrk run --json --dry-run`.
+func TestRunJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalRunJSON(RunJSONInput{
+		Plan: RunPlan{Resource: config.Resource{Name: "n"}}, DryRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestRunJSONTopLevelKeysWithResult pins the executed branch.
+func TestRunJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalRunJSON(RunJSONInput{
+		Plan: RunPlan{Resource: config.Resource{Name: "n"}}, Attempted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestDetachJSONTopLevelKeysDryRunOmitsResult pins the omitempty
+// contract on `wrk detach --json --dry-run`.
+func TestDetachJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalDetachJSON(DetachJSONInput{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestDetachJSONTopLevelKeysWithResult pins the executed branch.
+func TestDetachJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalDetachJSON(DetachJSONInput{Attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestRelinkJSONTopLevelKeysDryRunOmitsResult pins the omitempty
+// contract on `wrk relink --json --dry-run`.
+func TestRelinkJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalRelinkJSON(RelinkJSONInput{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestRelinkJSONTopLevelKeysWithResult pins the executed branch.
+func TestRelinkJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalRelinkJSON(RelinkJSONInput{Attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
+}
+
+// TestRelinkIsolateJSONTopLevelKeysDryRunOmitsResult pins the
+// omitempty contract on `wrk relink --isolate --json --dry-run`.
+func TestRelinkIsolateJSONTopLevelKeysDryRunOmitsResult(t *testing.T) {
+	data, err := MarshalRelinkIsolateJSON(RelinkIsolateJSONInput{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan"})
+}
+
+// TestRelinkIsolateJSONTopLevelKeysWithResult pins the executed branch.
+func TestRelinkIsolateJSONTopLevelKeysWithResult(t *testing.T) {
+	data, err := MarshalRelinkIsolateJSON(RelinkIsolateJSONInput{Attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTopLevelKeys(t, data, []string{"schema", "kind", "dryRun", "plan", "result"})
 }

@@ -31,7 +31,9 @@ func buildPlan(
 ) (planner.Plan, error) {
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return planner.Plan{}, err
+		return planner.Plan{}, Wrapf(ErrConfigInvalid,
+			"check .wrk.yml for syntax errors or invalid resource paths",
+			err, "%s", err.Error())
 	}
 	printWarnings(cfg, options.Stdout)
 

@@ -39,6 +39,11 @@ var detachCmd = &cobra.Command{
 		"callers must pass --yes. --dry-run prints the plan and exits " +
 		"without touching anything.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// H1: reject a hang-prone shape before touching anything —
+		// see refuseJSONInteractive.
+		if err := refuseJSONInteractive(detachJSON, dryRun, detachYes, detachForce); err != nil {
+			return err
+		}
 		repo, err := currentRepository()
 		if err != nil {
 			if detachJSON {

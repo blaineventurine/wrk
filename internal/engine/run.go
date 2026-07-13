@@ -94,7 +94,9 @@ func BuildRunPlan(
 
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return RunPlan{}, err
+		return RunPlan{}, Wrapf(ErrConfigInvalid,
+			"check .wrk.yml for syntax errors or invalid resource paths",
+			err, "%s", err.Error())
 	}
 
 	var target *config.Resource

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,5 +202,53 @@ func TestLinkErrorsOnConfigWithDuplicateResourceNames(t *testing.T) {
 			t.Errorf("%s became a symlink despite duplicate-name reject; mode=%v",
 				rel, info.Mode())
 		}
+	}
+}
+
+// TestConfigLoadErrorSurfacesAsTypedErrorForJSON pins the H4 wrap:
+// engine functions that call config.Load MUST wrap the failure into
+// a typed *Error carrying ErrConfigInvalid so `wrk <cmd> --json`
+// emits `code: "config_invalid"` instead of the fallback
+// `code: "unknown"`. errors.As is the agent-facing entry point;
+// exercising it here proves the CLI's emitJSONError will route the
+// error correctly.
+//
+// Also asserts the wrapped cause remains reachable so downstream
+// callers keep their errors.Is checks against config-layer
+// sentinels working.
+func TestConfigLoadErrorSurfacesAsTypedErrorForJSON(t *testing.T) {
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: env\n"+
+			"    path: [\n",
+	)
+
+	// Any engine function that reads config would do — Status is a
+	// pure read that exercises the same code path we care about.
+	_, err := Status(repo, Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("Status on malformed YAML: got nil error, want failure")
+	}
+
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("errors.As should recover *Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrConfigInvalid {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrConfigInvalid)
+	}
+	// Human-facing message preservation: the wrapped cause is still
+	// visible so existing string-grepping tests (and stderr) work.
+	if !strings.Contains(err.Error(), "invalid configuration") {
+		t.Errorf("Error() = %q, missing wrapped cause", err.Error())
+	}
+	// Unwrap chain reachable: caller-side errors.Is on the config
+	// package's sentinels still finds them.
+	if wrkErr.Wrapped == nil {
+		t.Error("Wrapped is nil; Wrapf must preserve the underlying error")
 	}
 }
