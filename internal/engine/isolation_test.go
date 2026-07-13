@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"testing"
 )
@@ -124,42 +123,6 @@ func TestIsolationClearMissingIsNoop(t *testing.T) {
 	other := repo.Root + "-feature"
 	if err := clearIsolation(repo, other, "anything"); err != nil {
 		t.Fatalf("clearIsolation on unknown workspace: %v", err)
-	}
-}
-
-func TestIsolationTargetsAcrossWorkspaces(t *testing.T) {
-	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	if err := recordIsolation(repo, repo.Root, "node_modules", "/storage/A/iso-1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := recordIsolation(repo, repo.Root+"-feature", "vendor/bundle", "/storage/B/iso-2"); err != nil {
-		t.Fatal(err)
-	}
-
-	targets, err := isolationTargets(repo)
-	if err != nil {
-		t.Fatalf("isolationTargets: %v", err)
-	}
-	sort.Strings(targets)
-	want := []string{"/storage/A/iso-1", "/storage/B/iso-2"}
-	if len(targets) != len(want) {
-		t.Fatalf("targets = %v, want %v", targets, want)
-	}
-	for i := range want {
-		if targets[i] != want[i] {
-			t.Errorf("targets[%d] = %q, want %q", i, targets[i], want[i])
-		}
-	}
-}
-
-func TestIsolationTargetsEmptyOnClean(t *testing.T) {
-	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
-	targets, err := isolationTargets(repo)
-	if err != nil {
-		t.Fatalf("isolationTargets: %v", err)
-	}
-	if len(targets) != 0 {
-		t.Errorf("targets = %v, want empty", targets)
 	}
 }
 

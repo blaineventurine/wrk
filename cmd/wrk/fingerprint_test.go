@@ -117,3 +117,28 @@ func TestPrintFingerprintJSONEmitsSchemaEnvelope(t *testing.T) {
 		t.Errorf("envelope wrong: schema=%d kind=%q", out.Schema, out.Kind)
 	}
 }
+
+// TestPrintFingerprintIsolatedNote pins the isolated branch of the
+// human output: the pinned line must say the workspace holds a private
+// variant (fingerprint comparison does not apply) and must NOT steer
+// the user to `wrk link` — link skips isolated resources, so the hint
+// would be wrong advice.
+func TestPrintFingerprintIsolatedNote(t *testing.T) {
+	report := &engine.FingerprintReport{
+		Resource: config.Resource{Name: "node", Path: "node_modules"},
+		Current:  engine.FingerprintSnapshot{Fingerprint: "aaaa"},
+		Pinned:   engine.FingerprintSnapshot{StoragePath: "/storage/node_modules/isolated-abc123"},
+		Changed:  false,
+		Isolated: true,
+	}
+	var buf bytes.Buffer
+	if err := printFingerprint(&buf, report); err != nil {
+		t.Fatalf("printFingerprint: %v", err)
+	}
+	if !strings.Contains(buf.String(), "isolated") {
+		t.Errorf("expected isolated note:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "wrk link") {
+		t.Errorf("isolated resource must not steer to `wrk link` (link skips it):\n%s", buf.String())
+	}
+}

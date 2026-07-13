@@ -128,6 +128,15 @@ func BuildRunPlan(
 		return RunPlan{}, err
 	}
 
+	// Same for isolation: the plan below targets the FINGERPRINT
+	// variant path (location.For), but an isolated workspace's symlink
+	// points at isolated-<hex>/ — the hook would refresh a variant
+	// nobody looks at, a silent no-op from the user's perspective.
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return RunPlan{}, err
+	}
+
 	instances, err := resolver.Resolve(repo.Root, *target)
 	if err != nil {
 		return RunPlan{}, err
@@ -145,6 +154,11 @@ func BuildRunPlan(
 				"run 'wrk relink' to reconnect this workspace, then retry",
 				"resource %q is detached in this workspace; run `wrk relink` first",
 				resourceName)
+		}
+		if _, isolated := isIsolated(iso, repo.Root, instance.RelativePath); isolated {
+			return RunPlan{}, Newf(ErrResourceIsolated,
+				"isolated resources hold per-workspace content wrk run cannot refresh; run `wrk relink` to return to fingerprint variants first",
+				"resource %q is isolated in this workspace", resourceName)
 		}
 	}
 

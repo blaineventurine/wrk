@@ -396,3 +396,41 @@ func TestFingerprintOneUnfingerprintedCarriesTypedErrorCode(t *testing.T) {
 		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotFingerprinted)
 	}
 }
+
+// TestFingerprintOneReportsIsolated pins the isolation projection: an
+// isolated workspace's symlink targets isolated-<hex>/, whose basename
+// is a random suffix — NOT a fingerprint. Reporting it as one (and
+// Changed=true steering the user to `wrk link`, which SKIPS isolated
+// resources) would be actively misleading. Isolated=true, an empty
+// Pinned.Fingerprint, and Changed=false is the honest shape; the
+// storage path survives because it is still useful for inspection.
+func TestFingerprintOneReportsIsolated(t *testing.T) {
+	repo, _, _, opts := linkedFingerprintedRepo(t, `{"v":1}`)
+
+	if err := Detach(repo, opts); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	if err := RelinkIsolate(repo, []string{"node"}, opts); err != nil {
+		t.Fatalf("RelinkIsolate: %v", err)
+	}
+
+	report, err := FingerprintOne(repo, "node", opts)
+	if err != nil {
+		t.Fatalf("FingerprintOne: %v", err)
+	}
+
+	if !report.Isolated {
+		t.Error("Isolated = false, want true")
+	}
+	if report.Changed {
+		t.Error("Changed = true, want false — no action is available for an isolated resource")
+	}
+	if report.Pinned.Fingerprint != "" {
+		t.Errorf("Pinned.Fingerprint = %q, want empty — isolated dir names are not fingerprints",
+			report.Pinned.Fingerprint)
+	}
+	if !strings.Contains(report.Pinned.StoragePath, "isolated-") {
+		t.Errorf("Pinned.StoragePath = %q, want the isolated variant path",
+			report.Pinned.StoragePath)
+	}
+}

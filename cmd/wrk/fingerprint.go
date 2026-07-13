@@ -81,7 +81,9 @@ func printFingerprint(w io.Writer, r *engine.FingerprintReport) error {
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Current variant:  %s\n", displayFingerprint(r.Current.Fingerprint))
-	if r.Pinned.Fingerprint == "" {
+	if r.Isolated {
+		fmt.Fprintln(w, "Pinned variant:   (isolated — this workspace pins a private variant; fingerprint comparison does not apply)")
+	} else if r.Pinned.Fingerprint == "" {
 		fmt.Fprintln(w, "Pinned variant:   (workspace path is not a symlink into shared storage)")
 	} else if r.Changed {
 		fmt.Fprintf(w, "Pinned variant:   %s  (stale)\n", r.Pinned.Fingerprint)

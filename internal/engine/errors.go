@@ -37,6 +37,12 @@ const (
 	// resource (e.g. `wrk relink --isolate`) refuses cleanly.
 	ErrResourceNotDetached ErrorCode = "resource_not_detached"
 
+	// ErrResourceIsolated: the resource is isolated in this workspace —
+	// the symlink points at a per-workspace private variant, not a
+	// fingerprint variant. Commands that target fingerprint variants
+	// (e.g. `wrk run`) refuse rather than refresh the wrong path.
+	ErrResourceIsolated ErrorCode = "resource_isolated"
+
 	// ErrPrimaryWorkspace: the target is the primary workspace of this
 	// repository — the anchor everything else hangs off. `wrk remove`
 	// refuses it hard; --force cannot override.

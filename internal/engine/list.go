@@ -126,6 +126,9 @@ func countVariants(subtree string, fingerprinted bool) int {
 	count := 0
 	for _, e := range entries {
 		// Ignore wrk's bookkeeping files (locks, temp/backup dirs).
+		// Isolated variants (isolated-<hex>/) are deliberately COUNTED:
+		// they occupy storage like any fingerprint variant, and the
+		// human variant count is occupancy accounting.
 		name := e.Name()
 		if isBookkeeping(name) {
 			continue
@@ -148,6 +151,14 @@ func isBookkeeping(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isIsolatedVariantDir reports whether name is a per-workspace
+// isolated variant created by `wrk relink --isolate`. These are not
+// fingerprint variants: the suffix is random, not content-derived —
+// JSON consumers see them with fingerprint="" and isolated=true.
+func isIsolatedVariantDir(name string) bool {
+	return strings.HasPrefix(name, "isolated-")
 }
 
 // treeSize returns the total size in bytes of all regular files under root.

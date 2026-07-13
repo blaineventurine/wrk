@@ -465,3 +465,57 @@ func TestRunNoHookCarriesTypedErrorCode(t *testing.T) {
 		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNoHook)
 	}
 }
+
+// TestBuildRunPlanRefusesIsolatedResource pins the isolation guard:
+// for an isolated resource the plan would target the FINGERPRINT
+// variant path while the workspace symlink points at isolated-<hex>/,
+// so the hook would refresh a variant nobody looks at. BuildRunPlan
+// must refuse with the stable resource_isolated code instead of
+// planning a silent no-op.
+func TestBuildRunPlanRefusesIsolatedResource(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	// Fingerprinted (isolate needs the per-fingerprint storage layout)
+	// AND hooked (so BuildRunPlan gets past the no-hook refusal and
+	// reaches the isolation check).
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: node\n"+
+			"    path: node_modules\n"+
+			"    fingerprint:\n"+
+			"      - \"{root}/manifest.json\"\n"+
+			"    hooks:\n"+
+			"      initialize:\n"+
+			"        - run: sh -c 'mkdir -p {shared} && touch {shared}/marker'\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, "manifest.json"), `{"v":1}`)
+	writeFile(t, filepath.Join(repo.Root, "node_modules", "pkg", "marker"), "v1\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := Detach(repo, opts); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	if err := RelinkIsolate(repo, []string{"node"}, opts); err != nil {
+		t.Fatalf("RelinkIsolate: %v", err)
+	}
+
+	_, err := BuildRunPlan(repo, "node", Options{StorageRoot: storage})
+	if err == nil {
+		t.Fatal("BuildRunPlan on isolated resource: err = nil, want refusal")
+	}
+
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("errors.As should recover *Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceIsolated {
+		t.Errorf("Code = %q, want %q", wrkErr.Code, ErrResourceIsolated)
+	}
+	if !strings.Contains(err.Error(), "isolated") {
+		t.Errorf("message %q does not mention isolation", err.Error())
+	}
+}

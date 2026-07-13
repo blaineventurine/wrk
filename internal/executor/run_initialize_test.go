@@ -468,3 +468,68 @@ func TestRunInitializeHookFailureReturnsHookError(t *testing.T) {
 		t.Errorf("Error() = %q, missing legacy prefix", hookErr.Error())
 	}
 }
+
+// TestRunInitializeStripsGitEnvFromHooks pins the hook-env hygiene
+// contract: when wrk itself runs under a git hook (post-checkout,
+// post-merge), git exports GIT_DIR pointing at the HOOK's repository.
+// Letting that leak into a user's initialize hook would make any git
+// command inside the hook (git lfs pull, git submodule update) operate
+// on the wrong repo — so runInitialize must strip the ambient
+// git-directory overrides before launching hook commands.
+func TestRunInitializeStripsGitEnvFromHooks(t *testing.T) {
+	t.Setenv("GIT_DIR", "/nowhere/should/not/leak")
+	root := t.TempDir()
+	out := filepath.Join(root, "captured")
+
+	action := initializeAction(
+		root,
+		config.Command{
+			Run: `sh -c 'printf %s "${GIT_DIR:-UNSET}" > ` + out + `'`,
+			Cwd: root,
+		},
+	)
+
+	if err := runInitialize(action); err != nil {
+		t.Fatalf("runInitialize: %v", err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading captured env output: %v", err)
+	}
+	if string(got) != "UNSET" {
+		t.Errorf("GIT_DIR leaked into hook: %q, want UNSET", got)
+	}
+}
+
+// TestRunInitializeUserEnvStillWins pins the override precedence: a
+// hook whose config `env:` map explicitly sets GIT_DIR must see the
+// configured value — user intent beats ambient hygiene. The stripping
+// only applies to the inherited process env, never to the entries the
+// user asked for.
+func TestRunInitializeUserEnvStillWins(t *testing.T) {
+	t.Setenv("GIT_DIR", "/ambient/should/be/replaced")
+	root := t.TempDir()
+	out := filepath.Join(root, "captured")
+
+	action := initializeAction(
+		root,
+		config.Command{
+			Run: `sh -c 'printf %s "$GIT_DIR" > ` + out + `'`,
+			Cwd: root,
+			Env: map[string]string{"GIT_DIR": "/explicit/user/choice"},
+		},
+	)
+
+	if err := runInitialize(action); err != nil {
+		t.Fatalf("runInitialize: %v", err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading captured env output: %v", err)
+	}
+	if string(got) != "/explicit/user/choice" {
+		t.Errorf("user env: entry lost: %q, want /explicit/user/choice", got)
+	}
+}

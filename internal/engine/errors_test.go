@@ -101,6 +101,7 @@ func TestErrorCodeStringForms(t *testing.T) {
 		{ErrResourceNoHook, "resource_no_hook"},
 		{ErrResourceDetached, "resource_detached"},
 		{ErrResourceNotDetached, "resource_not_detached"},
+		{ErrResourceIsolated, "resource_isolated"},
 		{ErrPrimaryWorkspace, "primary_workspace"},
 		{ErrCurrentWorkspace, "current_workspace"},
 		{ErrNotLiveWorkspace, "not_live_workspace"},

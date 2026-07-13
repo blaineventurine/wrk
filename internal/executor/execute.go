@@ -231,6 +231,41 @@ func environment(env map[string]string) []string {
 	return result
 }
 
+// gitEnvOverrides lists environment variables that redirect git
+// operations away from cwd-based discovery. wrk may itself be invoked
+// from a git hook (post-checkout, post-merge), where git exports
+// GIT_DIR pointing at the HOOK's repository — letting that leak into a
+// user's initialize hook makes any git command inside the hook (git
+// lfs pull, git submodule update) operate on the wrong repo.
+//
+// KEEP IN SYNC with internal/repository/backend.go's gitEnvOverrides —
+// same list, same rationale, applied there to wrk's own VCS probes.
+var gitEnvOverrides = map[string]bool{
+	"GIT_DIR":                          true,
+	"GIT_WORK_TREE":                    true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+}
+
+// hookEnv returns os.Environ() minus git-directory overrides. The
+// hook's own env: map entries are appended by the caller AFTER this
+// slice, and exec.Cmd lets later duplicates win, so explicit user
+// configuration still overrides the stripping.
+func hookEnv() []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base))
+	for _, kv := range base {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && gitEnvOverrides[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // runInitialize provisions the shared resource atomically: the hook
 // writes to <shared>.wrk-provisioning, and only on success does the
 // scratch get renamed into place. A failed hook leaves nothing at the
@@ -272,7 +307,7 @@ func runInitialize(action planner.InitializeResource) error {
 
 		cmd := exec.Command(command.Args[0], command.Args[1:]...)
 		cmd.Dir = command.Cwd
-		cmd.Env = append(os.Environ(), environment(command.Env)...)
+		cmd.Env = append(hookEnv(), environment(command.Env)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		// Detach stdin: a hook that blocks reading it would wedge every

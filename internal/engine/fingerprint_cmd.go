@@ -32,8 +32,15 @@ type FingerprintReport struct {
 	// Changed reports whether Current.Fingerprint differs from
 	// Pinned.Fingerprint. An empty Pinned always differs from a
 	// populated Current, so a detached or never-linked workspace
-	// reports Changed=true.
+	// reports Changed=true. Always false when Isolated is true —
+	// fingerprint comparison does not apply to a private variant.
 	Changed bool
+	// Isolated reports that this workspace pins a per-workspace
+	// private variant (`wrk relink --isolate`). The symlink target's
+	// basename is a random isolated-<hex> suffix, not a fingerprint,
+	// so Pinned.Fingerprint is empty and Changed is false: `wrk link`
+	// skips isolated resources, so there is no action to take.
+	Isolated bool
 }
 
 // FingerprintSnapshot captures a single fingerprint identity: the hex
@@ -167,6 +174,20 @@ func FingerprintOne(
 	// Pinned side comes from the workspace symlink.
 	pinnedFP, pinnedPath := readPinnedVariant(instance.WorkspacePath)
 
+	// An isolated workspace's symlink targets isolated-<hex>/, whose
+	// basename is a random suffix — NOT a fingerprint. Reporting it as
+	// one (and Changed=true steering the user to `wrk link`, which
+	// skips isolated resources) would be actively misleading. Keep the
+	// storage path (still useful) and blank the pseudo-fingerprint.
+	iso, err := loadIsolation(repo)
+	if err != nil {
+		return nil, err
+	}
+	_, isolated := isIsolated(iso, repo.Root, instance.RelativePath)
+	if isolated {
+		pinnedFP = ""
+	}
+
 	return &FingerprintReport{
 		Resource: *target,
 		Current: FingerprintSnapshot{
@@ -178,7 +199,8 @@ func FingerprintOne(
 			Fingerprint: pinnedFP,
 			StoragePath: pinnedPath,
 		},
-		Changed: currentFP != pinnedFP,
+		Changed:  !isolated && currentFP != pinnedFP,
+		Isolated: isolated,
 	}, nil
 }
 

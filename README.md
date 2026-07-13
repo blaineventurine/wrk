@@ -676,7 +676,7 @@ Destructive commands additionally carry:
 
 - `dryRun` — boolean
 - `plan` — the full plan structure
-- `result` — populated after execute (`null` in `--dry-run` mode). Fields: `attempted: bool`, `bytesFreed: int64`, `warnings: string[]`.
+- `result` — populated after execute (`null` in `--dry-run` mode). Fields: `attempted: bool`, `bytesFreed: int64`, `warnings: string[]`. For `wrk remove` on the git backend, `bytesFreed` reports the plan's pre-computed size (git deletes inside its own process, so wrk cannot measure the sweep directly).
 
 Errors under `--json` are emitted on STDERR (STDOUT stays clean) as:
 
@@ -693,6 +693,7 @@ Stable error codes agents can switch on:
 | `resource_no_hook`          | Resource has no `initialize` hook |
 | `resource_detached`         | Resource is detached in this workspace |
 | `resource_not_detached`     | Resource is currently linked, not detached |
+| `resource_isolated`         | Resource is isolated in this workspace (`wrk run` cannot refresh a private variant) |
 | `primary_workspace`         | Target is the primary workspace (hard refusal) |
 | `current_workspace`         | Target is the workspace the caller is inside |
 | `not_live_workspace`        | Target is not a live workspace of this repo |

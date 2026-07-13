@@ -149,27 +149,6 @@ func clearIsolation(repo *repository.Repository, workspaceRoot, resourcePath str
 	})
 }
 
-// isolationTargets returns the absolute storage paths pinned by any
-// workspace of this repo. Consumed by `wrk gc` to keep isolated variants
-// alive across sweeps.
-//
-// The result may be empty; a nil error with an empty (or nil) slice means
-// "registry loaded, nothing pinned." Order is unspecified — callers that
-// need determinism (plan rendering, tests) MUST sort.
-func isolationTargets(repo *repository.Repository) ([]string, error) {
-	reg, err := loadIsolation(repo)
-	if err != nil {
-		return nil, err
-	}
-	var targets []string
-	for _, entries := range reg {
-		for _, entry := range entries {
-			targets = append(targets, entry.StoragePath)
-		}
-	}
-	return targets, nil
-}
-
 // isIsolated reports whether resourcePath is isolated in workspaceRoot.
 // Read-only accessor over an already-loaded registry so callers that
 // need to check many resources don't reload the file each time.

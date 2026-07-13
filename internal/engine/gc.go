@@ -87,6 +87,11 @@ func scanVariants(repo *repository.Repository, options Options) ([]variant, erro
 			}
 			for _, entry := range entries {
 				name := entry.Name()
+				// Isolated variants (isolated-<hex>/) are deliberately
+				// enumerated: excluding them here would hide them from
+				// the keep/delete accounting. Their protection is the
+				// isolation pin in pinnedVariantsForRoots, not
+				// invisibility.
 				if isBookkeeping(name) {
 					continue
 				}
@@ -240,12 +245,25 @@ func pinnedVariantsForRoots(
 	// of sync, the registry still tells us the variant is claimed.
 	// Losing an isolated variant to gc would silently destroy a
 	// workspace's private state — belt-and-suspenders here is cheap.
-	targets, err := isolationTargets(repo)
+	//
+	// EXCEPT entries whose workspace root is gone: those are swept by
+	// this same gc run (see OrphanedIsolationEntries), and pinning
+	// them would make the variant survive until a second run — "I
+	// gc'd, why is it still there?" Only a definite os.IsNotExist
+	// skips the pin; any other stat error (permission, transient)
+	// pins conservatively, matching the unreachable-workspace policy
+	// above.
+	reg, err := loadIsolation(repo)
 	if err != nil {
 		return pinned, unreachable, err
 	}
-	for _, t := range targets {
-		pinned[t] = true
+	for wsRoot, entries := range reg {
+		if _, statErr := os.Stat(wsRoot); os.IsNotExist(statErr) {
+			continue // orphaned — swept this run, don't pin
+		}
+		for _, entry := range entries {
+			pinned[entry.StoragePath] = true
+		}
 	}
 
 	return pinned, unreachable, nil

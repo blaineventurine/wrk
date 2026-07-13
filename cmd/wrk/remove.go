@@ -167,13 +167,28 @@ func runRemoveJSON(
 		Plan:       plan,
 		DryRun:     dryRun,
 		Attempted:  attempted,
-		BytesFreed: *bytesFreed,
+		BytesFreed: effectiveBytesFreed(plan, attempted, *bytesFreed),
 		Warnings:   scanWarnings(warningsBuf),
 	})
 	if err != nil {
 		return err
 	}
 	return writeJSON(os.Stdout, data)
+}
+
+// effectiveBytesFreed reconciles the Progress-measured byte total with
+// what actually happened. `git worktree remove` deletes inside git's
+// own process — wrk's Progress callback never fires, so the measured
+// total stays 0 even after a successful multi-gigabyte removal. On
+// success the tree is gone, so the plan's pre-computed TotalBytes IS
+// the freed amount (modulo TOCTOU drift, which --dry-run consumers
+// already tolerate). The jj backend sweeps file-by-file through
+// Progress and keeps its measured total.
+func effectiveBytesFreed(plan engine.RemovePlan, attempted bool, measured int64) int64 {
+	if attempted && plan.Backend == "git" && measured == 0 {
+		return plan.TotalBytes
+	}
+	return measured
 }
 
 // printRemovePlan renders the RemovePlan for the user. Kept small

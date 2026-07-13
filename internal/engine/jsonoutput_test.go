@@ -362,6 +362,7 @@ type listJSONVariantMirror struct {
 	StoragePath string   `json:"storagePath"`
 	SizeBytes   int64    `json:"sizeBytes"`
 	InUseBy     []string `json:"inUseBy"`
+	Isolated    bool     `json:"isolated"`
 }
 
 // TestListJSONMarshalsSchemaEnvelope pins the top-level envelope and
@@ -491,6 +492,68 @@ func TestListJSONEnumeratesVariants(t *testing.T) {
 		if v.InUseBy == nil {
 			t.Errorf("variant inUseBy must be an array, got nil for %q", v.Fingerprint)
 		}
+	}
+}
+
+// TestListJSONMarksIsolatedVariants pins the isolated labeling: an
+// isolated-<hex> directory in the resource subtree is a per-workspace
+// private variant, not a fingerprint variant. It must surface with
+// isolated=true and fingerprint="" — emitting the random suffix as a
+// "fingerprint" would be semantically wrong and break consumers that
+// join on digests. Fingerprint variants keep isolated=false.
+func TestListJSONMarksIsolatedVariants(t *testing.T) {
+	repo := newTestRepoWithHead(t, nil)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n"+
+			"  - name: node\n"+
+			"    path: node_modules\n"+
+			"    fingerprint:\n"+
+			"      - \"{root}/manifest.json\"\n",
+	)
+	writeFile(t, filepath.Join(repo.Root, "manifest.json"), `{"v":1}`)
+
+	base := filepath.Join(storage, repo.RepositoryID, "node_modules")
+	for _, dir := range []string{"aaaaaaaaaaaaaaaa", "isolated-abc123def456"} {
+		if err := os.MkdirAll(filepath.Join(base, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := MarshalListJSON(repo, Options{StorageRoot: storage}, false)
+	if err != nil {
+		t.Fatalf("MarshalListJSON: %v", err)
+	}
+	var got listJSONMirror
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, data)
+	}
+	if len(got.Resources) != 1 {
+		t.Fatalf("resources: got %d want 1", len(got.Resources))
+	}
+	variants := got.Resources[0].Variants
+	if len(variants) != 2 {
+		t.Fatalf("variants: got %d want 2\n%s", len(variants), data)
+	}
+
+	// Isolated sorts first (empty fingerprint < any digest).
+	iso, fp := variants[0], variants[1]
+	if !iso.Isolated {
+		t.Errorf("isolated variant: isolated = false, want true\n%s", data)
+	}
+	if iso.Fingerprint != "" {
+		t.Errorf("isolated variant: fingerprint = %q, want empty — the dir name is a random suffix",
+			iso.Fingerprint)
+	}
+	if !strings.Contains(iso.StoragePath, "isolated-abc123def456") {
+		t.Errorf("isolated variant storagePath = %q, want the isolated dir", iso.StoragePath)
+	}
+	if fp.Isolated {
+		t.Errorf("fingerprint variant: isolated = true, want false\n%s", data)
+	}
+	if fp.Fingerprint != "aaaaaaaaaaaaaaaa" {
+		t.Errorf("fingerprint variant: fingerprint = %q, want aaaaaaaaaaaaaaaa", fp.Fingerprint)
 	}
 }
 
@@ -1861,7 +1924,7 @@ func TestFingerprintJSONTopLevelKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTopLevelKeys(t, data, []string{
-		"schema", "kind", "resource", "current", "pinned", "changed",
+		"schema", "kind", "resource", "current", "pinned", "changed", "isolated",
 	})
 }
 

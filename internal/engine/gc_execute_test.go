@@ -419,3 +419,112 @@ func TestExecuteGCSweepsOrphanedIsolationEntries(t *testing.T) {
 			plan2.OrphanedIsolationEntries)
 	}
 }
+
+// TestGCSweepsOrphanedIsolatedVariantSameRun pins single-run
+// convergence: when an isolation entry's workspace root is gone, the
+// SAME gc run that clears the registry entry must also delete the
+// isolated variant it pointed at. Pinning orphaned entries would make
+// the variant survive until a second run — "I gc'd, why is it still
+// there?"
+func TestGCSweepsOrphanedIsolatedVariantSameRun(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+
+	// A real isolated variant dir in storage, claimed only by a
+	// workspace root that does not exist on disk.
+	isolated := filepath.Join(storage, repo.RepositoryID, "node_modules", "isolated-deadbeef1234")
+	if err := os.MkdirAll(isolated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(isolated, "marker"), "orphaned\n")
+	ghostRoot := filepath.Join(filepath.Dir(repo.Root), "ghost-worktree")
+	if err := recordIsolation(repo, ghostRoot, "node_modules", isolated); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	if len(plan.OrphanedIsolationEntries) != 1 {
+		t.Fatalf("OrphanedIsolationEntries = %+v, want the ghost entry",
+			plan.OrphanedIsolationEntries)
+	}
+	found := false
+	for _, v := range plan.DeleteVariants {
+		if v.StoragePath == isolated {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("orphaned isolated variant not slated for deletion; DeleteVariants = %+v",
+			plan.DeleteVariants)
+	}
+
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+
+	// Single-run convergence: variant gone from disk...
+	if _, err := os.Stat(isolated); !os.IsNotExist(err) {
+		t.Errorf("orphaned isolated variant survived the same gc run: %s", isolated)
+	}
+	// ...and the registry entry cleared.
+	reg, err := loadIsolation(repo)
+	if err != nil {
+		t.Fatalf("loadIsolation: %v", err)
+	}
+	if _, ok := reg[ghostRoot]; ok {
+		t.Errorf("ghost registry entry survived ExecuteGC: %+v", reg[ghostRoot])
+	}
+}
+
+// TestGCKeepsIsolatedVariantForLiveWorkspace is the counter-case: an
+// isolation entry whose workspace root EXISTS keeps its pin, even when
+// no workspace symlink currently resolves into the variant (the
+// registry is the authoritative claim). The variant must survive gc.
+func TestGCKeepsIsolatedVariantForLiveWorkspace(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{
+		".wrk.yml": "resources:\n" +
+			"  - name: node\n" +
+			"    path: node_modules\n" +
+			"    fingerprint:\n" +
+			"      - \"{root}/package.json\"\n",
+		"package.json": `{"v":1}`,
+	})
+	storage := storageIn(t, repo.Root)
+
+	isolated := filepath.Join(storage, repo.RepositoryID, "node_modules", "isolated-cafe0123abcd")
+	if err := os.MkdirAll(isolated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(isolated, "marker"), "claimed\n")
+	// Live claim: repo.Root exists on disk.
+	if err := recordIsolation(repo, repo.Root, "node_modules", isolated); err != nil {
+		t.Fatalf("recordIsolation: %v", err)
+	}
+
+	plan, err := BuildGCPlan(repo, Options{StorageRoot: storage})
+	if err != nil {
+		t.Fatalf("BuildGCPlan: %v", err)
+	}
+	for _, v := range plan.DeleteVariants {
+		if v.StoragePath == isolated {
+			t.Fatalf("live isolated variant slated for deletion: %+v", plan.DeleteVariants)
+		}
+	}
+
+	if err := ExecuteGC(repo, plan, Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("ExecuteGC: %v", err)
+	}
+	if _, err := os.Stat(isolated); err != nil {
+		t.Errorf("live isolated variant did not survive gc: %v", err)
+	}
+}

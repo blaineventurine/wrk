@@ -205,6 +205,12 @@ type variantJSON struct {
 	StoragePath string   `json:"storagePath"`
 	SizeBytes   int64    `json:"sizeBytes,omitempty"`
 	InUseBy     []string `json:"inUseBy"`
+	// Isolated marks per-workspace private variants created by
+	// `wrk relink --isolate`. Their directory name is a random
+	// isolated-<hex> suffix, not a fingerprint, so Fingerprint is
+	// empty for them. Always emitted — consumers switch on the bool
+	// rather than sniffing the directory-name convention.
+	Isolated bool `json:"isolated"`
 }
 
 // resourceListingJSON is the JSON projection of a single configured
@@ -351,10 +357,13 @@ func enumerateVariants(subtree string, fingerprinted, withSize bool) ([]variantJ
 			continue
 		}
 		variantPath := filepath.Join(subtree, name)
-		v := variantJSON{
-			Fingerprint: name,
-			StoragePath: variantPath,
-			InUseBy:     []string{},
+		v := variantJSON{StoragePath: variantPath, InUseBy: []string{}}
+		if isIsolatedVariantDir(name) {
+			// Fingerprint stays "" — the dir name is a random
+			// suffix, not a content-derived digest.
+			v.Isolated = true
+		} else {
+			v.Fingerprint = name
 		}
 		if withSize {
 			size, err := treeSize(variantPath)
@@ -365,7 +374,14 @@ func enumerateVariants(subtree string, fingerprinted, withSize bool) ([]variantJ
 		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Fingerprint < out[j].Fingerprint })
+	// Isolated variants all share Fingerprint == "", so break the tie
+	// on StoragePath to keep output deterministic across runs.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Fingerprint != out[j].Fingerprint {
+			return out[i].Fingerprint < out[j].Fingerprint
+		}
+		return out[i].StoragePath < out[j].StoragePath
+	})
 	return out, nil
 }
 
@@ -452,6 +468,11 @@ type fingerprintJSON struct {
 	Current  fingerprintSnapshotJSON `json:"current"`
 	Pinned   fingerprintSnapshotJSON `json:"pinned"`
 	Changed  bool                    `json:"changed"`
+	// Isolated is never `omitempty` either: consumers must be able to
+	// distinguish "not isolated" from "field absent" without a schema
+	// bump. When true, Pinned carries a storage path but no
+	// fingerprint — the private variant's name is not a digest.
+	Isolated bool `json:"isolated"`
 }
 
 // MarshalFingerprintJSON renders a FingerprintReport as pretty-printed
@@ -481,7 +502,8 @@ func MarshalFingerprintJSON(report *FingerprintReport) ([]byte, error) {
 			Fingerprint: report.Pinned.Fingerprint,
 			StoragePath: report.Pinned.StoragePath,
 		},
-		Changed: report.Changed,
+		Changed:  report.Changed,
+		Isolated: report.Isolated,
 	}
 	return json.MarshalIndent(out, "", "  ")
 }
