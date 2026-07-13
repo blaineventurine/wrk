@@ -105,15 +105,16 @@ func BuildRunPlan(
 		}
 	}
 	if target == nil {
-		return RunPlan{}, fmt.Errorf("resource %q not configured", resourceName)
+		return RunPlan{}, Newf(ErrResourceNotConfigured,
+			"run 'wrk list' to see configured resources",
+			"resource %q not configured", resourceName)
 	}
 
 	hookCommands, ok := target.Hooks["initialize"]
 	if !ok || len(hookCommands) == 0 {
-		return RunPlan{}, fmt.Errorf(
-			"resource %q has no initialize hook to run",
-			resourceName,
-		)
+		return RunPlan{}, Newf(ErrResourceNoHook,
+			"add an initialize hook to this resource in .wrk.yml",
+			"resource %q has no initialize hook to run", resourceName)
 	}
 
 	// Refuse if this workspace has detached the resource: swapping the
@@ -138,10 +139,10 @@ func BuildRunPlan(
 
 	for _, instance := range instances {
 		if isDetached(reg, repo.Root, instance.RelativePath) {
-			return RunPlan{}, fmt.Errorf(
+			return RunPlan{}, Newf(ErrResourceDetached,
+				"run 'wrk relink' to reconnect this workspace, then retry",
 				"resource %q is detached in this workspace; run `wrk relink` first",
-				resourceName,
-			)
+				resourceName)
 		}
 	}
 

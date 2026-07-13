@@ -10,7 +10,10 @@ import (
 	"github.com/blaineventurine/wrk/internal/engine"
 )
 
-var doctorJSONFlag bool
+var (
+	doctorJSONFlag bool
+	doctorExitCode bool
+)
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
@@ -19,8 +22,9 @@ var doctorCmd = &cobra.Command{
 bookkeeping checks into one summary. Read-only — nothing is mutated.
 
 Exit codes are distinguishable so CI scripts can dispatch on them:
-  0  everything looks healthy
-  1  issues found (details in output — typically fixable with 'wrk gc')
+  0  everything looks healthy (or issues found without --exit-code)
+  1  issues found AND --exit-code was passed (details in output —
+     typically fixable with 'wrk gc')
   2  wrk itself couldn't run (bad flags, no repository, ...)
 `,
 	Args: cobra.NoArgs,
@@ -45,7 +49,7 @@ Exit codes are distinguishable so CI scripts can dispatch on them:
 				return err
 			}
 		}
-		if len(report.Issues) > 0 {
+		if doctorExitCode && len(report.Issues) > 0 {
 			// The summary above already tells the user what's wrong;
 			// signalling via a sentinel keeps stderr silent while still
 			// letting Execute distinguish this from a real error (exit 2).
@@ -59,6 +63,9 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().BoolVar(&doctorJSONFlag, "json", false,
 		"Emit machine-readable JSON instead of the human-readable summary")
+	doctorCmd.Flags().BoolVar(&doctorExitCode, "exit-code", false,
+		"Exit 1 when issues were found "+
+			"(0 when the report is clean; real errors still exit 2)")
 }
 
 // printDoctorJSON writes the engine's machine-readable doctor JSON to

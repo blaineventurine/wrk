@@ -145,7 +145,8 @@ func BuildRelinkIsolatePlan(
 	for _, name := range resourceNames {
 		r := findResourceByName(cfg.Resources, name)
 		if r == nil {
-			return IsolatePlan{}, fmt.Errorf(
+			return IsolatePlan{}, Newf(ErrResourceNotConfigured,
+				"run 'wrk list' to see configured resources",
 				"resource %q not configured", name)
 		}
 		detachedHere := false
@@ -156,7 +157,8 @@ func BuildRelinkIsolatePlan(
 			}
 		}
 		if !detachedHere {
-			return IsolatePlan{}, fmt.Errorf(
+			return IsolatePlan{}, Newf(ErrResourceNotDetached,
+				"run 'wrk detach' first, then retry --isolate",
 				"resource %q is not detached in this workspace; "+
 					"only detached resources can be isolated", name)
 		}

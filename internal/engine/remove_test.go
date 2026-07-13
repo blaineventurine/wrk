@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -503,5 +504,48 @@ func TestExecuteRemoveIdempotentAfterExternalRemoval(t *testing.T) {
 	after, _ := loadRegistry(repo)
 	if _, ok := after[feature]; ok {
 		t.Errorf("registry entry survived idempotent execute: %v", after)
+	}
+}
+
+// TestBuildRemovePlanPrimaryWorkspaceCarriesTypedErrorCode pins that
+// the "refusing to remove the primary workspace" refusal is a typed
+// *Error whose Code is ErrPrimaryWorkspace — CLI --json output routes
+// on this to give agents a durable knob for recovery logic.
+func TestBuildRemovePlanPrimaryWorkspaceCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+
+	// The primary is repo.Root itself.
+	_, err := BuildRemovePlan(repo, repo.Root, Options{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "primary workspace") {
+		t.Errorf("message = %q, want to contain 'primary workspace'", err.Error())
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrPrimaryWorkspace {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrPrimaryWorkspace)
+	}
+}
+
+// TestBuildRemovePlanUnknownDestinationCarriesTypedErrorCode pins the
+// ErrNotLiveWorkspace code for a path that is neither in Workspaces()
+// nor a ghost.
+func TestBuildRemovePlanUnknownDestinationCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+
+	_, err := BuildRemovePlan(repo, "/nonexistent/never-a-worktree-xyz-123", Options{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrNotLiveWorkspace {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrNotLiveWorkspace)
 	}
 }

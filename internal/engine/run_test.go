@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,5 +399,69 @@ func TestExecuteRunPlanReplacesVariantContents(t *testing.T) {
 	// callers have already printed via printRunPlan.
 	if out.Len() != 0 {
 		t.Errorf("ExecuteRunPlan wrote to stdout (double-print risk):\n%s", out.String())
+	}
+}
+
+// TestRunUnknownResourceCarriesTypedErrorCode pins the typed-error
+// contract for the "not configured" refusal: the human-readable text
+// stays the same, AND errors.As recovers a *Error whose Code is the
+// stable ErrResourceNotConfigured.
+func TestRunUnknownResourceCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n",
+	)
+
+	err := Run(repo, "missing", Options{
+		StorageRoot: storage,
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("message = %q, want to contain 'not configured'", err.Error())
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error via errors.As, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceNotConfigured {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotConfigured)
+	}
+	if wrkErr.Hint == "" {
+		t.Errorf("hint = %q, want non-empty", wrkErr.Hint)
+	}
+}
+
+// TestRunNoHookCarriesTypedErrorCode pins ErrResourceNoHook: a
+// resource with no initialize hook returns a typed error the CLI
+// can route on under --json.
+func TestRunNoHookCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n",
+	)
+
+	err := Run(repo, "env", Options{
+		StorageRoot: storage,
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no initialize hook") {
+		t.Errorf("message = %q, want to contain 'no initialize hook'", err.Error())
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error via errors.As, got %T", err)
+	}
+	if wrkErr.Code != ErrResourceNoHook {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNoHook)
 	}
 }

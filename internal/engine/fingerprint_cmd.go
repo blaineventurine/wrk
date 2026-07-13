@@ -107,10 +107,14 @@ func FingerprintOne(
 		}
 	}
 	if target == nil {
-		return nil, fmt.Errorf("resource %q not configured", resourceName)
+		return nil, Newf(ErrResourceNotConfigured,
+			"run 'wrk list' to see configured resources",
+			"resource %q not configured", resourceName)
 	}
 	if len(target.Fingerprint) == 0 {
-		return nil, fmt.Errorf("resource %q is not fingerprinted", resourceName)
+		return nil, Newf(ErrResourceNotFingerprinted,
+			"add a fingerprint block to this resource in .wrk.yml",
+			"resource %q is not fingerprinted", resourceName)
 	}
 
 	instances, err := resolver.Resolve(repo.Root, *target)

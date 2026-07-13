@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -352,4 +353,46 @@ func keysOf(m map[string]FingerprintInput) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestFingerprintOneUnknownResourceCarriesTypedErrorCode pins that
+// FingerprintOne's "not configured" refusal is a typed *Error with
+// stable code — CLI --json output routes on this.
+func TestFingerprintOneUnknownResourceCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n")
+
+	_, err := FingerprintOne(repo, "nonexistent", Options{StorageRoot: storageIn(t, repo.Root)})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceNotConfigured {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotConfigured)
+	}
+}
+
+// TestFingerprintOneUnfingerprintedCarriesTypedErrorCode pins the
+// ErrResourceNotFingerprinted code for the "no fingerprint block"
+// refusal.
+func TestFingerprintOneUnfingerprintedCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename,
+		"resources:\n  - name: env\n    path: .env\n")
+
+	_, err := FingerprintOne(repo, "env", Options{StorageRoot: storageIn(t, repo.Root)})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceNotFingerprinted {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotFingerprinted)
+	}
 }

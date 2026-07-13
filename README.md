@@ -621,13 +621,15 @@ Run `wrk link` to re-point this workspace at the current variant.
 #### `wrk doctor` — repository health snapshot
 
 Composes config validation, ghost-workspace detection, and
-stale-bookkeeping detection into one summary. Read-only. Exits **1**
-when any issue is found so CI scripts can gate on it — **2** is
-reserved for wrk itself failing (bad flags, no repository, ...).
+stale-bookkeeping detection into one summary. Read-only. Exits **0**
+by default, whether or not the report is clean; pass `--exit-code`
+to have it exit **1** when issues are found (**2** stays reserved for
+wrk itself failing).
 
 ```bash
-wrk doctor         # human-readable
-wrk doctor --json  # machine-readable
+wrk doctor              # human-readable, always exits 0 unless wrk itself broke
+wrk doctor --json       # machine-readable
+wrk doctor --exit-code  # exit 1 when issues found; use in CI
 ```
 
 Example output:
@@ -641,6 +643,70 @@ Repository: /Users/me/repos/monolith (git)
 
 Overall: healthy
 ```
+
+### Exit codes
+
+wrk uses a small, stable exit-code taxonomy so scripts and agents can
+route on outcomes reliably:
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success |
+| 1    | Soft signal: `--exit-code` flag detected a non-empty state (e.g. `wrk status --exit-code` on an unhealthy workspace, `wrk gc --exit-code` when there is cleanup to do, `wrk doctor --exit-code` when issues were found) |
+| 2    | wrk itself couldn't complete — bad flags, missing repository, config error, hook failure, permission denied, etc. |
+
+Only `wrk status`, `wrk gc`, and `wrk doctor` currently support
+`--exit-code`. Other commands use exit 0 for success and 2 for
+failure.
+
+Agents pairing with `wrk` in CI or scripting contexts should treat 1
+as an actionable soft signal (something to investigate but not a wrk
+failure) and 2 as a hard failure to alert on.
+
+### Machine-readable output (`--json`)
+
+Every read-only introspection command and every destructive command
+supports `--json`. Output is a single JSON object with:
+
+- `schema` — integer version (currently `1`)
+- `kind` — command name (`status`, `list`, `fingerprint`, `doctor`, `workspaces`, `gc`, `remove`, `forget`, `run`, `relink`, `relink-isolate`, `detach`)
+- Command-specific top-level fields
+
+Destructive commands additionally carry:
+
+- `dryRun` — boolean
+- `plan` — the full plan structure
+- `result` — populated after execute (`null` in `--dry-run` mode). Fields: `attempted: bool`, `bytesFreed: int64`, `warnings: string[]`.
+
+Errors under `--json` are emitted on STDERR (STDOUT stays clean) as:
+
+```json
+{"error": {"code": "resource_not_configured", "message": "...", "hint": "..."}}
+```
+
+Stable error codes agents can switch on:
+
+| Code | Meaning |
+|------|---------|
+| `resource_not_configured`   | Named resource is not in `.wrk.yml` |
+| `resource_not_fingerprinted` | Resource exists but has no `fingerprint` block |
+| `resource_no_hook`          | Resource has no `initialize` hook |
+| `resource_detached`         | Resource is detached in this workspace |
+| `resource_not_detached`     | Resource is currently linked, not detached |
+| `primary_workspace`         | Target is the primary workspace (hard refusal) |
+| `current_workspace`         | Target is the workspace the caller is inside |
+| `not_live_workspace`        | Target is not a live workspace of this repo |
+| `uncommitted_changes`       | Workspace has uncommitted VCS changes (soft refusal) |
+| `detached_files`            | Workspace has detached-file registry entries (soft refusal) |
+| `plan_conflict`             | Plan actions collide |
+| `hook_command_failed`       | A hook command exited non-zero |
+| `config_invalid`            | `.wrk.yml` failed to load or validate |
+| `not_a_repository`          | Current directory is not inside a supported VCS repo |
+| `confirm_declined`          | Interactive prompt got "no" (or EOF without `--yes`/`--force`) |
+| `unknown`                   | Fallback for any untyped error |
+
+Combined `--json --yes` (with `--force` where required) is the agent
+contract: emit machine-readable output, skip interactive prompts.
 
 ### Global options
 

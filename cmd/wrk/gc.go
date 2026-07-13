@@ -21,9 +21,10 @@ import (
 // synonym for --yes: it also skips the prompt, and it forwards the
 // override intent to Confirm for symmetry with `wrk relink`.
 var (
-	gcYes   bool
-	gcForce bool
-	gcJSON  bool
+	gcYes      bool
+	gcForce    bool
+	gcJSON     bool
+	gcExitCode bool
 )
 
 var gcCmd = &cobra.Command{
@@ -46,6 +47,10 @@ var gcCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if gcJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
@@ -69,11 +74,19 @@ var gcCmd = &cobra.Command{
 
 		plan, err := engine.BuildGCPlan(repo, options)
 		if err != nil {
+			if gcJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
 		if gcJSON {
-			return runGCJSON(plan, repo, options, &warningsBuf, &bytesFreed)
+			if err := runGCJSON(plan, repo, options, &warningsBuf, &bytesFreed); err != nil {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
+			return gcExitCodeSignal(plan)
 		}
 
 		engine.PrintGCPlan(os.Stdout, plan)
@@ -82,6 +95,8 @@ var gcCmd = &cobra.Command{
 		// non-interactive callers (CI, pre-commit) can safely invoke
 		// `wrk gc` as a probe without needing --yes.
 		if plan.HasNothing() {
+			// An empty plan is exit 0 even under --exit-code: the flag
+			// signals "there was work to do", not "the command ran".
 			return nil
 		}
 
@@ -96,14 +111,17 @@ var gcCmd = &cobra.Command{
 			return err
 		}
 		if dec != Proceed {
-			return nil
+			return gcExitCodeSignal(plan)
 		}
 
 		bar := progress.New(os.Stdout, plan.TotalBytesFreed, "Reclaiming")
 		defer bar.Finish()
 		options.Progress = bar.Add
 
-		return engine.ExecuteGC(repo, plan, options)
+		if err := engine.ExecuteGC(repo, plan, options); err != nil {
+			return err
+		}
+		return gcExitCodeSignal(plan)
 	},
 }
 
@@ -163,4 +181,19 @@ func init() {
 	gcCmd.Flags().BoolVar(&gcJSON, "json", false,
 		"Emit machine-readable JSON (plan+result envelope) "+
 			"instead of the human plan and progress output")
+	gcCmd.Flags().BoolVar(&gcExitCode, "exit-code", false,
+		"Exit 1 when the plan had cleanup to perform "+
+			"(0 when nothing to do; real errors still exit 2)")
+}
+
+// gcExitCodeSignal maps a completed gc invocation to the caller's
+// exit-code contract: silent exit 1 when --exit-code is set AND the
+// plan actually had work in it, exit 0 otherwise. The signal fires
+// regardless of whether the executor ran the work — the flag asks
+// "was there cleanup to do?", not "did you sweep it?".
+func gcExitCodeSignal(plan engine.GCPlan) error {
+	if gcExitCode && !plan.HasNothing() {
+		return exitCode{code: 1}
+	}
+	return nil
 }

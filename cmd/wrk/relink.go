@@ -65,6 +65,10 @@ var relinkCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if relinkJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
@@ -88,12 +92,20 @@ var relinkCmd = &cobra.Command{
 
 		if relinkIsolate {
 			if relinkJSON {
-				return runRelinkIsolateJSON(repo, args, options, &warningsBuf, &bytesFreed)
+				if err := runRelinkIsolateJSON(repo, args, options, &warningsBuf, &bytesFreed); err != nil {
+					emitJSONError(os.Stderr, err)
+					return exitCode{code: 2}
+				}
+				return nil
 			}
 			return runRelinkIsolate(repo, args, options)
 		}
 		if relinkJSON {
-			return runRelinkPlainJSON(repo, options, &warningsBuf, &bytesFreed)
+			if err := runRelinkPlainJSON(repo, options, &warningsBuf, &bytesFreed); err != nil {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
+			return nil
 		}
 		return runRelinkPlain(repo, options)
 	},

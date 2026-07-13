@@ -48,6 +48,10 @@ var removeCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if removeJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
@@ -71,11 +75,19 @@ var removeCmd = &cobra.Command{
 
 		plan, err := engine.BuildRemovePlan(repo, args[0], options)
 		if err != nil {
+			if removeJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
 		if removeJSON {
-			return runRemoveJSON(plan, repo, options, &warningsBuf, &bytesFreed)
+			if err := runRemoveJSON(plan, repo, options, &warningsBuf, &bytesFreed); err != nil {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
+			return nil
 		}
 
 		printRemovePlan(os.Stdout, plan)

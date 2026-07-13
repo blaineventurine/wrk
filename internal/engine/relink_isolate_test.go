@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -531,5 +532,61 @@ func TestBuildRelinkIsolatePlanNothingDetachedErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no detached resources") {
 		t.Fatalf("error should mention no detached resources, got: %v", err)
+	}
+}
+
+// TestBuildRelinkIsolatePlanUnknownResourceCarriesTypedErrorCode pins
+// that the "not configured" refusal from BuildRelinkIsolatePlan is a
+// typed *Error whose Code the CLI --json path can route on.
+func TestBuildRelinkIsolatePlanUnknownResourceCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	writeConfig(t, repo.Root, config.Filename, isolateConfigYAML)
+
+	_, err := BuildRelinkIsolatePlan(repo, []string{"nope"}, Options{
+		StorageRoot: storageIn(t, repo.Root),
+		Stdout:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error via errors.As, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceNotConfigured {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotConfigured)
+	}
+}
+
+// TestBuildRelinkIsolatePlanLinkedResourceCarriesTypedErrorCode pins
+// that ErrResourceNotDetached fires when the resource IS configured
+// but the workspace hasn't detached it — the resource is currently
+// linked, so isolating it would steal bytes from peers.
+func TestBuildRelinkIsolatePlanLinkedResourceCarriesTypedErrorCode(t *testing.T) {
+	repo := newTestRepo(t)
+	storage := storageIn(t, repo.Root)
+
+	writeConfig(t, repo.Root, config.Filename, isolateConfigYAML)
+	seedIsolateWorkspace(t, repo.Root, `{"v":1}`, "v1\n")
+
+	opts := Options{StorageRoot: storage, Stdout: &bytes.Buffer{}}
+	if err := Link(repo, opts); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	// No Detach — resource remains linked.
+
+	_, err := BuildRelinkIsolatePlan(repo, []string{"node"}, opts)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not detached") {
+		t.Errorf("message = %q, want to contain 'not detached'", err.Error())
+	}
+	var wrkErr *Error
+	if !errors.As(err, &wrkErr) {
+		t.Fatalf("expected *engine.Error, got %T: %v", err, err)
+	}
+	if wrkErr.Code != ErrResourceNotDetached {
+		t.Errorf("code = %q, want %q", wrkErr.Code, ErrResourceNotDetached)
 	}
 }

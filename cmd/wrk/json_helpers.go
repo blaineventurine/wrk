@@ -3,8 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"strings"
+
+	"github.com/blaineventurine/wrk/internal/engine"
 )
 
 // scanWarnings reads every non-empty line from buf and returns them
@@ -47,4 +51,51 @@ func writeJSON(w io.Writer, payload []byte) error {
 	}
 	_, err := w.Write([]byte("\n"))
 	return err
+}
+
+// emitJSONError writes a machine-readable error envelope to w. When
+// err (or anything it wraps) is a *engine.Error, its Code, Message,
+// and Hint are used verbatim; otherwise the envelope carries
+// engine.ErrUnknown and the untyped Error() string.
+//
+// Under `wrk <cmd> --json`, callers redirect this to STDERR so the
+// STDOUT stream (which may already carry a partial plan+result
+// envelope) stays clean JSON. See each destructive command's RunE for
+// the emitJSONError -> exitCode{code: 2} sequence.
+func emitJSONError(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	var wrkErr *engine.Error
+	if !errors.As(err, &wrkErr) {
+		wrkErr = &engine.Error{
+			Code:    engine.ErrUnknown,
+			Message: err.Error(),
+		}
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Hint    string `json:"hint,omitempty"`
+		} `json:"error"`
+	}
+	payload.Error.Code = string(wrkErr.Code)
+	payload.Error.Message = wrkErr.Message
+	// Fallback: an untyped error might arrive with a *Error whose
+	// Message is empty (e.g. someone built &Error{Wrapped: e} directly).
+	// Preserve the visible cause so consumers see the reason.
+	if payload.Error.Message == "" {
+		payload.Error.Message = err.Error()
+	}
+	payload.Error.Hint = wrkErr.Hint
+	data, jerr := json.Marshal(payload)
+	if jerr != nil {
+		// Marshalling a fixed-shape struct with string fields should
+		// never fail, but if it did, fall back to a minimal literal
+		// so consumers still see something parseable.
+		data = []byte(`{"error":{"code":"unknown","message":"emit failed"}}`)
+	}
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n"))
 }

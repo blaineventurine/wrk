@@ -41,6 +41,10 @@ var forgetCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if forgetJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
@@ -64,11 +68,19 @@ var forgetCmd = &cobra.Command{
 
 		plan, err := engine.BuildForgetPlan(repo, options)
 		if err != nil {
+			if forgetJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
 		if forgetJSON {
-			return runForgetJSON(plan, repo, options, &warningsBuf, &bytesFreed)
+			if err := runForgetJSON(plan, repo, options, &warningsBuf, &bytesFreed); err != nil {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
+			return nil
 		}
 
 		printForgetPlan(os.Stdout, plan)

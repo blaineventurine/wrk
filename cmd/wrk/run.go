@@ -53,6 +53,10 @@ var runCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repo, err := currentRepository()
 		if err != nil {
+			if runJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
@@ -76,11 +80,19 @@ var runCmd = &cobra.Command{
 
 		plan, err := engine.BuildRunPlan(repo, args[0], options)
 		if err != nil {
+			if runJSON {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
 			return err
 		}
 
 		if runJSON {
-			return runRunJSON(plan, repo, options, &warningsBuf, &bytesFreed)
+			if err := runRunJSON(plan, repo, options, &warningsBuf, &bytesFreed); err != nil {
+				emitJSONError(os.Stderr, err)
+				return exitCode{code: 2}
+			}
+			return nil
 		}
 
 		printRunPlan(os.Stdout, plan)

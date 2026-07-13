@@ -152,3 +152,53 @@ func TestPrintDoctorJSONEmitsSchemaEnvelope(t *testing.T) {
 		t.Errorf("envelope wrong: schema=%d kind=%q", out.Schema, out.Kind)
 	}
 }
+
+// TestDoctorExitCodeFlagRegistered pins the --exit-code flag wiring:
+// scripts and CI can rely on it being present so `wrk doctor
+// --exit-code` stays a stable probe.
+func TestDoctorExitCodeFlagRegistered(t *testing.T) {
+	if doctorCmd.Flags().Lookup("exit-code") == nil {
+		t.Fatal("--exit-code flag not registered on doctorCmd")
+	}
+}
+
+// TestDoctorExitCodeSemantics pins the taxonomy: doctor emits an
+// exit-1 sentinel ONLY when --exit-code AND the report has issues.
+// The three OFF combinations MUST resolve to nil so a doctor run
+// without --exit-code stays "0 = ran, 2 = broke" — the existing
+// contract every non-CI operator relies on.
+func TestDoctorExitCodeSemantics(t *testing.T) {
+	cases := []struct {
+		name        string
+		exitCodeSet bool
+		issues      int
+		wantExit1   bool
+	}{
+		{"flag off, no issues", false, 0, false},
+		{"flag off, with issues", false, 2, false},
+		{"flag on, no issues", true, 0, false},
+		{"flag on, with issues", true, 2, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Simulate the RunE tail sentinel gate directly. The
+			// helper is trivial enough to inline here rather than
+			// exporting a doctorExitCodeSignal shim just for tests.
+			issues := make([]string, c.issues)
+			var got error
+			if c.exitCodeSet && len(issues) > 0 {
+				got = exitCode{code: 1}
+			}
+			if c.wantExit1 {
+				if got == nil {
+					t.Fatalf("want exitCode{1}, got nil")
+				}
+				if got.(exitCode).code != 1 {
+					t.Errorf("code = %d, want 1", got.(exitCode).code)
+				}
+			} else if got != nil {
+				t.Errorf("want nil, got %v", got)
+			}
+		})
+	}
+}

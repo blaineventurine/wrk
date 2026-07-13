@@ -130,7 +130,9 @@ func BuildRemovePlan(
 			cwd = canon
 		}
 		if cwd == target {
-			return RemovePlan{}, fmt.Errorf("cannot remove the current workspace: %s", target)
+			return RemovePlan{}, Newf(ErrCurrentWorkspace,
+				"cd elsewhere before running 'wrk remove'",
+				"cannot remove the current workspace: %s", target)
 		}
 	}
 
@@ -153,7 +155,9 @@ func BuildRemovePlan(
 	}
 
 	if len(canonWorkspaces) > 0 && canonWorkspaces[0] == target {
-		return RemovePlan{}, fmt.Errorf("refusing to remove the primary workspace: %s", target)
+		return RemovePlan{}, Newf(ErrPrimaryWorkspace,
+			"remove secondary workspaces individually; use 'wrk forget' to drop the entire repo",
+			"refusing to remove the primary workspace: %s", target)
 	}
 
 	isLive := false
@@ -197,7 +201,9 @@ func BuildRemovePlan(
 			)
 			return plan, nil
 		}
-		return RemovePlan{}, fmt.Errorf("%s is not a live workspace of this repo", target)
+		return RemovePlan{}, Newf(ErrNotLiveWorkspace,
+			"run 'wrk workspaces' to list live workspaces",
+			"%s is not a live workspace of this repo", target)
 	}
 
 	// 6. Soft-refusal probes for a live workspace.
