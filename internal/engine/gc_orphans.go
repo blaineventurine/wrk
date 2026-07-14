@@ -305,6 +305,12 @@ func orphanedTreeStillUnclaimed(
 		return false, err
 	}
 
+	cloneRoots, err := otherCloneRootsStrict(repo, options)
+	if err != nil {
+		return false, err // conservative — unenumerable clone keeps the tree
+	}
+	workspaces = append(workspaces, cloneRoots...)
+
 	liveRoots := make([]string, 0, len(workspaces))
 	for _, ws := range workspaces {
 		if _, err := os.Stat(ws); err != nil {
@@ -340,7 +346,7 @@ func orphanedTreeStillUnclaimed(
 	pinned, err := variantStillPinned(repo, variant{
 		Path:        filepath.FromSlash(tree.RelPath),
 		StoragePath: tree.StoragePath,
-	})
+	}, options)
 	if err != nil {
 		return false, err
 	}

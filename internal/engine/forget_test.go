@@ -35,7 +35,7 @@ func TestBuildForgetPlanEmptyRepo(t *testing.T) {
 
 func TestBuildForgetPlanCountsAfterLink(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{
-		".wrk.yml": "resources:\n  - name: node\n    path: node_modules\n    fingerprint:\n      - \"{root}/package.json\"\n    hooks:\n      initialize:\n        - run: sh -c 'mkdir -p \"{shared}\" && dd if=/dev/zero of=\"{shared}/blob\" bs=1024 count=1'\n",
+		".wrk.yml":     "resources:\n  - name: node\n    path: node_modules\n    fingerprint:\n      - \"{root}/package.json\"\n    hooks:\n      initialize:\n        - run: sh -c 'mkdir -p \"{shared}\" && dd if=/dev/zero of=\"{shared}/blob\" bs=1024 count=1'\n",
 		"package.json": `{"v":1}`,
 	})
 	storage := storageIn(t, repo.Root)

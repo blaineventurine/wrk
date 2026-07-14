@@ -55,15 +55,18 @@ func TestBuildRemovePlanPrimaryWorkspaceErrors(t *testing.T) {
 	}
 }
 
-// TestBuildRemovePlanCurrentWorkspaceErrors: if the caller's cwd IS
-// the target, running the VCS teardown would pull the ground out
-// from under the running process. Refuse before the plan is built.
+// TestBuildRemovePlanRefusesFromInsideTarget pins the containment
+// refusal: a cwd equal to OR anywhere below the canonicalized target
+// (including entered through a symlink) means the VCS teardown would
+// pull the ground out from under the running process. The refusal is
+// a typed *Error carrying ErrCurrentWorkspace so `wrk remove --json`
+// routes on a stable code, and the message names the footgun.
 //
-// On macOS t.TempDir() is under /var (symlink into /private), so
-// os.Getwd() may report either form depending on how we chdir'd in.
-// The check normalises both sides via filepath.EvalSymlinks to keep
-// this comparison honest.
-func TestBuildRemovePlanCurrentWorkspaceErrors(t *testing.T) {
+// On macOS t.TempDir() is under /var (a symlink into /private), so
+// the check normalises BOTH sides via filepath.EvalSymlinks; the
+// symlinked-cwd row additionally enters through a symlink whose
+// resolution lands inside the target.
+func TestBuildRemovePlanRefusesFromInsideTarget(t *testing.T) {
 	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
 	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
 		Stdout: &bytes.Buffer{}}); err != nil {
@@ -71,18 +74,114 @@ func TestBuildRemovePlanCurrentWorkspaceErrors(t *testing.T) {
 	}
 	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
 
-	old, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+	sub := filepath.Join(feature, "cmd", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(old) })
-	if err := os.Chdir(feature); err != nil {
+	via := filepath.Join(t.TempDir(), "via")
+	if err := os.Symlink(sub, via); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = BuildRemovePlan(repo, feature, Options{})
-	if err == nil || !strings.Contains(err.Error(), "current") {
-		t.Fatalf("expected 'current' error, got %v", err)
+	cases := []struct {
+		name string
+		cwd  string
+	}{
+		{"exact target root", feature},
+		{"subdirectory of the target", sub},
+		{"symlinked path resolving inside the target", via},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(tc.cwd)
+			_, err := BuildRemovePlan(repo, feature, Options{})
+			if err == nil {
+				t.Fatal("BuildRemovePlan succeeded; want current-workspace refusal")
+			}
+			var wrkErr *Error
+			if !errors.As(err, &wrkErr) {
+				t.Fatalf("error is %T (%v), want *engine.Error", err, err)
+			}
+			if wrkErr.Code != ErrCurrentWorkspace {
+				t.Errorf("Code = %q, want %q", wrkErr.Code, ErrCurrentWorkspace)
+			}
+			if !strings.Contains(err.Error(), "currently inside") {
+				t.Errorf("message = %q, want mention of 'currently inside'", err)
+			}
+		})
+	}
+}
+
+// TestBuildRemovePlanFromOutsideTargetStillPlans is the containment
+// check's negative space: a cwd NEAR the target — the primary, or the
+// parent directory holding both worktrees — must still plan. The
+// parent-dir row is the one a flipped isPathInside(cwd, target)
+// comparison would wrongly refuse (the target IS inside that cwd).
+func TestBuildRemovePlanFromOutsideTargetStillPlans(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	cases := []struct {
+		name string
+		cwd  string
+	}{
+		{"from the primary workspace", repo.Root},
+		{"from the parent holding both worktrees", filepath.Dir(repo.Root)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(tc.cwd)
+			plan, err := BuildRemovePlan(repo, feature, Options{})
+			if err != nil {
+				t.Fatalf("BuildRemovePlan from outside the target: %v", err)
+			}
+			if plan.Refusal != "" {
+				t.Errorf("Refusal = %q, want empty for a clean sibling target", plan.Refusal)
+			}
+		})
+	}
+}
+
+// TestBuildRemovePlanUncommittedProbeFailureIsSoftRefusal pins M9: a
+// FAILED uncommitted-changes probe must not silently pass the clean
+// gate. The plan is still returned (soft — the CLI's --force decides)
+// with a Refusal saying verification was impossible, because the
+// probe may have been the last snapshot opportunity before the
+// directory sweep destroys unrecorded edits.
+//
+// Deterministic trigger: corrupting the worktree's .git FILE leaves
+// the worktree in `git worktree list --porcelain` (still live from
+// the primary's perspective) while `git status` inside it fails.
+func TestBuildRemovePlanUncommittedProbeFailureIsSoftRefusal(t *testing.T) {
+	repo := newTestRepoWithHead(t, map[string]string{".wrk.yml": "resources: []\n"})
+	if err := NewWorkspace(repo, "feature", "", Options{StorageRoot: storageIn(t, repo.Root),
+		Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	feature := filepath.Join(filepath.Dir(repo.Root), "feature")
+
+	if err := os.WriteFile(filepath.Join(feature, ".git"),
+		[]byte("gitdir: /nonexistent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildRemovePlan(repo, feature, Options{})
+	if err != nil {
+		t.Fatalf("BuildRemovePlan = %v; probe failure must be a SOFT refusal, not an error", err)
+	}
+	if plan.IsGhost {
+		t.Error("IsGhost = true, want a live-workspace soft refusal")
+	}
+	if !strings.Contains(plan.Refusal,
+		"could not verify the workspace has no uncommitted changes (") {
+		t.Errorf("Refusal = %q, want the could-not-verify probe refusal", plan.Refusal)
+	}
+	if plan.UncommittedChanges != 0 {
+		t.Errorf("UncommittedChanges = %d, want 0 when the probe failed", plan.UncommittedChanges)
 	}
 }
 
@@ -230,8 +329,8 @@ func TestBuildRemovePlanUncommittedChangesRefuse(t *testing.T) {
 	if plan.UncommittedChanges < 1 {
 		t.Errorf("UncommittedChanges = %d, want >= 1", plan.UncommittedChanges)
 	}
-	if plan.Refusal == "" || !strings.Contains(plan.Refusal, "uncommitted") {
-		t.Errorf("Refusal = %q, want mention of uncommitted changes", plan.Refusal)
+	if !strings.Contains(plan.Refusal, "uncommitted VCS change(s)") {
+		t.Errorf("Refusal = %q, want mention of 'uncommitted VCS change(s)'", plan.Refusal)
 	}
 }
 
@@ -413,6 +512,7 @@ func TestExecuteRemoveProgressSilentOnGit(t *testing.T) {
 		t.Errorf("feature dir survives: %v", err)
 	}
 }
+
 // TestExecuteRemoveHappyPath: ExecuteRemove tears down a clean
 // workspace and the directory is removed from the filesystem.
 func TestExecuteRemoveHappyPath(t *testing.T) {

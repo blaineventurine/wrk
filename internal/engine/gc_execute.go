@@ -166,7 +166,7 @@ func deleteVariant(repo *repository.Repository, v variant, options Options, reco
 	// that window can legitimately re-pin this variant (branch
 	// switched back). Deleting a re-pinned variant would dangle a live
 	// workspace symlink and destroy any user mutations in the variant.
-	pinned, err := variantStillPinned(repo, v)
+	pinned, err := variantStillPinned(repo, v, options)
 	if err != nil {
 		// Conservative: verification failure keeps the variant.
 		recordErr(fmt.Errorf("pin re-check for %s: %w (variant kept)", v.StoragePath, err))
@@ -222,7 +222,9 @@ func deleteVariant(repo *repository.Repository, v variant, options Options, reco
 //     mirrors the unreachable-workspace semantics of the plan walk)
 //   - resource path is not a symlink / missing → not a pin from
 //     that workspace
-func variantStillPinned(repo *repository.Repository, v variant) (bool, error) {
+//   - a registered clone that cannot be enumerated → pinned
+//     (conservative — it may pin anything)
+func variantStillPinned(repo *repository.Repository, v variant, options Options) (bool, error) {
 	// Fresh isolation check — one map lookup per workspace entry. An
 	// isolate cannot re-pin a fingerprint variant today, but the
 	// recheck is cheap and makes the invariant airtight.
@@ -242,6 +244,11 @@ func variantStillPinned(repo *repository.Repository, v variant) (bool, error) {
 	if err != nil {
 		return true, err // conservative
 	}
+	cloneRoots, err := otherCloneRootsStrict(repo, options)
+	if err != nil {
+		return true, err // conservative
+	}
+	workspaces = append(workspaces, cloneRoots...)
 	// Canonicalize BOTH sides before isPathInside — EvalSymlinks
 	// resolves /var → /private/var on macOS and the workspace-side
 	// resolution below goes through the same canonicalization.
@@ -256,19 +263,7 @@ func variantStillPinned(repo *repository.Repository, v variant) (bool, error) {
 			}
 			return true, err // unreachable — conservative
 		}
-		wsResource := filepath.Join(ws, v.Path)
-		target, err := os.Readlink(wsResource)
-		if err != nil {
-			continue // not a symlink — not a pin from this workspace
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(wsResource), target)
-		}
-		resolved, err := filepath.EvalSymlinks(target)
-		if err != nil {
-			resolved = filepath.Clean(target)
-		}
-		if isPathInside(canonVariant, resolved) {
+		if workspacePinsPath(ws, v.Path, canonVariant) {
 			return true, nil
 		}
 	}

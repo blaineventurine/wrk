@@ -330,3 +330,45 @@ ISO_TARGET=$(readlink "$FEATURE/node_modules")
 ( cd "$D" && expect_exit 0 "$WRK --storage $S remove t3feature --yes --force" )
 # The orphaned isolated variant is now gc's to sweep.
 ( cd "$D" && expect_contains "$(basename "$ISO_TARGET")" "$WRK --storage $S gc --dry-run" )
+
+subsec "T.4: invoked from INSIDE the target (subdirectory) → hard refusal"
+D=$SCRATCH/T4
+mkrepo git "$D"
+remove_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+( cd "$D" && "$WRK" new t4feature > /dev/null 2>&1 )
+FEATURE=$SCRATCH/t4feature
+if [ ! -d "$FEATURE" ]; then
+  echo "FAIL: T.4 setup failed" | tee -a "$TRANSCRIPT"; _mark_fail
+else
+  mkdir -p "$FEATURE/deep/inside"
+  ( cd "$FEATURE/deep/inside" && expect_exit 2 "$WRK remove $FEATURE --yes" )
+  ( cd "$FEATURE/deep/inside" && expect_contains "currently inside" "$WRK remove $FEATURE --yes 2>&1" )
+  if [ -d "$FEATURE" ]; then
+    _mark_pass; echo "  PASS: T.4 tree survived the inside-invocation (jj backend would have rm -rf'd it pre-fix)" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail; echo "  FAIL: T.4 tree deleted despite refusal" | tee -a "$TRANSCRIPT"
+  fi
+fi
+
+subsec "T.5: uncommitted-changes probe failure → refuse rather than guess clean"
+D=$SCRATCH/T5
+mkrepo git "$D"
+remove_config "$D"
+( cd "$D" && git add -A && git commit -q -m init )
+( cd "$D" && "$WRK" new t5feature > /dev/null 2>&1 )
+FEATURE=$SCRATCH/t5feature
+if [ ! -d "$FEATURE" ]; then
+  echo "FAIL: T.5 setup failed" | tee -a "$TRANSCRIPT"; _mark_fail
+else
+  # Corrupt the worktree's gitdir pointer: `git worktree list` still
+  # reports the worktree live, but `git status` inside it fails —
+  # exactly the unverifiable state a stale jj workspace produces.
+  printf 'gitdir: /nonexistent/place\n' > "$FEATURE/.git"
+  ( cd "$D" && expect_contains "could not verify" "$WRK remove t5feature --yes 2>&1" )
+  if [ -d "$FEATURE" ]; then
+    _mark_pass; echo "  PASS: T.5 unverifiable workspace kept on disk" | tee -a "$TRANSCRIPT"
+  else
+    _mark_fail; echo "  FAIL: T.5 removed a workspace it could not verify" | tee -a "$TRANSCRIPT"
+  fi
+fi

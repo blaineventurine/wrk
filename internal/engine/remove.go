@@ -85,9 +85,9 @@ type RemovePlan struct {
 //     override; the primary is the anchor everything else hangs off).
 //  4. Target not in Workspaces()      → EITHER
 //     a. a stale registry entry exists → soft refusal + ghost hint
-//        pointing at `wrk gc`, OR
+//     pointing at `wrk gc`, OR
 //     b. no registry entry            → hard error ("not a live
-//        workspace of this repo").
+//     workspace of this repo").
 //  5. Uncommitted VCS changes         → soft refusal, --force may
 //     override.
 //  6. Detached-file registry entries  → soft refusal, --force may
@@ -130,20 +130,23 @@ func BuildRemovePlan(
 	}
 
 	// 3. Current-workspace check: pulling the ground out from under
-	// the running process. Both sides go through EvalSymlinks so
+	// the running process. CONTAINMENT, not equality: running from a
+	// SUBDIRECTORY of the target is the same footgun — on the jj
+	// backend wrk itself performs the directory sweep, so nothing
+	// downstream would save the caller's cwd (git self-refuses;
+	// jj has no such backstop). Both sides go through EvalSymlinks so
 	// the /var vs /private/var duality on macOS never masks a match.
 	// A Getwd failure is treated as "cwd unknown" — we cannot refuse
-	// on grounds we cannot verify, so we let the plan proceed and
-	// downstream layers will still catch the same mistake at execute
-	// time (git refuses to remove a worktree the caller is inside).
+	// on grounds we cannot verify, so we let the plan proceed and the
+	// VCS layer still catches what it can at execute time.
 	if cwd, err := os.Getwd(); err == nil {
 		if canon, err := filepath.EvalSymlinks(cwd); err == nil {
 			cwd = canon
 		}
-		if cwd == target {
+		if isPathInside(target, cwd) {
 			return RemovePlan{}, Newf(ErrCurrentWorkspace,
 				"cd elsewhere before running 'wrk remove'",
-				"cannot remove the current workspace: %s", target)
+				"cannot remove the workspace you are currently inside: %s", target)
 		}
 	}
 
@@ -231,9 +234,13 @@ func BuildRemovePlan(
 
 	// 6a. Uncommitted VCS changes. Backend-agnostic: the repository
 	// package dispatches to git (status --porcelain) or jj (diff
-	// --summary). A probe failure is silently tolerated — a plan
-	// without a refusal we could not detect is still a plan, and the
-	// executor will surface real failures.
+	// --summary). A probe FAILURE is itself a soft refusal: a plan
+	// that cannot verify the workspace is clean must not silently
+	// pretend it is — the canonical case is a stale jj workspace,
+	// where `jj diff` errors until `jj workspace update-stale` runs,
+	// and where that same failed probe would otherwise have been the
+	// last snapshot before the directory sweep destroys unrecorded
+	// edits. --force remains the explicit override.
 	if count, err := repo.UncommittedCount(target); err == nil {
 		plan.UncommittedChanges = count
 		if count > 0 {
@@ -241,6 +248,10 @@ func BuildRemovePlan(
 				fmt.Sprintf("workspace has %d uncommitted VCS change(s)", count),
 			)
 		}
+	} else {
+		reasons = append(reasons, fmt.Sprintf(
+			"could not verify the workspace has no uncommitted changes (%v)", err,
+		))
 	}
 
 	// 6b. Detached-file registry entries. Removing a workspace

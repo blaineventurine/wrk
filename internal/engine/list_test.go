@@ -115,14 +115,14 @@ func TestTreeSizeContinuesOnPermissionError(t *testing.T) {
 
 func TestIsBookkeepingHonorsCleanupMarkers(t *testing.T) {
 	cases := map[string]bool{
-		".wrk-lock":                true,
-		"5fd1d0d6.wrk-lock":        true,
-		"5fd1d0d6.wrk-tmp":         true,
-		"5fd1d0d6.wrk-backup":      true,
-		"5fd1d0d6.wrk-deleting":    true,
-		"5fd1d0d6.wrk-forgetting":  true,
-		"5fd1d0d6":                 false,
-		".installed":               false,
+		".wrk-lock":               true,
+		"5fd1d0d6.wrk-lock":       true,
+		"5fd1d0d6.wrk-tmp":        true,
+		"5fd1d0d6.wrk-backup":     true,
+		"5fd1d0d6.wrk-deleting":   true,
+		"5fd1d0d6.wrk-forgetting": true,
+		"5fd1d0d6":                false,
+		".installed":              false,
 	}
 	for name, want := range cases {
 		if got := isBookkeeping(name); got != want {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blaineventurine/wrk/internal/config"
@@ -42,25 +43,37 @@ func TestLinkSkipsCreateFalseWhenMissing(t *testing.T) {
 
 	// The shared-storage subtree for this repository must not have
 	// been created. `location.For` computes the path but never
-	// creates it, and an empty plan skips execution entirely — so the
-	// storage root must be empty apart from any parent dirs the test
-	// helper created for its own scaffolding (`storageIn` makes
-	// exactly `<repo>/.wrk-storage/`; nothing beneath it).
+	// creates it, and an empty plan skips execution entirely. The ONE
+	// storage artifact a successful link always writes — resource or
+	// not — is the clone registry (`<repo-id>.wrk-clones.json` plus
+	// its lock), which is what lets gc/forget in OTHER clones see
+	// this one. Everything else appearing here is a regression.
 	repoStorage := filepath.Join(storage, repo.RepositoryID)
 	if _, err := os.Lstat(repoStorage); !os.IsNotExist(err) {
 		t.Errorf("shared repo-storage dir %s exists; want no shared side effects; err=%v",
 			repoStorage, err)
 	}
-	entries, err := os.ReadDir(storage)
-	if err != nil {
-		t.Fatalf("read storage root: %v", err)
-	}
-	if len(entries) != 0 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+	var unexpected []string
+	walkErr := filepath.WalkDir(storage, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		t.Errorf("storage root has unexpected entries after Link on create:false: %v", names)
+		if path == storage || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasSuffix(name, ".wrk-clones.json") ||
+			strings.HasSuffix(name, ".wrk-clones.json.wrk-lock") {
+			return nil
+		}
+		unexpected = append(unexpected, path)
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk storage root: %v", walkErr)
+	}
+	if len(unexpected) != 0 {
+		t.Errorf("storage root has unexpected entries after Link on create:false: %v", unexpected)
 	}
 
 	// Status must report the resource as StateExpected — the resting,

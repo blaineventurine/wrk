@@ -158,6 +158,17 @@ func pinnedVariants(
 // returned so the plan builder can surface why the sweep was
 // conservative.
 //
+// Pins are discovered from the VARIANT side, not from configs: each
+// scanned variant knows its repo-relative resource path, and the walk
+// probes exactly Join(root, v.Path) in every workspace. Configs
+// legitimately diverge across worktrees (branches rename or drop
+// resources, .wrk.local.yml overlays differ) — resolving the invoking
+// workspace's config against every sibling used to blind the sweep to
+// pins at paths that sibling's own config places elsewhere, deleting
+// variants a live workspace was symlinked to. The variant-side probe
+// cannot drift: if the symlink exists at the variant's own path, it
+// pins, no matter what any config says today.
+//
 // Non-managed symlinks (targets outside any scanned variant) do not
 // appear in the pinned set.
 //
@@ -175,11 +186,16 @@ func pinnedVariantsForRoots(
 		return nil, nil, err
 	}
 
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return nil, nil, Wrapf(ErrConfigInvalid,
-			"check .wrk.yml for syntax errors or invalid resource paths",
-			err, "%s", err.Error())
+	// Canonicalize each variant base once (EvalSymlinks resolves
+	// /var → /private/var on macOS); the per-root probe resolves the
+	// workspace side the same way so isPathInside compares like forms.
+	canonBases := make([]string, len(variants))
+	for i, v := range variants {
+		if base, err := filepath.EvalSymlinks(v.StoragePath); err == nil {
+			canonBases[i] = base
+		} else {
+			canonBases[i] = v.StoragePath
+		}
 	}
 
 	pinned := make(map[string]bool)
@@ -198,41 +214,12 @@ func pinnedVariantsForRoots(
 			continue
 		}
 
-		for _, resource := range cfg.Resources {
-			// Use the workspace's OWN root so {root}-anchored globs and
-			// paths expand against the workspace under inspection.
-			instances, err := resolver.ResolveWithStorage(workspaceRoot, storageRepoRoot(repo, options), resource)
-			if err != nil {
-				return nil, nil, err
+		for i, v := range variants {
+			if pinned[v.StoragePath] {
+				continue
 			}
-
-			for _, instance := range instances {
-				info, err := os.Lstat(instance.WorkspacePath)
-				if err != nil {
-					continue
-				}
-				if info.Mode()&os.ModeSymlink == 0 {
-					continue
-				}
-
-				resolved, err := filepath.EvalSymlinks(instance.WorkspacePath)
-				if err != nil {
-					continue
-				}
-
-				for _, v := range variants {
-					// EvalSymlinks canonicalizes the resolved target
-					// (e.g. `/private/var/...` on macOS); do the same to
-					// the base so isPathInside compares equivalent forms.
-					base, err := filepath.EvalSymlinks(v.StoragePath)
-					if err != nil {
-						base = v.StoragePath
-					}
-					if isPathInside(base, resolved) {
-						pinned[v.StoragePath] = true
-						break
-					}
-				}
+			if workspacePinsPath(workspaceRoot, v.Path, canonBases[i]) {
+				pinned[v.StoragePath] = true
 			}
 		}
 	}
@@ -267,6 +254,28 @@ func pinnedVariantsForRoots(
 	}
 
 	return pinned, unreachable, nil
+}
+
+// workspacePinsPath reports whether root's copy of the repo-relative
+// resource path is a symlink resolving into canonBase (a variant's
+// canonicalized storage path). Anything that is not a resolvable
+// symlink into the base — a real directory (detached), a dangling
+// link, a user symlink pointing elsewhere — is not a pin.
+//
+// Shared by the plan-time pin walk (pinnedVariantsForRoots) and the
+// execute-time re-check (variantStillPinned) so the two can never
+// disagree about what constitutes a pin.
+func workspacePinsPath(root, relPath, canonBase string) bool {
+	wsResource := filepath.Join(root, filepath.FromSlash(relPath))
+	info, err := os.Lstat(wsResource)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(wsResource)
+	if err != nil {
+		return false
+	}
+	return isPathInside(canonBase, resolved)
 }
 
 // isPathInside reports whether target is base or lives inside base.
@@ -607,6 +616,14 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 	}
 	liveRoots := filterOutGhosts(workspaces, ghosts)
 
+	// Cross-clone awareness: self-register (so OTHER clones' gc sees
+	// this one) and fold every other registered clone's live roots
+	// into the pin walk and the orphan sweep's config union. An
+	// unenumerable clone forces full conservatism below.
+	registerClone(repo, options)
+	cloneRoots, unreachableClones := otherCloneRoots(repo, options)
+	liveRoots = append(liveRoots, cloneRoots...)
+
 	orphans, err := detectOrphanRegistryEntries(repo, liveRoots)
 	if err != nil {
 		return GCPlan{}, err
@@ -622,7 +639,16 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 	if err != nil {
 		return GCPlan{}, err
 	}
-	plan.UnreachableWorkspaces = unreachable
+	plan.UnreachableWorkspaces = append(unreachable, unreachableClones...)
+
+	// A clone whose workspaces could not be enumerated may pin any
+	// variant — keep everything, exactly like an unreachable sibling
+	// workspace.
+	if len(unreachableClones) > 0 {
+		for _, v := range variants {
+			pinned[v.StoragePath] = true
+		}
+	}
 
 	bookkeeping, err := cleanBookkeepingDetect(repo, options)
 	if err != nil {
@@ -645,13 +671,17 @@ func BuildGCPlan(repo *repository.Repository, options Options) (GCPlan, error) {
 	}
 
 	// Orphaned-storage sweep: unclaimed subtrees under this repo's
-	// storage. Skipped (with a note) when any workspace was
+	// storage. Skipped (with a note) when any workspace OR clone was
 	// unreachable — the config union would be incomplete, and
 	// deleting storage on a partial view risks data loss.
-	if len(unreachable) > 0 {
+	switch {
+	case len(unreachable) > 0:
 		plan.OrphanedStorageNotes = append(plan.OrphanedStorageNotes,
 			"orphaned-storage sweep skipped: some workspaces were unreachable")
-	} else {
+	case len(unreachableClones) > 0:
+		plan.OrphanedStorageNotes = append(plan.OrphanedStorageNotes,
+			"orphaned-storage sweep skipped: a clone sharing this storage could not be enumerated")
+	default:
 		orphanTrees, notes, err := detectOrphanedStorage(repo, options, liveRoots)
 		if err != nil {
 			return GCPlan{}, err

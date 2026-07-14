@@ -148,6 +148,22 @@ func BuildForgetPlan(repo *repository.Repository, options Options) (ForgetPlan, 
 		))
 	}
 
+	// Other clones of this repository share `<storage>/<repo-id>/` —
+	// forgetting it strands every workspace of every OTHER clone.
+	// Self-register first so this clone shows up in THEIR plans, then
+	// refuse (--force overrides) when any other clone is registered
+	// or cannot be ruled out.
+	registerClone(repo, options)
+	cloneRoots, unreachableClones := otherCloneRoots(repo, options)
+	if len(cloneRoots) > 0 || len(unreachableClones) > 0 {
+		mentions := append(append([]string{}, cloneRoots...), unreachableClones...)
+		sort.Strings(mentions)
+		reasons = append(reasons, fmt.Sprintf(
+			"other clone(s) of this repository share this storage (%s); forgetting it would strand their workspaces",
+			strings.Join(mentions, ", "),
+		))
+	}
+
 	if len(reasons) > 0 {
 		plan.Refusal = strings.Join(reasons, "; ")
 	}
@@ -224,7 +240,7 @@ func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options
 	// clearDetached, so a concurrent `wrk detach` on a sibling
 	// workspace cannot silently re-populate the registry between our
 	// load and save.
-	return withRegistryLock(repo, func() error {
+	err := withRegistryLock(repo, func() error {
 		reg, err := loadRegistry(repo)
 		if err != nil {
 			return err
@@ -247,12 +263,24 @@ func ExecuteForget(repo *repository.Repository, plan ForgetPlan, options Options
 		if err != nil {
 			return err
 		}
-		if len(iso) == 0 {
-			return nil
+		if len(iso) > 0 {
+			for k := range iso {
+				delete(iso, k)
+			}
+			if err := saveIsolation(repo, iso); err != nil {
+				return err
+			}
 		}
-		for k := range iso {
-			delete(iso, k)
-		}
-		return saveIsolation(repo, iso)
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// The clone registry describes clones of a storage subtree that no
+	// longer exists — remove it last. A crash before this point leaves
+	// a harmless file the next forget (or a dead-entry prune during
+	// gc) cleans up.
+	removeClonesFile(repo, options)
+	return nil
 }

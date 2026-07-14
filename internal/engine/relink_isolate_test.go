@@ -483,6 +483,7 @@ func TestRelinkIsolateIsolatedPathLayout(t *testing.T) {
 			entry.StoragePath, expectedPrefix)
 	}
 }
+
 // TestBuildRelinkIsolatePlanUnknownResourceErrors pins that the
 // "not configured" refusal survives the Build/Execute split — the
 // CLI's Confirm prompt must never appear for a typo'd name.

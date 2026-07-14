@@ -20,7 +20,11 @@ import (
 //   - RelativePath is the slash-form of that Rel result and
 //     WorkspacePath re-joins to it;
 //   - results are strictly increasing (sorted, no duplicates);
-//   - the storage-only bookkeeping fixture entry never surfaces.
+//   - the storage-only bookkeeping fixture entry never surfaces;
+//   - for GLOB patterns, no instance's RelativePath hits
+//     config.DisallowedResourcePath: the expansion filter must drop
+//     .git / .wrk.yml / reserved-suffix matches on both sides (non-glob
+//     literals legitimately bypass the filter).
 func FuzzResolveWithStorage(f *testing.F) {
 	// Shared fixture, built once; ResolveWithStorage never writes.
 	root := f.TempDir()
@@ -32,7 +36,9 @@ func FuzzResolveWithStorage(f *testing.F) {
 			".env",
 			"adir/child",
 			"sub/node_modules",
-			"ws.wrk-tmp", // workspace-side bookkeeping-looking name
+			"ws.wrk-tmp",  // workspace-side bookkeeping-looking name
+			".git/config", // infrastructure: glob expansion must skip
+			".wrk.yml",    // infrastructure: glob expansion must skip
 		},
 		storageRoot: {
 			"afile", // overlaps the workspace for dedup pressure
@@ -40,6 +46,7 @@ func FuzzResolveWithStorage(f *testing.F) {
 			"stor.wrk-lock", // must NEVER surface as an instance
 			"sub/node_modules",
 			"pkg/x/node_modules",
+			".git/config", // infrastructure on the storage side too
 		},
 		// Escape bait one level above the storage subtree.
 		filepath.Dir(storageRoot): {"escapee"},
@@ -61,6 +68,8 @@ func FuzzResolveWithStorage(f *testing.F) {
 		"pkg/*/node_modules",
 		"*.wrk-tmp",
 		"*.wrk-lock",
+		".git*",
+		"*/config",
 		"../*",
 		"../escapee",
 		"..",
@@ -89,6 +98,7 @@ func FuzzResolveWithStorage(f *testing.F) {
 			return
 		}
 
+		isGlobPattern := isGlob(pattern)
 		prev := ""
 		for i, inst := range instances {
 			rel, rerr := filepath.Rel(root, inst.WorkspacePath)
@@ -103,6 +113,15 @@ func FuzzResolveWithStorage(f *testing.F) {
 			}
 			if inst.RelativePath == "stor.wrk-lock" {
 				t.Fatalf("pattern %q: storage bookkeeping entry surfaced", pattern)
+			}
+			if isGlobPattern {
+				clean := filepath.Clean(filepath.FromSlash(inst.RelativePath))
+				if perr := config.DisallowedResourcePath(clean); perr != nil {
+					t.Fatalf(
+						"pattern %q: glob expansion surfaced disallowed path %q: %v",
+						pattern, inst.RelativePath, perr,
+					)
+				}
 			}
 			if i > 0 && inst.WorkspacePath <= prev {
 				t.Fatalf("pattern %q: results not strictly sorted: %q after %q",

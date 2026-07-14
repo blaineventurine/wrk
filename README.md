@@ -169,7 +169,7 @@ worked example.
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Human-readable identifier used in output. |
-| `path` | string | Workspace-relative path of the resource (file or directory). May be a glob pattern (`packages/*/node_modules`): every match becomes its own instance, and matches that peer workspaces have already provisioned into shared storage are linked even in a fresh workspace where the paths don't exist on disk yet. |
+| `path` | string | Workspace-relative path of the resource (file or directory). May be a glob pattern (`packages/*/node_modules`): every match becomes its own instance, and matches that peer workspaces have already provisioned into shared storage are linked even in a fresh workspace where the paths don't exist on disk yet. Repository infrastructure (`.git`, `.jj`, the wrk config files) and wrk's reserved scratch names are never matched, no matter what the pattern says. |
 | `fingerprint` | list | Optional. Files whose contents determine which shared variant is used. See [Fingerprinting](#fingerprinting). |
 | `hooks.initialize` | list | Optional. Commands run once to create the shared resource. See [Command execution](#command-execution). |
 | `create` | bool | Optional; defaults to `true`. When `false`, `wrk` treats a missing resource as **intentional** — nothing is provisioned, no hook runs, and `wrk status` reports it as `expected` instead of `absent`. Use this when the file is provided by an external tool (a secrets manager, `direnv`, `1Password`, `sops`) rather than by wrk. |
@@ -456,9 +456,14 @@ wrk gc --dry-run      # show the plan, do nothing
 - **Unused fingerprint variants** — variant subdirectories under
   `<storage>/<repo-id>/<resource>/` that aren't symlinked from any live
   workspace. A variant is considered *in use* if a live workspace's
-  resource path resolves under it; detached workspaces don't pin their
-  previous variant. Concurrent `wrk link` operations are respected: a
-  variant whose lock is currently held is skipped with a warning.
+  resource path resolves under it — in this clone **or in any other
+  registered clone** of the repository (every `wrk link` registers its
+  clone in a storage-side registry, so independent clones sharing the
+  same remote cannot sweep each other's pins; a clone that cannot be
+  enumerated makes the sweep fully conservative). Detached workspaces
+  don't pin their previous variant. Concurrent `wrk link` operations
+  are respected: a variant whose lock is currently held is skipped
+  with a warning.
 - **Orphaned storage** — subtrees under `<storage>/<repo-id>/` that no
   live workspace's configuration claims: the leftovers of resources
   removed or renamed in `.wrk.yml`. Every live workspace's own config
@@ -497,6 +502,10 @@ Hard refusals (cannot be overridden):
 Soft refusals (overridable with `--force`):
 
 - Uncommitted VCS changes in the target.
+- The uncommitted-changes probe itself failing (e.g. a stale Jujutsu
+  workspace that needs `jj workspace update-stale`, or broken worktree
+  metadata) — wrk refuses to guess that an unverifiable workspace is
+  clean.
 - Detached files (`wrk detach` was run in the target — the independent
   local copies would be lost).
 - Isolated variants (`wrk relink --isolate` was run in the target — the
@@ -528,9 +537,11 @@ new fingerprints are computed against the current manifests, initialize
 hooks re-run, symlinks are re-created.
 
 `wrk forget` refuses without `--force` when any workspace has detached
-files or isolated variants: forgetting shared storage while independent
-copies exist would leave those workspaces stranded, and isolated
-variants hold per-workspace content that hooks cannot reproduce. Run
+files or isolated variants, or when **another clone** of the repository
+is registered against the same storage: forgetting shared storage while
+independent copies exist would leave those workspaces stranded, isolated
+variants hold per-workspace content that hooks cannot reproduce, and
+other clones' workspaces would all dangle at once. Run
 `wrk relink --yes` in each affected workspace first, or pass `--force`
 to proceed anyway.
 

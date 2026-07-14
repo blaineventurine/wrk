@@ -610,6 +610,7 @@ func TestDetectOrphanRegistryEntriesSortedOutput(t *testing.T) {
 		}
 	}
 }
+
 // TestExecuteDetachRecordsWithoutPrinting pins the CLI-facing split:
 // ExecuteDetach records intent AND runs the plan while writing
 // nothing to options.Stdout (the CLI already printed via

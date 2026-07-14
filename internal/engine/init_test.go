@@ -505,7 +505,6 @@ func TestInitExclusiveCreateDoesNotClobber(t *testing.T) {
 	}
 }
 
-
 // --- helpers ---
 
 func writeFile(t *testing.T, path, content string) {

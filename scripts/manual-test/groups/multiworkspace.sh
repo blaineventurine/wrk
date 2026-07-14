@@ -193,3 +193,96 @@ else
   _mark_fail; echo "  FAIL: Y.1 glob resource missing in fresh worktree" | tee -a "$TRANSCRIPT"
 fi
 ( cd "$F" && expect_exit 0 "$WRK --storage $S status --exit-code" )
+
+section Z "multi-workspace — config drift and sibling clones"
+
+subsec "Z.1: sibling worktree with a DRIFTED config keeps its pin across gc"
+D=$SCRATCH/Z1/main
+mkdir -p "$D"
+mkrepo git "$D"
+seed "$D"
+cat > "$D/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p '{shared}' && echo main > '{shared}/who.txt'"
+YAML
+( cd "$D" && git add -A && git commit -q -m init )
+S=$SCRATCH/storage/Z1
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$D" && expect_exit 0 "$WRK --storage $S new z1feat" )
+FEAT=$SCRATCH/Z1/z1feat
+# The feature moves the resource to web/node_modules on its own branch.
+cat > "$FEAT/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: web/node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p '{shared}' && echo feat > '{shared}/who.txt'"
+YAML
+printf '{"v":"feature"}\n' > "$FEAT/package.json"
+( cd "$FEAT" && git add .wrk.yml package.json && git commit -q -m drift )
+rm -f "$FEAT/node_modules"
+( cd "$FEAT" && expect_exit 0 "$WRK --storage $S link" )
+FT=$(readlink "$FEAT/web/node_modules")
+# gc from MAIN, whose config knows nothing about web/node_modules:
+# pre-fix this deleted the feature's variant (report finding H2).
+( cd "$D" && expect_exit 0 "$WRK --storage $S gc --yes" )
+if [ -d "$FT" ] && [ -f "$FEAT/web/node_modules/who.txt" ]; then
+  _mark_pass; echo "  PASS: Z.1 drifted sibling's variant survived gc from main" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: Z.1 drifted sibling's variant was swept (H2 regression)" | tee -a "$TRANSCRIPT"
+fi
+
+subsec "Z.2: a second CLONE sharing storage is protected by the clone registry"
+URL="https://example.invalid/org/z2repo.git"
+A=$SCRATCH/Z2/cloneA
+mkdir -p "$A"
+mkrepo git "$A"
+( cd "$A" && git remote add origin "$URL" )
+cat > "$A/.wrk.yml" <<'YAML'
+resources:
+  - name: node
+    path: node_modules
+    fingerprint:
+      - "{root}/package.json"
+    hooks:
+      initialize:
+        - run: sh -c "mkdir -p '{shared}' && echo v > '{shared}/c.txt'"
+YAML
+printf '{"v":"shared"}\n' > "$A/package.json"
+printf 'demo\n' > "$A/README.md"
+( cd "$A" && git add -A && git commit -q -m init )
+B=$SCRATCH/Z2/cloneB
+git clone -q "$A" "$B" 2>/dev/null
+( cd "$B" && git remote set-url origin "$URL" )
+S=$SCRATCH/storage/Z2
+( cd "$A" && expect_exit 0 "$WRK --storage $S link" )
+( cd "$B" && expect_exit 0 "$WRK --storage $S link" )
+# Diverge clone B onto its own fingerprint.
+printf '{"v":"cloneB"}\n' > "$B/package.json"
+rm -f "$B/node_modules"
+( cd "$B" && expect_exit 0 "$WRK --storage $S link" )
+TB=$(readlink "$B/node_modules")
+# gc from clone A: pre-fix it deleted B's pinned variant (finding H3).
+( cd "$A" && expect_exit 0 "$WRK --storage $S gc --yes" )
+if [ -d "$TB" ] && [ -f "$B/node_modules/c.txt" ]; then
+  _mark_pass; echo "  PASS: Z.2 cloneB's pin survived gc from cloneA" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: Z.2 cloneB's variant swept by cloneA's gc (H3 regression)" | tee -a "$TRANSCRIPT"
+fi
+# forget from A must refuse while B shares the storage.
+( cd "$A" && expect_contains "other clone" "$WRK --storage $S forget --yes 2>&1" )
+if [ -d "$TB" ]; then
+  _mark_pass; echo "  PASS: Z.2 refused forget left storage intact" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: Z.2 refused forget still deleted storage" | tee -a "$TRANSCRIPT"
+fi
+( cd "$A" && expect_exit 0 "$WRK --storage $S forget --yes --force" )

@@ -21,6 +21,10 @@ import (
 //     resource matches;
 //   - a storage match escaping the storage subtree is skipped instead
 //     of producing an instance outside the workspace;
+//   - glob expansion re-passes the infrastructure policy: matches whose
+//     repository-relative path hits config.DisallowedResourcePath (.git,
+//     .jj, the wrk config files, executor-reserved suffixes) are skipped
+//     on BOTH sides, while non-glob literals bypass the filter entirely;
 //   - a malformed pattern surfaces filepath.ErrBadPattern instead of
 //     panicking or silently matching nothing.
 func TestResolveWithStorage(t *testing.T) {
@@ -107,6 +111,56 @@ func TestResolveWithStorage(t *testing.T) {
 			path:    "*",
 			storage: []string{"data.wrk-tmp.d"},
 			wantRel: []string{"data.wrk-tmp.d"},
+		},
+		{
+			// H7: `*` matches dotfiles under filepath.Match semantics,
+			// so glob expansion must re-pass the infrastructure policy
+			// or `path: "*"` would sweep .git/.jj/.wrk.yml (and
+			// executor scratch names) into management.
+			name: "glob filters workspace infrastructure and reserved suffixes",
+			path: "*",
+			workspace: []string{
+				".git/HEAD",
+				".jj/repo/store/x",
+				".wrk.yml",
+				".wrk.local.yml",
+				"legit-a/keep",
+				"legit-b.wrk-tmp/x",
+				"normal.txt",
+			},
+			wantRel: []string{"legit-a", "normal.txt"},
+		},
+		{
+			// The same policy applies to storage-side matches: a .git
+			// that leaked into storage must not be re-anchored into
+			// the workspace, while legitimate peer-provisioned entries
+			// still union in.
+			name:      "glob filters storage-side infrastructure",
+			path:      "*",
+			workspace: []string{"legit-a/keep", "normal.txt"},
+			storage:   []string{".git/config", "legit-c/keep"},
+			wantRel:   []string{"legit-a", "legit-c", "normal.txt"},
+		},
+		{
+			// Infrastructure is detected by FIRST path segment, so a
+			// nested pattern must drop .git/hooks yet keep siblings.
+			name: "nested glob under infrastructure filtered",
+			path: "*/hooks",
+			workspace: []string{
+				".git/hooks/pre-commit",
+				"legit-a/hooks/pre-commit",
+			},
+			wantRel: []string{"legit-a/hooks"},
+		},
+		{
+			// Non-glob literals are NOT filtered: they are rejected at
+			// config load, and the resolver silently skipping one here
+			// would hide a config bug instead of surfacing it. The
+			// literal must reach newInstance and resolve as before.
+			name:      "non-glob literal bypasses infrastructure filter",
+			path:      ".git",
+			workspace: []string{".git/HEAD"},
+			wantRel:   []string{".git"},
 		},
 		{
 			// The pattern escapes the storage subtree; the match MUST

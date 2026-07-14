@@ -312,6 +312,7 @@ func TestRunDryRunPrintsPlanNoExecution(t *testing.T) {
 		t.Errorf("dry-run mutated variant: got %q, want %q", after, before)
 	}
 }
+
 // TestBuildRunPlanUnknownResourceErrors pins that the "not
 // configured" refusal survives the Build/Execute split — it must
 // come from BuildRunPlan itself, not ExecuteRunPlan, so the CLI's

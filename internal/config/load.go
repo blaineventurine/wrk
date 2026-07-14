@@ -82,6 +82,51 @@ var reservedSuffixes = [...]string{
 	".wrk-lock",
 }
 
+// DisallowedResourcePath returns a non-nil error when the CLEANED,
+// repository-relative path points at repository infrastructure
+// (.git, .jj, the wrk config files — exactly or nested) or uses an
+// executor-reserved basename suffix.
+//
+// validate() applies it to every literal config path; the resolver
+// applies it to every GLOB EXPANSION so a pattern like `*` or `*.yml`
+// can never sweep `.git` or `.wrk.yml` into management — the lexical
+// checks here run before any filesystem mutation is planned.
+func DisallowedResourcePath(clean string) error {
+	forbidden := map[string]bool{
+		".git":        true,
+		".jj":         true,
+		Filename:      true,
+		LocalFilename: true,
+	}
+
+	if forbidden[clean] {
+		return fmt.Errorf("path %q would manage repository infrastructure", clean)
+	}
+
+	firstSegment := clean
+	if sep := strings.Index(clean, string(filepath.Separator)); sep >= 0 {
+		firstSegment = clean[:sep]
+	}
+	if forbidden[firstSegment] {
+		return fmt.Errorf(
+			"path %q is inside repository infrastructure (%s)", clean, firstSegment,
+		)
+	}
+
+	base := filepath.Base(clean)
+	for _, suffix := range reservedSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return fmt.Errorf(
+				"path %q uses a reserved suffix "+
+					"(`.wrk-tmp`, `.wrk-backup`, `.wrk-lock` are used internally)",
+				clean,
+			)
+		}
+	}
+
+	return nil
+}
+
 // validate rejects configurations that could cause wrk to operate on
 // paths outside the repository or on repository infrastructure.
 //
@@ -96,14 +141,6 @@ var reservedSuffixes = [...]string{
 // Names must also be unique across the merged configuration.
 func validate(cfg *Config) error {
 	seen := make(map[string]bool, len(cfg.Resources))
-
-	// Paths whose management would be catastrophic or nonsensical.
-	forbidden := map[string]bool{
-		".git":        true,
-		".jj":         true,
-		Filename:      true,
-		LocalFilename: true,
-	}
 
 	for _, r := range cfg.Resources {
 		context := resourceContext(r)
@@ -151,43 +188,12 @@ func validate(cfg *Config) error {
 			)
 		}
 
-		if forbidden[clean] {
-			return fmt.Errorf(
-				"%s: path %q would manage repository infrastructure",
-				context, r.Path,
-			)
-		}
-
-		// Also reject anything inside a forbidden top-level directory
-		// (e.g. ".git/hooks", ".jj/repo").
-		firstSegment := clean
-		if sep := strings.Index(clean, string(filepath.Separator)); sep >= 0 {
-			firstSegment = clean[:sep]
-		}
-		if forbidden[firstSegment] {
-			return fmt.Errorf(
-				"%s: path %q is inside repository infrastructure (%s)",
-				context, r.Path, firstSegment,
-			)
-		}
-
-		// Reject basenames ending in an executor scratch-file suffix.
-		// The executor writes `<link>.wrk-tmp`, `<link>.wrk-backup`,
-		// and `<destination>.wrk-lock` during Symlink/Detach; a user
-		// resource at one of those names would be silently clobbered
-		// (or deleted, in the .wrk-backup case). Check the raw
-		// pre-expansion basename so glob paths like `*/.wrk-tmp` fail
-		// too, before resolver ever runs.
-		base := filepath.Base(clean)
-		for _, suffix := range reservedSuffixes {
-			if strings.HasSuffix(base, suffix) {
-				return fmt.Errorf(
-					"%s: path %q uses a reserved suffix "+
-						"(`.wrk-tmp`, `.wrk-backup`, `.wrk-lock` are "+
-						"used internally); rename the resource path",
-					context, r.Path,
-				)
-			}
+		// Infrastructure and reserved-suffix rules are shared with the
+		// resolver's glob-expansion filter — one definition, two
+		// enforcement points (literal paths here, expanded matches
+		// there).
+		if err := DisallowedResourcePath(clean); err != nil {
+			return fmt.Errorf("%s: %v", context, err)
 		}
 	}
 

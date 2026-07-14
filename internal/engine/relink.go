@@ -218,6 +218,10 @@ func ExecuteRelink(repo *repository.Repository, plan RelinkPlan, options Options
 	if err := clearDetached(repo); err != nil {
 		return fmt.Errorf("relink succeeded but failed to clear detach record: %w", err)
 	}
+	// Record this clone in the shared-storage clone registry so gc and
+	// forget invoked from OTHER clones of the same repository see this
+	// clone's pins. Best-effort bookkeeping — the relink itself is done.
+	registerClone(repo, options)
 	return nil
 }
 

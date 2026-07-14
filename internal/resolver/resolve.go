@@ -49,7 +49,9 @@ func ResolveWithStorage(
 ) ([]ResourceInstance, error) {
 	var workspacePaths []string
 
-	if isGlob(resource.Path) {
+	isGlobPath := isGlob(resource.Path)
+
+	if isGlobPath {
 		matches, err := filepath.Glob(
 			filepath.Join(root, resource.Path),
 		)
@@ -68,6 +70,21 @@ func ResolveWithStorage(
 			}
 			workspacePaths = unionPaths(workspacePaths, storagePaths)
 		}
+
+		// Glob expansion happens AFTER config validation ran on the
+		// literal pattern, so the expanded matches must re-pass the
+		// same infrastructure/reserved-suffix policy: `*` matches
+		// dotfiles under filepath.Match semantics, and without this
+		// filter `path: "*"` would sweep `.git`, `.jj`, or `.wrk.yml`
+		// into management — planning a Move of repository metadata
+		// into shared storage. Disallowed matches are SKIPPED (the
+		// pattern means "manage everything manageable"), never
+		// silently managed.
+		filtered, err := filterDisallowed(root, workspacePaths)
+		if err != nil {
+			return nil, err
+		}
+		workspacePaths = filtered
 	} else {
 		workspacePaths = []string{
 			filepath.Join(root, resource.Path),
@@ -97,6 +114,36 @@ func ResolveWithStorage(
 	}
 
 	return instances, nil
+}
+
+// filterDisallowed drops glob matches whose repository-relative path
+// hits config.DisallowedResourcePath — repository infrastructure
+// (.git, .jj, the wrk config files) and executor-reserved suffixes.
+// Matches that cannot be made root-relative are also dropped; the
+// per-instance containment check in newInstance is the authoritative
+// escape guard, this is belt-and-braces for the skip path.
+func filterDisallowed(root string, paths []string) ([]string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(absRoot, absPath)
+		if err != nil || rel == "." || rel == ".." ||
+			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if config.DisallowedResourcePath(filepath.Clean(rel)) != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // storageGlobMatches globs pattern against the shared-storage subtree

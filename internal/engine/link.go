@@ -29,6 +29,11 @@ func Link(repo *repository.Repository, options Options) error {
 	if err := clearDetached(repo); err != nil {
 		return fmt.Errorf("link succeeded but failed to clear detach record: %w", err)
 	}
+
+	// Record this clone in the shared-storage clone registry so gc and
+	// forget invoked from OTHER clones of the same repository see this
+	// clone's pins. Best-effort bookkeeping — the link itself is done.
+	registerClone(repo, options)
 	return nil
 }
 

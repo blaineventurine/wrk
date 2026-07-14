@@ -291,3 +291,28 @@ else
   _mark_fail; echo "  FAIL: N.3 exclude content wrong:" | tee -a "$TRANSCRIPT"
   sed 's/^/    /' "$EXCLUDE" | tee -a "$TRANSCRIPT"
 fi
+
+subsec "N.4: a bare * glob never sweeps repository infrastructure"
+D=$SCRATCH/N4
+mkrepo git "$D"
+cat > "$D/.wrk.yml" <<'YAML'
+resources:
+  - name: everything
+    path: "*"
+YAML
+printf 'demo\n' > "$D/README.md"
+( cd "$D" && git add -A && git commit -q -m init )
+mkdir -p "$D/legit-dir"
+echo f > "$D/legit-dir/f"
+S=$SCRATCH/storage/N4
+( cd "$D" && expect_exit 0 "$WRK --storage $S link" )
+if [ -d "$D/.git" ] && [ ! -L "$D/.git" ] && [ -f "$D/.wrk.yml" ] && [ ! -L "$D/.wrk.yml" ]; then
+  _mark_pass; echo "  PASS: N.4 .git and .wrk.yml untouched by * glob" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: N.4 infrastructure was swept into management!" | tee -a "$TRANSCRIPT"
+fi
+if [ -L "$D/legit-dir" ]; then
+  _mark_pass; echo "  PASS: N.4 legitimate glob match still managed" | tee -a "$TRANSCRIPT"
+else
+  _mark_fail; echo "  FAIL: N.4 legit match not managed" | tee -a "$TRANSCRIPT"
+fi
