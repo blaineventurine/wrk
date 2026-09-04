@@ -48,29 +48,60 @@ func (jjBackend) createWorkspace(root, dest, base string, stdout io.Writer) erro
 }
 
 func (jjBackend) workspaces(root string) ([]string, error) {
-	// One process, canonical paths, no name parsing. `self.root()`
-	// is the WorkspaceRef method that returns the workspace root
-	// path; on jj too old to know it, this call fails loudly rather
-	// than silently falling back to the old per-workspace shell-out.
-	out, err := capture(
-		root,
-		"jj", "workspace", "list",
-		"--template", `self.root() ++ "\n"`,
-	)
+	entries, err := listJJWorkspaces(root)
 	if err != nil {
 		return nil, err
 	}
+	return resolveJJWorkspacePaths(root, entries)
+}
 
-	var paths []string
+// resolveJJWorkspacePaths converts jj's workspace listing into roots without
+// silently dropping legacy workspaces created before jj 0.38, whose root is
+// unset. The invoking root identifies one such entry when it is the only
+// unresolved workspace. Any unresolved sibling is an error: omitting it could
+// make callers such as gc delete resources that sibling still references.
+func resolveJJWorkspacePaths(root string, entries []jjWorkspaceEntry) ([]string, error) {
+	currentRoot := canonicalize(root)
+	currentRecorded := false
+	var unresolved []int
 
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for i := range entries {
+		if entries[i].path == "" {
+			unresolved = append(unresolved, i)
 			continue
 		}
-		paths = append(paths, line)
+		entries[i].path = canonicalize(entries[i].path)
+		if entries[i].path == currentRoot {
+			currentRecorded = true
+		}
 	}
 
+	if !currentRecorded {
+		if len(unresolved) != 1 {
+			return nil, fmt.Errorf(
+				"could not identify the current jj workspace root; %d workspaces have no recorded root",
+				len(unresolved),
+			)
+		}
+		entries[unresolved[0]].path = currentRoot
+		unresolved = nil
+	}
+
+	if len(unresolved) > 0 {
+		names := make([]string, 0, len(unresolved))
+		for _, i := range unresolved {
+			names = append(names, entries[i].name)
+		}
+		return nil, fmt.Errorf(
+			"jj workspace(s) %s have no recorded root; run wrk from each legacy workspace or recreate it with the current jj version",
+			strings.Join(names, ", "),
+		)
+	}
+
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		paths = append(paths, entry.path)
+	}
 	return paths, nil
 }
 
@@ -252,10 +283,48 @@ func listJJWorkspaces(root string) ([]jjWorkspaceEntry, error) {
 		} else {
 			e.path = rootField
 		}
+		if e.path == "" {
+			resolved, resolveErr := capture(
+				root, "jj", "workspace", "root", "--name", name,
+			)
+			unresolvableRoot := ""
+			if resolveErr != nil {
+				unresolvableRoot = parseJJUnresolvableRoot(resolveErr.Error())
+			}
+			switch {
+			case resolveErr == nil:
+				e.path = strings.TrimSpace(resolved)
+			case strings.Contains(resolveErr.Error(), "Workspace has no recorded path:"):
+				// Legacy workspace created before jj 0.38. Leave the
+				// path empty so resolveJJWorkspacePaths can infer the
+				// invoking workspace or fail closed for a sibling.
+			case unresolvableRoot != "":
+				e.path = unresolvableRoot
+				e.ghost = true
+			default:
+				return nil, resolveErr
+			}
+		}
 		entries = append(entries, e)
 	}
 
 	return entries, nil
+}
+
+// parseJJUnresolvableRoot extracts the workspace path from jj 0.44's
+// `workspace root --name` error for a recorded workspace whose directory is
+// gone. jj 0.43 exposed this path through the list template instead.
+func parseJJUnresolvableRoot(s string) string {
+	const prefix = "Cannot resolve absolute workspace path: "
+	start := strings.Index(s, prefix)
+	if start < 0 {
+		return ""
+	}
+	path := s[start+len(prefix):]
+	if end := strings.IndexByte(path, '\n'); end >= 0 {
+		path = path[:end]
+	}
+	return filepath.Clean(strings.TrimSpace(path))
 }
 
 // workspaceIsGhost is true either when jj's template evaluation

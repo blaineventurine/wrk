@@ -208,6 +208,39 @@ func TestJJBackendWorkspacesListsAll(t *testing.T) {
 	}
 }
 
+func TestResolveJJWorkspacePathsRecoversLegacyCurrentWorkspace(t *testing.T) {
+	root := canonPath(t, t.TempDir())
+	secondary := canonPath(t, t.TempDir())
+
+	got, err := resolveJJWorkspacePaths(root, []jjWorkspaceEntry{
+		{name: "default"},
+		{name: "feature", path: secondary},
+	})
+	if err != nil {
+		t.Fatalf("resolveJJWorkspacePaths: %v", err)
+	}
+	want := []string{root, secondary}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveJJWorkspacePaths = %v, want %v", got, want)
+	}
+}
+
+func TestResolveJJWorkspacePathsRefusesUnresolvedSibling(t *testing.T) {
+	root := canonPath(t, t.TempDir())
+
+	got, err := resolveJJWorkspacePaths(root, []jjWorkspaceEntry{
+		{name: "default"},
+		{name: "feature", path: root},
+	})
+	if err == nil {
+		t.Fatalf("resolveJJWorkspacePaths = %v, want error", got)
+	}
+	if !strings.Contains(err.Error(), "default") ||
+		!strings.Contains(err.Error(), "recorded root") {
+		t.Fatalf("error lacks unresolved-workspace guidance: %v", err)
+	}
+}
+
 // TestJJBackendCommonDirColocatedReturnsGitDir pins that commonDir on
 // a colocated repo returns the .git directory — this is what wrk uses
 // for identity hashing and the detach registry, both of which live
