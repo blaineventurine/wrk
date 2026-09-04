@@ -213,6 +213,40 @@ func TestCreateWorkspaceFullFlow(t *testing.T) {
 	}
 }
 
+func TestCreateJJWorkspacePreservesRemoteRepositoryID(t *testing.T) {
+	skipIfNoJJ(t)
+	skipIfNoGit(t)
+	isolateJJConfig(t)
+
+	parent := canonPath(t, t.TempDir())
+	primary := filepath.Join(parent, "main")
+	makeDir(t, primary)
+	initColocatedJJRepo(t, primary)
+
+	cmd := exec.Command(
+		"git", "-C", primary, "remote", "add", "origin",
+		"git@github.com:org/repo.git",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	repo, err := Detect(primary, Auto)
+	if err != nil {
+		t.Fatalf("Detect(primary): %v", err)
+	}
+
+	newRepo, err := repo.CreateWorkspace("feature", "", nil)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	if newRepo.RepositoryID != repo.RepositoryID {
+		t.Fatalf("new jj workspace repository ID = %q, want %q (same repo)",
+			newRepo.RepositoryID, repo.RepositoryID)
+	}
+}
+
 // TestCreateWorkspaceRefusesNesting pins the ResolveDestination guard:
 // asking to create a workspace INSIDE an existing one MUST fail with
 // a message users can act on. Nested worktrees confuse git and jj,

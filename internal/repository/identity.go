@@ -13,7 +13,7 @@ import (
 // github.com/org/repo) so clones on different machines share storage;
 // falls back to a hash of the common git dir under "local/".
 func repositoryID(root, gitDir string) (string, error) {
-	if url := preferredRemoteURL(root); url != "" {
+	if url := preferredRemoteURL(root, gitDir); url != "" {
 		if id := parseRemote(url); id != "" {
 			return id, nil
 		}
@@ -33,28 +33,30 @@ func repositoryID(root, gitDir string) (string, error) {
 // Order: origin, upstream, or the sole configured remote. Multiple
 // non-{origin,upstream} remotes are ambiguous — falling back to the
 // local hash is safer than picking wrong.
-func preferredRemoteURL(root string) string {
+func preferredRemoteURL(root, gitDir string) string {
 	for _, name := range []string{"origin", "upstream"} {
-		if url := remoteURL(root, name); url != "" {
+		if url := remoteURL(root, gitDir, name); url != "" {
 			return url
 		}
 	}
 
-	out, err := capture(root, "git", "remote")
+	out, err := capture(root, "git", "--git-dir", gitDir, "remote")
 	if err != nil {
 		return ""
 	}
 	names := strings.Fields(strings.TrimSpace(out))
 	if len(names) == 1 {
-		return remoteURL(root, names[0])
+		return remoteURL(root, gitDir, names[0])
 	}
 	return ""
 }
 
 // remoteURL returns the fetch URL of the named remote, or "" if the
 // remote is missing or git rejected the query.
-func remoteURL(root, name string) string {
-	out, err := capture(root, "git", "remote", "get-url", name)
+func remoteURL(root, gitDir, name string) string {
+	out, err := capture(
+		root, "git", "--git-dir", gitDir, "remote", "get-url", name,
+	)
 	if err != nil {
 		return ""
 	}

@@ -138,7 +138,7 @@ func TestPreferredRemoteFallbacks(t *testing.T) {
 		root := initRepo(t, map[string]string{
 			"upstream": "https://github.com/org/upstream-repo.git",
 		})
-		if got := preferredRemoteURL(root); got != "https://github.com/org/upstream-repo.git" {
+		if got := preferredRemoteURL(root, filepath.Join(root, ".git")); got != "https://github.com/org/upstream-repo.git" {
 			t.Fatalf("preferredRemoteURL = %q, want upstream URL", got)
 		}
 	})
@@ -148,7 +148,7 @@ func TestPreferredRemoteFallbacks(t *testing.T) {
 			"origin":   "https://github.com/org/origin-repo.git",
 			"upstream": "https://github.com/org/upstream-repo.git",
 		})
-		if got := preferredRemoteURL(root); got != "https://github.com/org/origin-repo.git" {
+		if got := preferredRemoteURL(root, filepath.Join(root, ".git")); got != "https://github.com/org/origin-repo.git" {
 			t.Fatalf("preferredRemoteURL = %q, want origin URL", got)
 		}
 	})
@@ -157,7 +157,7 @@ func TestPreferredRemoteFallbacks(t *testing.T) {
 		root := initRepo(t, map[string]string{
 			"gh": "https://github.com/org/only-remote.git",
 		})
-		if got := preferredRemoteURL(root); got != "https://github.com/org/only-remote.git" {
+		if got := preferredRemoteURL(root, filepath.Join(root, ".git")); got != "https://github.com/org/only-remote.git" {
 			t.Fatalf("preferredRemoteURL = %q, want gh URL", got)
 		}
 	})
@@ -167,14 +167,14 @@ func TestPreferredRemoteFallbacks(t *testing.T) {
 			"gh": "https://github.com/org/one.git",
 			"gl": "https://gitlab.com/org/two.git",
 		})
-		if got := preferredRemoteURL(root); got != "" {
+		if got := preferredRemoteURL(root, filepath.Join(root, ".git")); got != "" {
 			t.Fatalf("preferredRemoteURL = %q, want empty (ambiguous)", got)
 		}
 	})
 
 	t.Run("no remotes at all gives up", func(t *testing.T) {
 		root := initRepo(t, nil)
-		if got := preferredRemoteURL(root); got != "" {
+		if got := preferredRemoteURL(root, filepath.Join(root, ".git")); got != "" {
 			t.Fatalf("preferredRemoteURL = %q, want empty", got)
 		}
 	})
