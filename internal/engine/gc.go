@@ -46,6 +46,12 @@ func scanVariants(repo *repository.Repository, options Options) ([]variant, erro
 	var variants []variant
 
 	for _, resource := range cfg.Resources {
+		// Group variants contain multiple outputs and must be collected as
+		// an atomic unit. Until the group-aware collector can prove no peer
+		// workspace pins a variant, retain them rather than risk data loss.
+		if resource.Grouped() {
+			continue
+		}
 		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err

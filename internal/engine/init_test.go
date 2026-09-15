@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -209,6 +210,17 @@ func TestInitMonorepoDetected(t *testing.T) {
 	if !strings.Contains(string(content), "packages/*") {
 		t.Errorf("expected workspace patterns in output, got:\n%s", content)
 	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("generated config is invalid: %v\n%s", err, content)
+	}
+	if len(cfg.Resources) != 1 || !cfg.Resources[0].Grouped() {
+		t.Fatalf("generated resources = %+v, want one grouped resource", cfg.Resources)
+	}
+	wantPaths := []string{"node_modules", "packages/*/node_modules", "apps/*/node_modules"}
+	if !reflect.DeepEqual(cfg.Resources[0].Paths, wantPaths) {
+		t.Fatalf("generated paths = %v, want %v", cfg.Resources[0].Paths, wantPaths)
+	}
 }
 
 func TestInitMultipleDetections(t *testing.T) {
@@ -387,12 +399,23 @@ func TestDetectMonorepoWorkspaces(t *testing.T) {
 		kinds = append(kinds, d.kind)
 	}
 
-	// Expect both node-yarn and node-monorepo.
-	if !containsStr(kinds, "node-yarn") {
-		t.Errorf("expected node-yarn in %v", kinds)
+	// A Yarn monorepo must be one grouped resource: independent resources
+	// cannot safely share the side effects of a single yarn install.
+	if containsStr(kinds, "node-yarn") {
+		t.Errorf("unexpected standalone node-yarn in %v", kinds)
 	}
 	if !containsStr(kinds, "node-monorepo") {
 		t.Errorf("expected node-monorepo in %v", kinds)
+	}
+}
+
+func TestDetectNonYarnMonorepoKeepsItsPackageManager(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"workspaces":["packages/*"]}`)
+	touch(t, filepath.Join(dir, "pnpm-lock.yaml"))
+	got := detect(dir)
+	if len(got) != 1 || got[0].kind != "node-pnpm" {
+		t.Fatalf("detect = %+v, want node-pnpm only", got)
 	}
 }
 

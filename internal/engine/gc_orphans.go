@@ -71,6 +71,9 @@ func detectOrphanedStorage(
 	}
 
 	protected := make(map[string]bool)
+	// Internal v2 storage contains grouped resources. Group variants are
+	// swept as units, never as legacy orphaned resource paths.
+	protected[".wrk"] = true
 
 	for _, root := range liveRoots {
 		cfg, err := config.Load(root)
@@ -81,6 +84,9 @@ func detectOrphanedStorage(
 			)}, nil
 		}
 		for _, resource := range cfg.Resources {
+			if resource.Grouped() {
+				continue
+			}
 			instances, err := resolver.ResolveWithStorage(
 				root, storageRoot, resource,
 			)

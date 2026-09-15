@@ -36,7 +36,7 @@ func TestInitSnippetsRoundTripThroughConfigLoad(t *testing.T) {
 		{"monorepo", map[string]string{
 			"package.json": `{"name":"m","workspaces":["packages/*","apps/*"]}`,
 			"yarn.lock":    "",
-		}, []string{"node", "node-workspaces"}},
+		}, []string{"node"}},
 	}
 
 	for _, s := range scenarios {

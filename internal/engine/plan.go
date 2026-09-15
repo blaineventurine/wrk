@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/location"
@@ -29,8 +32,6 @@ type resourcePlanner func(
 
 // buildPlan walks every configured resource, resolves it into concrete
 // instances, and applies build to each one.
-// buildPlan walks every configured resource, resolves it into concrete
-// instances, and applies build to each one.
 //
 // prepare, if non-nil, runs once after the config is loaded and before any
 // planning (used by link to update repository ignore rules).
@@ -39,6 +40,7 @@ func buildPlan(
 	options Options,
 	prepare func(cfg *config.Config) error,
 	build resourcePlanner,
+	initializeGroups bool,
 ) (planner.Plan, error) {
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
@@ -61,6 +63,77 @@ func buildPlan(
 
 	var plan planner.Plan
 	for _, resource := range cfg.Resources {
+		if resource.Grouped() {
+			instances, err := resolver.ResolveGroup(repo.Root, filepath.Join(storageRepoRoot(repo, options), ".wrk", "groups", resource.Name), resource)
+			if err != nil {
+				return planner.Plan{}, err
+			}
+			if len(instances) == 0 {
+				return planner.Plan{}, fmt.Errorf("grouped resource %q resolved to no paths", resource.Name)
+			}
+			loc, err := location.ForGroup(options.StorageRoot, repo.RepositoryID, resource.Name, repo.Root, instances[0].FingerprintInputs)
+			if err != nil {
+				return planner.Plan{}, err
+			}
+			if !initializeGroups {
+				for _, instance := range instances {
+					shared := filepath.Join(loc.Path, filepath.FromSlash(instance.RelativePath))
+					state, err := workspace.Inspect(instance.WorkspacePath, shared)
+					if err != nil {
+						return planner.Plan{}, err
+					}
+					plan.AddResourcePlan(build(instance, location.SharedLocation{Path: shared, Fingerprint: loc.Fingerprint}, state))
+				}
+				continue
+			}
+			group := planner.InitializeGroup{Description: "Initialize " + resource.Name, Name: resource.Name, Root: repo.Root, Shared: loc.Path, Commands: resource.Hooks["initialize"]}
+			allLinked := true
+			for _, instance := range instances {
+				final := filepath.Join(loc.Path, filepath.FromSlash(instance.RelativePath))
+				state, err := workspace.Inspect(instance.WorkspacePath, final)
+				if err != nil {
+					return planner.Plan{}, err
+				}
+				if state.WorkspaceSymlink && state.WorkspaceLinkText == final && state.SharedExists {
+					continue
+				}
+				allLinked = false
+				if state.WorkspaceSymlink {
+					rel, err := filepath.Rel(storageRepoRoot(repo, options), state.WorkspaceLinkText)
+					if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						var rp planner.ResourcePlan
+						rp.AddConflict(instance, "workspace path is a user-managed symlink")
+						plan.AddResourcePlan(rp)
+						continue
+					}
+				}
+				if state.WorkspaceExists {
+					var rp planner.ResourcePlan
+					rp.AddConflict(instance, "group output has an independent local copy")
+					plan.AddResourcePlan(rp)
+					continue
+				}
+				group.Outputs = append(group.Outputs, planner.GroupOutput{
+					WorkspacePath: instance.WorkspacePath,
+					RelativePath:  instance.RelativePath,
+					ExpectedLink:  state.WorkspaceLinkText,
+					ExpectedEmpty: !state.WorkspaceSymlink,
+				})
+			}
+			if allLinked {
+				continue
+			}
+			if _, err := os.Stat(loc.Path); os.IsNotExist(err) && len(group.Commands) == 0 {
+				var rp planner.ResourcePlan
+				rp.AddConflict(instances[0], "shared resource does not exist and no initialize hook is configured")
+				plan.AddResourcePlan(rp)
+				continue
+			}
+			var rp planner.ResourcePlan
+			rp.AddAction(instances[0], group)
+			plan.AddResourcePlan(rp)
+			continue
+		}
 		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return planner.Plan{}, err
@@ -118,7 +191,11 @@ func ignorePreparer(repo *repository.Repository) func(*config.Config) error {
 			"*.wrk-lock",
 		}
 		for _, r := range cfg.Resources {
-			paths = append(paths, r.Path)
+			if r.Grouped() {
+				paths = append(paths, r.Paths...)
+			} else {
+				paths = append(paths, r.Path)
+			}
 		}
 		return repo.Prepare(paths...)
 	}

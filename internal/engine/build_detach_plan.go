@@ -16,6 +16,7 @@ func BuildDetachPlan(
 		options,
 		nil, // detach never modifies ignore rules
 		planner.BuildDetach,
+		false,
 	)
 	if err != nil {
 		return plan, err

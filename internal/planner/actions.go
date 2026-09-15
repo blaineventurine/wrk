@@ -50,6 +50,24 @@ type InitializeResource struct {
 
 func (InitializeResource) isAction() {}
 
+type GroupOutput struct {
+	WorkspacePath string
+	RelativePath  string
+	ExpectedLink  string
+	ExpectedEmpty bool
+}
+
+type InitializeGroup struct {
+	Description string
+	Name        string
+	Root        string
+	Shared      string
+	Outputs     []GroupOutput
+	Commands    []config.Command
+}
+
+func (InitializeGroup) isAction() {}
+
 type Detach struct {
 	// Link is the path currently containing the symlink.
 	Link string

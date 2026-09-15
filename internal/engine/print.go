@@ -135,6 +135,8 @@ func describeAction(action planner.Action) (string, bool) {
 		return fmt.Sprintf("replace symlink %s with an independent copy", a.Link), false
 	case planner.InitializeResource:
 		return a.Description, false
+	case planner.InitializeGroup:
+		return a.Description, false
 	case planner.Remove:
 		// A Remove of a symlink is harmless (relinking); a Remove of a real
 		// file/dir discards independent local content.

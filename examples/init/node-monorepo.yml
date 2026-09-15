@@ -1,16 +1,15 @@
-# Workspace monorepo detected. Each package's node_modules is
-# managed independently using a glob pattern.
-#
-# Adjust the 'path' globs below to match your workspace layout.
-# Each match becomes a separate shared resource with its own fingerprint.
-- name: node-workspaces
-  path: "*/node_modules"
+# Workspace monorepo detected. All node_modules directories are managed as
+# one unit because a single install writes them together.
+- name: node
+  paths:
+    - node_modules
+{{.Paths}}
   fingerprint:
-    - "{parent}/package.json"
+    - "{root}/package.json"
     - "{root}/yarn.lock"
+    - "{root}/.yarnrc.yml"
+{{.Fingerprints}}
   hooks:
     initialize:
       - run: yarn install --frozen-lockfile
         cwd: "{root}"
-#
-# Detected workspace patterns: {{.Patterns}}

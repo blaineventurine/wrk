@@ -55,6 +55,28 @@ func List(
 	var listings []ResourceListing
 
 	for _, resource := range cfg.Resources {
+		if resource.Grouped() {
+			instances, err := resolver.ResolveGroup(repo.Root, filepath.Join(storageRepoRoot(repo, options), ".wrk", "groups", resource.Name), resource)
+			if err != nil {
+				return nil, err
+			}
+			if len(instances) == 0 {
+				continue
+			}
+			loc, err := location.ForGroup(options.StorageRoot, repo.RepositoryID, resource.Name, repo.Root, instances[0].FingerprintInputs)
+			if err != nil {
+				return nil, err
+			}
+			for _, instance := range instances {
+				shared := filepath.Join(loc.Path, filepath.FromSlash(instance.RelativePath))
+				listing := ResourceListing{Resource: resource.Name, Path: instance.RelativePath, Fingerprinted: len(resource.Fingerprint) > 0, SharedPath: shared, Variants: countVariants(filepath.Dir(loc.Path), len(resource.Fingerprint) > 0), Size: -1, Origin: resource.Origin}
+				if withSize {
+					listing.Size, _ = treeSize(shared)
+				}
+				listings = append(listings, listing)
+			}
+			continue
+		}
 		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err

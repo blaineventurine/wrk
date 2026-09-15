@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"path/filepath"
+
 	"github.com/blaineventurine/wrk/internal/config"
 	"github.com/blaineventurine/wrk/internal/location"
 	"github.com/blaineventurine/wrk/internal/repository"
@@ -68,6 +70,32 @@ func Status(
 	report := &StatusReport{Sources: cfg.Sources}
 
 	for _, resource := range cfg.Resources {
+		if resource.Grouped() {
+			instances, err := resolver.ResolveGroup(repo.Root, filepath.Join(storageRepoRoot(repo, options), ".wrk", "groups", resource.Name), resource)
+			if err != nil {
+				return nil, err
+			}
+			if len(instances) == 0 {
+				continue
+			}
+			loc, err := location.ForGroup(options.StorageRoot, repo.RepositoryID, resource.Name, repo.Root, instances[0].FingerprintInputs)
+			if err != nil {
+				return nil, err
+			}
+			for _, instance := range instances {
+				shared := filepath.Join(loc.Path, filepath.FromSlash(instance.RelativePath))
+				state, err := workspace.Inspect(instance.WorkspacePath, shared)
+				if err != nil {
+					return nil, err
+				}
+				derived := deriveState(instance, location.SharedLocation{Path: shared, Fingerprint: loc.Fingerprint}, state)
+				if derived == StateConflict && isDetached(reg, repo.Root, instance.RelativePath) {
+					derived = StateDetached
+				}
+				report.Rows = append(report.Rows, ResourceStatus{WorkspaceRoot: repo.Root, Resource: resource.Name, Path: instance.RelativePath, SharedPath: shared, Fingerprint: loc.Fingerprint, State: derived, Origin: resource.Origin})
+			}
+			continue
+		}
 		instances, err := resolver.ResolveWithStorage(repo.Root, storageRepoRoot(repo, options), resource)
 		if err != nil {
 			return nil, err

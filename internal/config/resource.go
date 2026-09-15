@@ -4,6 +4,7 @@ package config
 type Resource struct {
 	Name        string               `yaml:"name"`
 	Path        string               `yaml:"path"`
+	Paths       []string             `yaml:"paths,omitempty"`
 	Fingerprint []string             `yaml:"fingerprint,omitempty"`
 	Hooks       map[string][]Command `yaml:"hooks,omitempty"`
 	Create      *bool                `yaml:"create,omitempty"`
@@ -12,6 +13,9 @@ type Resource struct {
 	Origin      Origin `yaml:"-"`
 	sourceIndex int
 }
+
+// Grouped reports whether the resource manages multiple paths as one unit.
+func (r Resource) Grouped() bool { return r.Paths != nil }
 
 // ShouldCreate reports whether the resource should be created if it does
 // not already exist.

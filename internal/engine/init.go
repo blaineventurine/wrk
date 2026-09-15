@@ -117,7 +117,12 @@ func detect(root string) []detection {
 		results = append(results, detection{"env"})
 	}
 
+	var workspacePatterns []string
 	if has("package.json") {
+		workspacePatterns = packageJSONWorkspaces(filepath.Join(root, "package.json"))
+	}
+	yarnMonorepo := len(workspacePatterns) > 0 && has("yarn.lock")
+	if has("package.json") && !yarnMonorepo {
 		switch {
 		case has("yarn.lock"):
 			results = append(results, detection{"node-yarn"})
@@ -151,12 +156,10 @@ func detect(root string) []detection {
 		results = append(results, detection{"cargo-commented"})
 	}
 
-	// Monorepo: detect workspace layout from package.json "workspaces"
-	// field and add a glob-based resource.
-	if has("package.json") {
-		if ws := packageJSONWorkspaces(filepath.Join(root, "package.json")); len(ws) > 0 {
-			results = append(results, detection{"node-monorepo"})
-		}
+	// A Yarn workspace install writes every node_modules tree in one pass,
+	// so detect it as one grouped resource rather than independent outputs.
+	if yarnMonorepo {
+		results = append(results, detection{"node-monorepo"})
 	}
 
 	return results
@@ -278,8 +281,16 @@ func snippetFor(root string, d detection) string {
 
 	if d.kind == "node-monorepo" {
 		patterns := packageJSONWorkspaces(filepath.Join(root, "package.json"))
+		var paths strings.Builder
+		var fingerprints strings.Builder
+		for _, pattern := range patterns {
+			pattern = strings.TrimSuffix(pattern, "/")
+			fmt.Fprintf(&paths, "    - %q\n", pattern+"/node_modules")
+			fmt.Fprintf(&fingerprints, "    - %q\n", "{root}/"+pattern+"/package.json")
+		}
 		return loadSnippet(name, map[string]string{
-			"Patterns": strings.Join(patterns, ", "),
+			"Paths":        strings.TrimSuffix(paths.String(), "\n"),
+			"Fingerprints": strings.TrimSuffix(fingerprints.String(), "\n"),
 		})
 	}
 

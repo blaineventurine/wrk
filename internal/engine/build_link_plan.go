@@ -10,7 +10,7 @@ func BuildLinkPlan(
 	repo *repository.Repository,
 	options Options,
 ) (planner.Plan, error) {
-	plan, err := buildPlan(repo, options, ignorePreparer(repo), planner.BuildLink)
+	plan, err := buildPlan(repo, options, ignorePreparer(repo), planner.BuildLink, true)
 	if err != nil {
 		return plan, err
 	}

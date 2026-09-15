@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -141,6 +142,7 @@ func DisallowedResourcePath(clean string) error {
 // Names must also be unique across the merged configuration.
 func validate(cfg *Config) error {
 	seen := make(map[string]bool, len(cfg.Resources))
+	groupName := regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 	for _, r := range cfg.Resources {
 		context := resourceContext(r)
@@ -160,40 +162,49 @@ func validate(cfg *Config) error {
 		}
 		seen[r.Name] = true
 
-		if r.Path == "" {
+		if r.Path == "" && r.Paths == nil {
 			return fmt.Errorf("%s: path is required", context)
 		}
-
-		clean := filepath.Clean(r.Path)
-
-		if filepath.IsAbs(clean) {
-			return fmt.Errorf(
-				"%s: path %q must be repository-relative, not absolute",
-				context, r.Path,
-			)
+		if r.Path != "" && r.Paths != nil {
+			return fmt.Errorf("%s: exactly one of path or paths is required", context)
+		}
+		if r.Grouped() && len(r.Paths) == 0 {
+			return fmt.Errorf("%s: paths must not be empty", context)
+		}
+		if r.Grouped() && !groupName.MatchString(r.Name) {
+			return fmt.Errorf("%s: group name may contain only letters, digits, '.', '_', and '-'", context)
+		}
+		if r.Grouped() {
+			for _, input := range r.Fingerprint {
+				if strings.Contains(input, "{parent}") || strings.Contains(input, "{match}") || strings.Contains(input, "{shared}") {
+					return fmt.Errorf("%s: grouped fingerprints may use only {root} placeholders", context)
+				}
+			}
 		}
 
-		if clean == "." {
-			return fmt.Errorf(
-				"%s: path %q refers to the repository root; wrk will not "+
-					"manage the repository itself",
-				context, r.Path,
-			)
+		paths := r.Paths
+		if !r.Grouped() {
+			paths = []string{r.Path}
 		}
-
-		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-			return fmt.Errorf(
-				"%s: path %q escapes the repository root",
-				context, r.Path,
-			)
-		}
-
-		// Infrastructure and reserved-suffix rules are shared with the
-		// resolver's glob-expansion filter — one definition, two
-		// enforcement points (literal paths here, expanded matches
-		// there).
-		if err := DisallowedResourcePath(clean); err != nil {
-			return fmt.Errorf("%s: %v", context, err)
+		seenPaths := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			clean := filepath.Clean(path)
+			if seenPaths[clean] {
+				return fmt.Errorf("%s: duplicate path %q", context, path)
+			}
+			seenPaths[clean] = true
+			if filepath.IsAbs(clean) {
+				return fmt.Errorf("%s: path %q must be repository-relative, not absolute", context, path)
+			}
+			if clean == "." {
+				return fmt.Errorf("%s: path %q refers to the repository root; wrk will not manage the repository itself", context, path)
+			}
+			if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("%s: path %q escapes the repository root", context, path)
+			}
+			if err := DisallowedResourcePath(clean); err != nil {
+				return fmt.Errorf("%s: %v", context, err)
+			}
 		}
 	}
 

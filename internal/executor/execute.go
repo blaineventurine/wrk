@@ -104,6 +104,15 @@ func Execute(plan planner.Plan) error {
 			}); err != nil {
 				return err
 			}
+		case planner.InitializeGroup:
+			for _, output := range action.Outputs {
+				if err := ensureContained(plan, output.WorkspacePath); err != nil {
+					return err
+				}
+			}
+			if err := initializeGroup(action); err != nil {
+				return err
+			}
 		case planner.Remove:
 			if err := ensureContained(plan, action.Path); err != nil {
 				return err

@@ -101,6 +101,28 @@ func BuildRelinkPlan(
 
 	var plan planner.Plan
 	for _, resource := range cfg.Resources {
+		if resource.Grouped() {
+			instances, err := resolver.ResolveGroup(repo.Root, filepath.Join(storageRepoRoot(repo, options), ".wrk", "groups", resource.Name), resource)
+			if err != nil {
+				return RelinkPlan{}, err
+			}
+			if len(instances) == 0 {
+				continue
+			}
+			loc, err := location.ForGroup(options.StorageRoot, repo.RepositoryID, resource.Name, repo.Root, instances[0].FingerprintInputs)
+			if err != nil {
+				return RelinkPlan{}, err
+			}
+			for _, instance := range instances {
+				shared := filepath.Join(loc.Path, filepath.FromSlash(instance.RelativePath))
+				state, err := workspace.Inspect(instance.WorkspacePath, shared)
+				if err != nil {
+					return RelinkPlan{}, err
+				}
+				plan.AddResourcePlan(planner.BuildRelink(instance, location.SharedLocation{Path: shared, Fingerprint: loc.Fingerprint}, state))
+			}
+			continue
+		}
 		instances, err := resolver.ResolveWithStorage(
 			repo.Root, storageRepoRoot(repo, options), resource,
 		)
